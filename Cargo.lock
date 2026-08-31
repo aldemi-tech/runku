@@ -3192,7 +3192,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hmac 0.13.0",
  "runku-core",
  "runku-development",
@@ -3330,7 +3330,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hmac 0.13.0",
  "jsonwebtoken",
  "rand 0.8.8",
@@ -3386,7 +3386,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "reqwest",
  "runku-compatibility",
  "runku-core",

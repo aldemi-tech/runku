@@ -54,7 +54,7 @@ deno_core = "=0.410.0"
 deno_ast = { version = "=0.53.3", features = ["transpiling"] }
 swc_ecma_transforms_module = "=33.0.0"
 deno_error = "=0.7.1"
-getrandom = "=0.3.4"
+getrandom = "=0.4.3"
 hmac = "=0.13.0"
 ipnet = "=2.12.1"
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["rust_crypto"] }
