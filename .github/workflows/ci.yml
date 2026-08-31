@@ -8,16 +8,23 @@ on:
 permissions:
   contents: read
 
+env:
+  # V8 plus every workspace test target exceeds the hosted runner disk budget when Rust keeps
+  # incremental state and full debug symbols. CI does not consume either artifact.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.18.1
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20.18.1
           cache: pnpm
