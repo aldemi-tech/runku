@@ -3333,7 +3333,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac 0.13.0",
  "jsonwebtoken",
- "rand 0.8.8",
+ "rand 0.10.2",
  "rsa",
  "runku-core",
  "runku-releases",
@@ -3354,7 +3354,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "jsonwebtoken",
- "rand 0.8.8",
+ "rand 0.10.2",
  "reqwest",
  "rsa",
  "runku-identity",

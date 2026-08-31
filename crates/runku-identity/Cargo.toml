@@ -26,7 +26,7 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-rand = "=0.8.8"
+rand = "=0.10.2"
 rsa = "=0.9.10"
 tokio = { workspace = true, features = ["macros", "rt"] }
 
