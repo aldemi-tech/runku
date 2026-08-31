@@ -233,6 +233,22 @@ struct Vertical {
     shutdown: watch::Sender<bool>,
 }
 
+async fn wait_for_agent_settled(
+    agent: &ExecutionAgent,
+    expected_completed: u64,
+) -> Result<runku_execution_queue::ExecutionAgentTelemetrySnapshot, tokio::time::error::Elapsed> {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let telemetry = agent.telemetry();
+            if telemetry.completed == expected_completed && telemetry.active_executions == 0 {
+                return telemetry;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+}
+
 fn vertical(fixture: &Fixture) -> Result<Vertical, Box<dyn Error>> {
     let queue = Arc::new(InMemoryExecutionQueue::new(32)?);
     let control: Arc<dyn ExecutionControlPlane> =
@@ -379,18 +395,29 @@ async fn queued_gateway_agent_executes_real_node_and_returns_durable_result()
             "ae57fe8872aa84461538f8ed7c54dd3eb8f7bdd2398744aef598287746259bc9".to_owned()
         )
     );
-    assert_eq!(vertical.agent.telemetry().completed, 1);
-    let spans = vertical.performance.snapshot();
-    for component in [
+    let telemetry = wait_for_agent_settled(&vertical.agent, 1).await?;
+    assert_eq!(telemetry.completed, 1);
+    let expected_components = [
         PerformanceComponent::Gateway,
         PerformanceComponent::Queue,
         PerformanceComponent::Agent,
         PerformanceComponent::ReleaseRepository,
         PerformanceComponent::ArtifactStore,
         PerformanceComponent::NodeProcess,
-    ] {
-        assert!(spans.iter().any(|span| span.component == component));
-    }
+    ];
+    let spans = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let spans = vertical.performance.snapshot();
+            if expected_components
+                .iter()
+                .all(|component| spans.iter().any(|span| span.component == *component))
+            {
+                return spans;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
     assert!(
         spans
             .iter()
@@ -429,7 +456,7 @@ async fn queued_gateway_never_crosses_heterogeneous_results_under_load()
         let (expected, result) = joined?;
         assert_eq!(result?.value, expected);
     }
-    let telemetry = vertical.agent.telemetry();
+    let telemetry = wait_for_agent_settled(&vertical.agent, 24).await?;
     assert_eq!(telemetry.completed, 24);
     assert_eq!(telemetry.active_executions, 0);
     assert_eq!(telemetry.peak_concurrent_executions, 4);
