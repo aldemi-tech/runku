@@ -1,0 +1,20 @@
+{
+  "name": "runku-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.18.1",
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "scripts": {
+    "check:packages": "pnpm --filter @runku/client check && pnpm --filter @runku/server check",
+    "check:examples": "pnpm --filter @runku/example-chat-next check && pnpm --filter @runku/example-node-actions check"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "unrs-resolver"
+    ]
+  }
+}

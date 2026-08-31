@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "valid": [
+    { "name": "null", "values": [{ "type": "null" }], "encoded_hex": "524b0110" },
+    { "name": "false", "values": [{ "type": "boolean", "value": false }], "encoded_hex": "524b0120" },
+    { "name": "true", "values": [{ "type": "boolean", "value": true }], "encoded_hex": "524b0121" },
+    { "name": "int64-negative-one", "values": [{ "type": "int64", "value": "-1" }], "encoded_hex": "524b01307fffffffffffffff" },
+    { "name": "int64-zero", "values": [{ "type": "int64", "value": "0" }], "encoded_hex": "524b01308000000000000000" },
+    { "name": "float64-negative-one", "values": [{ "type": "float64", "value": -1.0 }], "encoded_hex": "524b0131400fffffffffffff" },
+    { "name": "float64-zero", "values": [{ "type": "float64", "value": 0.0 }], "encoded_hex": "524b01318000000000000000" },
+    { "name": "timestamp-negative-one", "values": [{ "type": "timestamp", "microseconds": "-1" }], "encoded_hex": "524b01407fffffffffffffff" },
+    { "name": "string", "values": [{ "type": "string", "value": "a" }], "encoded_hex": "524b0150610000" },
+    { "name": "string-with-zero", "values": [{ "type": "string", "value": "\u0000" }], "encoded_hex": "524b015000ff0000" },
+    { "name": "bytes-with-zero", "values": [{ "type": "bytes", "hex": "00ff" }], "encoded_hex": "524b016000ffff0000" },
+    { "name": "typed-id", "values": [{ "type": "typed_id", "value": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV" }], "encoded_hex": "524b017072656c5f303141525a334e44454b545356345252464651363947354641560000" },
+    { "name": "compound", "values": [{ "type": "int64", "value": "42" }, { "type": "string", "value": "team" }], "encoded_hex": "524b0130800000000000002a507465616d0000" }
+  ],
+  "invalid_hex": [
+    "",
+    "585b0110",
+    "524b0210",
+    "524b01",
+    "524b01ff",
+    "524b0130",
+    "524b01500001",
+    "524b01317fffffffffffffff",
+    "524b0131fff0000000000000",
+    "524b01101010101010101010101010101010101010"
+  ]
+}

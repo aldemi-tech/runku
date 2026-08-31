@@ -1,0 +1,63 @@
+# Conformance manifest, not a production deployment. See deployments/kubernetes/README.md.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__
+  namespace: runku-fc-scale
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: gateway-load
+          image: runku/firecracker-scale-benchmark:20260830
+          imagePullPolicy: Never
+          command:
+            - /opt/runku/assets/performance_benchmark
+            - --exact
+            - kubernetes_distributed_gateway_load
+            - --nocapture
+          resources:
+            requests:
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          env:
+            - name: RUNKU_KUBERNETES_GATEWAY_BENCHMARK
+              value: "1"
+            - name: RUNKU_BENCH_SHARED_SCOPE
+              value: K8S_AGENT_POOL_20260830
+            - name: RUNKU_BENCH_CONCURRENCY
+              value: "__SLOTS__"
+            - name: RUNKU_BENCH_ITERATIONS
+              value: "20"
+            - name: RUNKU_BENCH_WARMUPS
+              value: "5"
+            - name: RUNKU_BENCH_CONCURRENT_REQUESTS
+              value: "__REQUESTS__"
+            - name: RUNKU_BENCH_ROUTING_REQUESTS
+              value: "__ROUTING_REQUESTS__"
+            - name: RUNKU_BENCH_OPEN_LOOP_RPS
+              value: "__OPEN_LOOP_RPS__"
+            - name: RUNKU_BENCH_OPEN_LOOP_DURATION_SECS
+              value: "__OPEN_LOOP_DURATION__"
+            - name: RUNKU_BENCH_REQUEST_TIMEOUT_SECS
+              value: "120"
+            - name: RUNKU_BENCH_OCI_IMAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: runku-firecracker-image
+                  key: reference
+            - name: RUNKU_TEST_NATS_URL
+              value: nats://nats.runku-fc-scale.svc.cluster.local:4222
+            - name: RUNKU_TEST_S3_ENDPOINT
+              value: http://minio.runku-fc-scale.svc.cluster.local:9000
+            - name: RUNKU_TEST_S3_BUCKET
+              value: runku-artifacts
+            - name: RUNKU_TEST_S3_ACCESS_KEY
+              value: runku_test
+            - name: RUNKU_TEST_S3_SECRET_KEY
+              value: runku_test_secret

@@ -1,0 +1,14 @@
+command=make runtime-benchmark
+profile=release
+runtime=platform-js-1
+engine=deno_core-0.410.0/v8-150.4.0
+policy=isolate-per-invocation
+workers=2
+supervisor_start_micros=2254
+first_invoke_micros=12611
+sync_invocations=100
+sync_100_total_micros=270251
+async_invocations=100
+async_100_total_micros=263432
+timeouts=10
+timeout_10_total_micros=61985

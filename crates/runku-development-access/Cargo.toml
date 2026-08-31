@@ -1,0 +1,31 @@
+[package]
+name = "runku-development-access"
+version = "0.1.0"
+description = "Actor-bound Development Access keyring and durable repository for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+runku-core = { path = "../runku-core" }
+runku-development = { path = "../runku-development" }
+runku-value = { path = "../runku-value" }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["any", "postgres", "sqlite-bundled", "runtime-tokio", "tls-rustls"] }
+subtle = "=2.6.1"
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+ulid.workspace = true
+
+[lints]
+workspace = true

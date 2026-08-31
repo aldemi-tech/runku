@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "providerId": "better-auth-local",
+  "discoveryUrl": "http://127.0.0.1:3000/api/auth/.well-known/openid-configuration",
+  "allowedOrigin": "http://127.0.0.1:3000",
+  "issuer": "https://chat.local.runku",
+  "audiences": ["runku-chat-local"],
+  "profile": "user",
+  "requiredType": null,
+  "discriminatorClaim": "token_use",
+  "discriminatorValue": "user",
+  "algorithms": ["EdDSA"],
+  "baseScopes": ["function:invoke"],
+  "maxTokenTtlSeconds": 900,
+  "futureClockSkewSeconds": 30,
+  "mappingRevision": 1,
+  "defaultCacheTtlSeconds": 30,
+  "maxCacheTtlSeconds": 300,
+  "requestTimeoutMillis": 2000,
+  "unknownKidCooldownSeconds": 5
+}

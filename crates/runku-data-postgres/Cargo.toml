@@ -1,0 +1,25 @@
+[package]
+name = "runku-data-postgres"
+version = "0.1.0"
+description = "Authoritative PostgreSQL LogicalStore adapter for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-data = { path = "../runku-data" }
+runku-value = { path = "../runku-value" }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+
+[dev-dependencies]
+runku-data-conformance = { path = "../runku-data-conformance" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+ulid.workspace = true
+
+[lints]
+workspace = true

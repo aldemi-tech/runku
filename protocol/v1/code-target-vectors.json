@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "valid": [
+    {
+      "wire": "release:rel_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "kind": "release"
+    },
+    {
+      "wire": "channel:stable",
+      "kind": "channel"
+    },
+    {
+      "wire": "workspace:dev/manuel/bug-241",
+      "kind": "workspace"
+    }
+  ],
+  "invalid": [
+    "",
+    "latest",
+    "release:latest",
+    "channel:Stable",
+    "channel:preview/main",
+    "workspace:",
+    "workspace:/dev",
+    "workspace:dev/",
+    "workspace:dev//manuel",
+    "workspace:dev/../production",
+    "unknown:value"
+  ]
+}

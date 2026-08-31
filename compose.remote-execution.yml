@@ -1,0 +1,34 @@
+# Development/conformance dependencies only. See deployments/docker/README.md.
+services:
+  nats:
+    image: nats@sha256:71092f77d707a4a81b12aca5096d6b2d2e07ad16aa57c84066940a17af74f61a
+    command: ["-js", "-sd", "/data"]
+    ports:
+      - "127.0.0.1:${RUNKU_NATS_PORT:-54222}:4222"
+    volumes:
+      - nats-data:/data
+
+  minio:
+    image: minio/minio@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: runku_test
+      MINIO_ROOT_PASSWORD: runku_test_secret
+    ports:
+      - "127.0.0.1:${RUNKU_MINIO_PORT:-59000}:9000"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc@sha256:fb8f773eac8ef9d6da0486d5dec2f42f219358bcb8de579d1623d518c9ebd4cc
+    depends_on:
+      - minio
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until mc alias set local http://minio:9000 runku_test runku_test_secret; do sleep 1; done;
+        mc mb --ignore-existing local/runku-artifacts
+
+volumes:
+  nats-data:
+  minio-data:

@@ -1,0 +1,7 @@
+command=make release-repository-benchmark
+profile=release
+backend=sqlite-wal-full
+promotions=200
+promotion_total_micros=36602
+snapshots=200
+snapshot_total_micros=11594

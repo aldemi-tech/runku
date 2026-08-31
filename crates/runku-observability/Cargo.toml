@@ -1,0 +1,29 @@
+[package]
+name = "runku-observability"
+version = "0.1.0"
+description = "Bounded operational event contracts and durable log repositories for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-releases = { path = "../runku-releases" }
+runku-value = { path = "../runku-value" }
+serde.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = ["any", "postgres", "sqlite-bundled", "runtime-tokio", "tls-rustls"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+ulid.workspace = true
+
+[lints]
+workspace = true

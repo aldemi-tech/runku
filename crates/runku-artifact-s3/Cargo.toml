@@ -1,0 +1,23 @@
+[package]
+name = "runku-artifact-s3"
+version = "0.1.0"
+description = "S3-compatible immutable artifact storage adapter for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+object_store.workspace = true
+runku-releases = { path = "../runku-releases" }
+tokio = { workspace = true, features = ["time"] }
+url.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

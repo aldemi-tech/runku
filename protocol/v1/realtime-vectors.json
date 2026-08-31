@@ -1,0 +1,35 @@
+{
+  "authenticate": {
+    "type": "authenticate",
+    "version": 1,
+    "requestId": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "applicationKey": "rk_pub_example",
+    "bearer": null
+  },
+  "subscribe": {
+    "type": "subscribe",
+    "version": 1,
+    "requestId": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "target": "channel:stable",
+    "function": "messages.list",
+    "arguments": { "type": "null" }
+  },
+  "state": {
+    "type": "state",
+    "version": 1,
+    "requestId": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "subscriptionId": "sub_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "releaseId": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "deliveryRevision": "1",
+    "value": { "type": "string", "value": "ready" },
+    "resultHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "snapshotSequence": "42",
+    "authorizedUntilMicros": "1700000000123456"
+  },
+  "resyncRequired": {
+    "type": "resync_required",
+    "version": 1,
+    "subscriptionId": "sub_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "code": "REALTIME_DELIVERY_LAGGED"
+  }
+}

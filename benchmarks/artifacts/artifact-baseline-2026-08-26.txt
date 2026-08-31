@@ -1,0 +1,9 @@
+command=make artifact-benchmark
+profile=release
+artifact_bytes=8388608
+hash_iterations=20
+hash_total_micros=79163
+atomic_put_micros=16697
+read_iterations=20
+read_verify_total_micros=79017
+digest=bdf23837181f5808331800c1ae2b4f7d7a839536b10d58491471c50dde23833a

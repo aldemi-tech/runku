@@ -1,0 +1,13 @@
+command=make query-engine-benchmark
+profile=release
+backend=SQLite WAL synchronous FULL
+host_date=2026-08-26
+first_query_sqlite_get_micros=8118
+pure_queries=100
+pure_100_total_micros=267029
+sqlite_get_queries=100
+sqlite_get_100_total_micros=280222
+point_reads=101
+dependencies=101
+
+scope=Each measured Query creates a fresh V8 isolate. The SQLite get path additionally lazy-opens one real read transaction, reads one Stored Value, records a point dependency and explicitly rolls the snapshot back before returning. Results are a local regression baseline, not an SLA.

@@ -1,0 +1,14 @@
+command=make mutation-engine-benchmark
+profile=release
+backend=SQLite WAL synchronous FULL
+host_date=2026-08-26
+first_mutation_sqlite_commit_micros=12551
+no_op_mutations=100
+no_op_100_total_micros=264279
+sqlite_commit_mutations=100
+sqlite_commit_100_total_micros=282994
+function_attempts=201
+commit_calls=101
+exact_retries=0
+
+scope=Each measured Mutation creates a fresh V8 isolate. A committed Mutation validates its declarative read/write set, writes the document, operation journal and outbox in one SQLite transaction, then publishes the handler result. Results are a local regression baseline, not an SLA.

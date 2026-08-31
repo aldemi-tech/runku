@@ -1,0 +1,124 @@
+# Ephemeral conformance dependencies, not production NATS/S3. See deployments/kubernetes/README.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: runku-fc-scale
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: runku-fc-scale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+        - name: nats
+          image: nats@sha256:71092f77d707a4a81b12aca5096d6b2d2e07ad16aa57c84066940a17af74f61a
+          args: ["-js", "-sd", "/data"]
+          ports:
+            - name: client
+              containerPort: 4222
+          readinessProbe:
+            tcpSocket:
+              port: client
+            initialDelaySeconds: 1
+            periodSeconds: 1
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: runku-fc-scale
+spec:
+  selector:
+    app: nats
+  ports:
+    - name: client
+      port: 4222
+      targetPort: client
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: runku-fc-scale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0
+          args: ["server", "/data"]
+          env:
+            - name: MINIO_ROOT_USER
+              value: runku_test
+            - name: MINIO_ROOT_PASSWORD
+              value: runku_test_secret
+          ports:
+            - name: api
+              containerPort: 9000
+          readinessProbe:
+            tcpSocket:
+              port: api
+            initialDelaySeconds: 1
+            periodSeconds: 1
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: runku-fc-scale
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+  namespace: runku-fc-scale
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: minio-init
+          image: minio/mc@sha256:fb8f773eac8ef9d6da0486d5dec2f42f219358bcb8de579d1623d518c9ebd4cc
+          command: ["/bin/sh", "-c"]
+          args:
+            - >-
+              until mc alias set local http://minio:9000 runku_test runku_test_secret;
+              do sleep 1; done;
+              mc mb --ignore-existing local/runku-artifacts

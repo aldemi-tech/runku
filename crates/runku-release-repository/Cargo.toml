@@ -1,0 +1,26 @@
+[package]
+name = "runku-release-repository"
+version = "0.1.0"
+description = "Durable SQLite/PostgreSQL Release Repository adapters for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-releases = { path = "../runku-releases" }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["any", "postgres", "sqlite-bundled", "runtime-tokio", "tls-rustls"] }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+runku-value = { path = "../runku-value" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+ulid.workspace = true
+
+[lints]
+workspace = true

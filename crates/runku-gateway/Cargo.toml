@@ -1,0 +1,46 @@
+[package]
+name = "runku-gateway"
+version = "0.1.0"
+description = "Bounded public HTTP transport boundary for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+runku-core = { path = "../runku-core" }
+runku-data = { path = "../runku-data" }
+runku-development = { path = "../runku-development" }
+runku-execution = { path = "../runku-execution" }
+runku-identity = { path = "../runku-identity" }
+runku-identity-provider = { path = "../runku-identity-provider" }
+runku-node-runtime = { path = "../runku-node-runtime" }
+runku-observability = { path = "../runku-observability" }
+runku-protocol = { path = "../runku-protocol" }
+runku-realtime = { path = "../runku-realtime" }
+runku-releases = { path = "../runku-releases" }
+runku-runtime = { path = "../runku-runtime" }
+runku-schema = { path = "../runku-schema" }
+runku-value = { path = "../runku-value" }
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+ulid.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+runku-data-sqlite = { path = "../runku-data-sqlite" }
+runku-execution-queue = { path = "../runku-execution-queue" }
+runku-identity-repository = { path = "../runku-identity-repository" }
+runku-release-repository = { path = "../runku-release-repository" }
+serde_json.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
+tokio-tungstenite.workspace = true
+
+[lints]
+workspace = true

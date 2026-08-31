@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "project_id": "prj_00000000000000000000000001",
+  "indexes": [
+    {
+      "index_id": "idx_00000000000000000000000003",
+      "table_id": "tbl_00000000000000000000000002",
+      "name": "by_team_age",
+      "fields": [["teamId"], ["profile", "age"]]
+    },
+    {
+      "index_id": "idx_00000000000000000000000004",
+      "table_id": "tbl_00000000000000000000000002",
+      "name": "by_created",
+      "fields": [["createdAt"]]
+    }
+  ],
+  "digest_sha256": "3a16cdaf5f06caed70a14e9061fde606e2b3e1b8a4673a2c3dcd2c45799050b0"
+}

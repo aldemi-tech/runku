@@ -1,0 +1,15 @@
+command=make action-https-benchmark
+profile=release
+host_date=2026-08-26
+supervisor_start_micros=2116
+first_invoke_micros=11474
+sync_invocations=100
+sync_100_total_micros=272538
+async_invocations=100
+async_100_total_micros=270953
+action_https_mock_invocations=100
+action_https_mock_100_total_micros=274689
+timeouts=10
+timeout_10_total_micros=61822
+
+scope=The Action HTTPS number measures the complete V8-to-Rust Platform Op bridge with a deterministic in-process broker double. DNS, TLS and Internet latency are intentionally excluded so the baseline is reproducible. Security behavior of the production reqwest/rustls transport is enforced by conformance tests and explicit configuration, not inferred from this latency.

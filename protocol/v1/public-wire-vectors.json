@@ -1,0 +1,37 @@
+{
+  "queryCall": {
+    "version": 1,
+    "target": "release:rel_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "function": "values.roundtrip",
+    "arguments": {
+      "type": "object",
+      "value": [
+        { "key": "array", "value": { "type": "array", "value": [{ "type": "null" }, { "type": "boolean", "value": true }] } },
+        { "key": "bytes", "value": { "type": "bytes", "value": "AP8" } },
+        { "key": "float", "value": { "type": "float64", "value": "3ff8000000000000" } },
+        { "key": "id", "value": { "type": "typed_id", "value": "doc_01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
+        { "key": "int", "value": { "type": "int64", "value": "-9223372036854775808" } },
+        { "key": "string", "value": { "type": "string", "value": "Runku" } },
+        { "key": "time", "value": { "type": "timestamp", "value": "1700000000123456" } }
+      ]
+    }
+  },
+  "querySuccess": {
+    "version": 1,
+    "status": "ok",
+    "requestId": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "releaseId": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "result": { "type": "string", "value": "ready" },
+    "metadata": { "kind": "query", "snapshotSequence": "42" }
+  },
+  "error": {
+    "version": 1,
+    "status": "error",
+    "requestId": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "error": {
+      "code": "AUTH_POLICY_DENIED",
+      "message": "The request is not permitted.",
+      "retryable": false
+    }
+  }
+}

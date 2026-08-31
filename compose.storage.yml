@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      POSTGRES_DB: runku_test
+      POSTGRES_USER: runku
+      POSTGRES_PASSWORD: runku_local_test_only
+    ports:
+      - "127.0.0.1:${RUNKU_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runku -d runku_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - .:/workspace:ro
+    tmpfs:
+      - /var/lib/postgresql/data

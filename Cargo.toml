@@ -1,0 +1,94 @@
+[workspace]
+members = [
+    "crates/runku-compatibility",
+    "crates/runku-contracts",
+    "crates/runku-core",
+    "crates/runku-cron",
+    "crates/runku-data",
+    "crates/runku-data-conformance",
+    "crates/runku-data-postgres",
+    "crates/runku-data-sqlite",
+    "crates/runku-development",
+    "crates/runku-development-access",
+    "crates/runku-development-client",
+    "crates/runku-development-service",
+    "crates/runku-execution",
+    "crates/runku-execution-queue",
+    "crates/runku-gateway",
+    "crates/runku-identity",
+    "crates/runku-identity-provider",
+    "crates/runku-identity-repository",
+    "crates/runku-local",
+    "crates/runku-node-runtime",
+    "crates/runku-cli",
+    "crates/runku-build",
+    "crates/runku-observability",
+    "crates/runku-otel",
+    "crates/runku-protocol",
+    "crates/runku-releases",
+    "crates/runku-artifact-s3",
+    "crates/runku-release-repository",
+    "crates/runku-realtime",
+    "crates/runku-runtime",
+    "crates/runku-schema",
+    "crates/runku-value",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "Apache-2.0"
+repository = "https://github.com/aldemi-tech/runku"
+homepage = "https://github.com/aldemi-tech/runku"
+authors = ["Aldemi <opensource@aldemi.tech>"]
+
+[workspace.dependencies]
+async-trait = "=0.1.92"
+async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream", "kv", "ring", "server_2_14"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
+base64 = "=0.22.1"
+bytes = "=1.12.1"
+deno_core = "=0.410.0"
+deno_ast = { version = "=0.53.3", features = ["transpiling"] }
+swc_ecma_transforms_module = "=33.0.0"
+deno_error = "=0.7.1"
+getrandom = "=0.3.4"
+hmac = "=0.13.0"
+ipnet = "=2.12.1"
+jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["rust_crypto"] }
+proptest = "=1.11.0"
+prost = "=0.14.4"
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "logs"] }
+object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+sqlx = { version = "=0.9.0", default-features = false }
+tempfile = "=3.27.0"
+thiserror = "=2.0.20"
+tokio = "=1.53.1"
+tokio-tungstenite = "=0.29.0"
+tower = { version = "=0.5.3", features = ["util"] }
+ulid = { version = "=3.0.0", features = ["serde"] }
+url = "=2.5.8"
+zeroize = "=1.9.0"
+futures-util = "=0.3.32"
+
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

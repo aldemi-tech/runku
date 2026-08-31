@@ -1,0 +1,22 @@
+Runku PostgreSQL storage baseline
+Date: 2026-08-26
+PostgreSQL: 16.13 (Alpine pinned image)
+Dataset: 10,000 documents + 10,000 logical index entries
+Command: make storage-benchmark
+
+Document load: 90.609 ms
+Index-entry load: 92.992 ms
+ANALYZE: 4.698 ms
+
+Limit  (cost=0.42..175.30 rows=100 width=126) (actual time=0.011..0.033 rows=100 loops=1)
+  Buffers: shared hit=8
+  ->  Index Scan using runku_index_scan on runku_index_entries  (cost=0.42..175.30 rows=100 width=126) (actual time=0.010..0.028 rows=100 loops=1)
+        Index Cond: ((project_id = 'prj_00000000000000000000000000'::text) AND (environment_id = 'env_00000000000000000000000000'::text) AND (index_id = 'idx_00000000000000000000000000'::text) AND (key_bytes >= (('\\x524b0150'::bytea || convert_to('0000005000'::text, 'UTF8'::name)) || '\\x0000'::bytea)) AND (key_bytes < (('\\x524b0150'::bytea || convert_to('0000005100'::text, 'UTF8'::name)) || '\\x0000'::bytea)))
+        Buffers: shared hit=8
+Planning:
+  Buffers: shared hit=50
+Planning Time: 0.142 ms
+Execution Time: 0.044 ms
+
+The row counts, node type, conditions, timings and buffer counts above are the raw `EXPLAIN
+ANALYZE` values emitted by the dated run.

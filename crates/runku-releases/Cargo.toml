@@ -1,0 +1,28 @@
+[package]
+name = "runku-releases"
+version = "0.1.0"
+description = "Canonical Release manifests and content-addressed artifact storage for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-value = { path = "../runku-value" }
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
+
+[dev-dependencies]
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+ulid.workspace = true
+
+[lints]
+workspace = true

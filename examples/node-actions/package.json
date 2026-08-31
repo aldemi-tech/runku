@@ -1,0 +1,31 @@
+{
+  "name": "@runku/example-node-actions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.1",
+  "scripts": {
+    "predev": "runku dev --prepare",
+    "dev": "runku dev",
+    "build": "runku build",
+    "prepare:runku": "runku dev --prepare",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/e2e.test.mjs",
+    "test:e2e": "pnpm test",
+    "check": "pnpm prepare:runku && pnpm build && pnpm typecheck",
+    "validate": "pnpm check && pnpm test && pnpm audit --audit-level=high"
+  },
+  "dependencies": {
+    "pngjs": "7.0.0"
+  },
+  "devDependencies": {
+    "@runku/client": "0.1.0",
+    "@runku/server": "0.1.0",
+    "@types/node": "24.10.1",
+    "@types/pngjs": "6.0.5",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  }
+}

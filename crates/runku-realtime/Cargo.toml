@@ -1,0 +1,30 @@
+[package]
+name = "runku-realtime"
+version = "0.1.0"
+description = "Runku durable change-impact decoding and reactive dependency matching"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-data = { path = "../runku-data" }
+runku-execution = { path = "../runku-execution" }
+runku-identity = { path = "../runku-identity" }
+runku-releases = { path = "../runku-releases" }
+runku-value = { path = "../runku-value" }
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+proptest.workspace = true
+runku-data-sqlite = { path = "../runku-data-sqlite" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

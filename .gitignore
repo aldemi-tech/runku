@@ -1,0 +1,22 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.runku/
+.data/
+target/
+node_modules/
+.next/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+storage-test-output/
+
+# Generated Full Node benchmark captures can contain large logs, spans, resource samples,
+# and OCI build contexts. Curated regression results belong under benchmarks/.
+/benchmarks/full-node/

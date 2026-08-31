@@ -1,0 +1,12 @@
+command=make schema-index-benchmark
+profile=release
+backend=SQLite WAL synchronous FULL
+host_date=2026-08-26
+active_indexes=4
+first_indexed_commit_micros=10131
+indexed_mutations=100
+indexed_commit_100_total_micros=314164
+commit_calls=101
+index_mutations=404
+
+scope=Each measured Mutation creates a fresh V8 isolate, validates the Release index-contract digest, extracts four Index Key v1 values in Rust and atomically commits one document, four logical index entries, operation journal and v2 outbox impact. Results are a local regression baseline, not an SLA.

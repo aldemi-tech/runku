@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+.runku/
+node_modules/
+runku/_generated/

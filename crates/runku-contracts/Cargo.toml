@@ -1,0 +1,23 @@
+[package]
+name = "runku-contracts"
+version = "0.1.0"
+description = "Canonical runtime contracts and document schemas for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+runku-core = { path = "../runku-core" }
+runku-value = { path = "../runku-value" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+ulid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+busybox=/bin/busybox
+$busybox mount -t proc proc /proc
+$busybox mount -t sysfs sysfs /sys
+$busybox mount -t tmpfs -o size=32m,nosuid,nodev tmpfs /tmp
+
+guest_ip=""
+gateway_ip=""
+ipc_token=""
+for argument in $($busybox cat /proc/cmdline); do
+  case "$argument" in
+    runku.ip=*) guest_ip="${argument#runku.ip=}" ;;
+    runku.gateway=*) gateway_ip="${argument#runku.gateway=}" ;;
+    runku.token=*) ipc_token="${argument#runku.token=}" ;;
+  esac
+done
+
+test -n "$guest_ip"
+test -n "$gateway_ip"
+test -n "$ipc_token"
+$busybox ip link set lo up
+$busybox ip link set eth0 up
+$busybox ip address add "$guest_ip/30" dev eth0
+$busybox ip route add default via "$gateway_ip"
+
+export RUNKU_IPC_TOKEN="$ipc_token"
+exec /usr/local/bin/node /opt/runku/runner.mjs --serve-tcp 32110

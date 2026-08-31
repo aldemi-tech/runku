@@ -1,0 +1,27 @@
+[package]
+name = "runku-data-sqlite"
+version = "0.1.0"
+description = "Local-only SQLite LogicalStore adapter for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-data = { path = "../runku-data" }
+runku-value = { path = "../runku-value" }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "sqlite-bundled"] }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+runku-data-conformance = { path = "../runku-data-conformance" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+ulid.workspace = true
+
+[lints]
+workspace = true

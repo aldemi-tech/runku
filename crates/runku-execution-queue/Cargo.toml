@@ -1,0 +1,27 @@
+[package]
+name = "runku-execution-queue"
+version = "0.1.0"
+description = "Durable execution admission queue for Runku runners"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-nats.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+runku-core = { path = "../runku-core" }
+runku-observability = { path = "../runku-observability" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

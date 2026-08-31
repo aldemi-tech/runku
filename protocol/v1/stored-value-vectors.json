@@ -1,0 +1,28 @@
+{
+  "format_version": 1,
+  "valid": [
+    { "name": "null", "value": { "type": "null" }, "encoded_hex": "52560100" },
+    { "name": "false", "value": { "type": "boolean", "value": false }, "encoded_hex": "52560101" },
+    { "name": "true", "value": { "type": "boolean", "value": true }, "encoded_hex": "52560102" },
+    { "name": "int64-negative-one", "value": { "type": "int64", "value": "-1" }, "encoded_hex": "52560110ffffffffffffffff" },
+    { "name": "float64-one-point-five", "value": { "type": "float64", "value": 1.5 }, "encoded_hex": "525601113ff8000000000000" },
+    { "name": "utf8-string", "value": { "type": "string", "value": "hé" }, "encoded_hex": "525601200000000368c3a9" },
+    { "name": "opaque-bytes", "value": { "type": "bytes", "hex": "00ff" }, "encoded_hex": "525601210000000200ff" },
+    { "name": "timestamp-negative-one", "value": { "type": "timestamp", "microseconds": "-1" }, "encoded_hex": "52560122ffffffffffffffff" },
+    { "name": "typed-id", "value": { "type": "typed_id", "value": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV" }, "encoded_hex": "52560123001e72656c5f303141525a334e44454b54535634525246465136394735464156" },
+    { "name": "array", "value": { "type": "array", "items": [{ "type": "null" }, { "type": "boolean", "value": true }] }, "encoded_hex": "52560130000000020002" },
+    { "name": "ordered-object", "value": { "type": "object", "fields": { "a": { "type": "int64", "value": "1" }, "b": { "type": "string", "value": "x" } } }, "encoded_hex": "5256013100000002000161100000000000000001000162200000000178" }
+  ],
+  "invalid_hex": [
+    "",
+    "58560100",
+    "52560200",
+    "525601ff",
+    "52560110",
+    "5256010000",
+    "525601118000000000000000",
+    "525601117ff0000000000000",
+    "52560131000000020001620000016100",
+    "52560130ffffffff"
+  ]
+}

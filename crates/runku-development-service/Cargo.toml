@@ -1,0 +1,36 @@
+[package]
+name = "runku-development-service"
+version = "0.1.0"
+description = "Authenticated Product Base Remote Workspace service"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+runku-compatibility = { path = "../runku-compatibility" }
+runku-core = { path = "../runku-core" }
+runku-development = { path = "../runku-development" }
+runku-development-access = { path = "../runku-development-access" }
+runku-gateway = { path = "../runku-gateway" }
+runku-protocol = { path = "../runku-protocol" }
+runku-releases = { path = "../runku-releases" }
+runku-value = { path = "../runku-value" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "time", "rt"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+runku-release-repository = { path = "../runku-release-repository" }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tower.workspace = true
+ulid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+{
+  "stateRequest": "{\"version\":1,\"workspace\":\"dev/manuel\"}",
+  "stateResponse": "{\"version\":1,\"status\":\"ok\",\"requestId\":\"req_01ARZ3NDEKTSV4RRFFQ69G5FAZ\",\"environment\":{\"projectId\":\"prj_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"environmentId\":\"env_01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"purpose\":\"preview\",\"protection\":\"protected\",\"location\":\"self_hosted\",\"workspaceTargetsEnabled\":true},\"developmentRevision\":\"7\",\"workspace\":{\"workspaceId\":\"wsp_01ARZ3NDEKTSV4RRFFQ69G5FAX\",\"workspace\":\"dev/manuel\",\"head\":\"drv_01ARZ3NDEKTSV4RRFFQ69G5FB0\"}}",
+  "createRequest": "{\"version\":1,\"operationId\":\"opn_01ARZ3NDEKTSV4RRFFQ69G5FAY\",\"workspaceId\":\"wsp_01ARZ3NDEKTSV4RRFFQ69G5FAX\",\"workspace\":\"dev/manuel\"}",
+  "createResponse": "{\"version\":1,\"status\":\"ok\",\"requestId\":\"req_01ARZ3NDEKTSV4RRFFQ69G5FAZ\",\"workspace\":{\"workspaceId\":\"wsp_01ARZ3NDEKTSV4RRFFQ69G5FAX\",\"workspace\":\"dev/manuel\",\"head\":null},\"developmentRevision\":\"8\",\"replayed\":false}",
+  "publishMetadata": "{\"version\":1,\"operationId\":\"opn_01ARZ3NDEKTSV4RRFFQ69G5FAY\",\"projectId\":\"prj_01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"workspace\":\"dev/manuel\",\"expectedHead\":\"drv_01ARZ3NDEKTSV4RRFFQ69G5FB0\"}",
+  "publishFrameSha256": "4294de1b064c9ae1236634fe8a73ddb0dccb060b6ad3fc635716af22b555fe49",
+  "publishResponse": "{\"version\":1,\"status\":\"ok\",\"requestId\":\"req_01ARZ3NDEKTSV4RRFFQ69G5FAZ\",\"revisionId\":\"drv_01ARZ3NDEKTSV4RRFFQ69G5FB0\",\"releaseId\":\"rel_01ARZ3NDEKTSV4RRFFQ69G5FB1\",\"manifestDigest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"developmentRevision\":\"9\",\"replayed\":false}",
+  "freezeRequest": "{\"version\":1,\"operationId\":\"opn_01ARZ3NDEKTSV4RRFFQ69G5FAY\",\"releaseId\":\"rel_01ARZ3NDEKTSV4RRFFQ69G5FB1\",\"againstReleaseId\":\"rel_01ARZ3NDEKTSV4RRFFQ69G5FB4\"}",
+  "freezeResponse": "{\"version\":1,\"status\":\"ok\",\"requestId\":\"req_01ARZ3NDEKTSV4RRFFQ69G5FAZ\",\"releaseId\":\"rel_01ARZ3NDEKTSV4RRFFQ69G5FB1\",\"outcome\":\"compatibility_blocked\",\"diagnostics\":[{\"code\":\"FUNCTION_REMOVED\",\"subject\":\"queries.echo\"}],\"servingRevision\":\"12\",\"replayed\":false}",
+  "conflictError": "{\"version\":1,\"status\":\"error\",\"requestId\":\"req_01ARZ3NDEKTSV4RRFFQ69G5FAZ\",\"error\":{\"code\":\"DEVELOPMENT_STATE_CONFLICT\",\"message\":\"The development request conflicts with current state.\",\"retryable\":false}}"
+}

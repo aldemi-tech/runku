@@ -1,0 +1,33 @@
+{
+  "name": "@runku/client",
+  "version": "0.1.0",
+  "description": "Typed browser and server client for Runku Public Protocol v1",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aldemi-tech/runku.git",
+    "directory": "packages/client"
+  },
+  "sideEffects": false,
+  "files": ["dist", "README.md", "LICENSE"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "lint": "tsc -p tsconfig.check.json",
+    "test": "pnpm build && node --test tests/*.test.mjs",
+    "check": "pnpm typecheck && pnpm lint && pnpm test"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

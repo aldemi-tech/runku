@@ -1,0 +1,23 @@
+[package]
+name = "runku-data"
+version = "0.1.0"
+description = "Infrastructure-independent LogicalStore contracts for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-value = { path = "../runku-value" }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+ulid.workspace = true
+
+[lints]
+workspace = true

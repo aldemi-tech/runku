@@ -1,0 +1,46 @@
+{
+  "name": "@runku/example-chat-next",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.1",
+  "scripts": {
+    "auth:migrate": "tsx src/lib/migrate-auth.ts",
+    "runku:build": "runku build",
+    "predev": "runku dev --prepare && pnpm auth:migrate",
+    "dev:next": "next dev --hostname 127.0.0.1 --port 3000",
+    "dev": "concurrently --kill-others --success first \"next dev --hostname 127.0.0.1 --port 3000\" \"runku dev --origin http://127.0.0.1:3000 --auth-config runku.auth.json\"",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3000",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "playwright test",
+    "pretest:e2e": "runku dev --prepare",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "@runku/client": "0.1.0",
+    "@runku/server": "0.1.0",
+    "better-auth": "1.7.2",
+    "better-sqlite3": "12.11.1",
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "concurrently": "9.2.4",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.3",
+    "tsx": "4.20.6",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  }
+}

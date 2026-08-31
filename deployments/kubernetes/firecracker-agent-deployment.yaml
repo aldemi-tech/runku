@@ -1,0 +1,95 @@
+# Conformance manifest, not a production deployment. See deployments/kubernetes/README.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runku-firecracker-agent
+  namespace: runku-fc-scale
+spec:
+  replicas: __REPLICAS__
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  selector:
+    matchLabels:
+      app: runku-firecracker-agent
+  template:
+    metadata:
+      labels:
+        app: runku-firecracker-agent
+    spec:
+      terminationGracePeriodSeconds: 45
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        runku.app/firecracker: "true"
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: runku-firecracker-agent
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: agent
+          image: runku/firecracker-scale-benchmark:20260830
+          imagePullPolicy: Never
+          command: ["/opt/runku/firecracker-kubernetes-agent.sh"]
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/tmp/runku-agent-ready"]
+            initialDelaySeconds: 1
+            periodSeconds: 1
+          resources:
+            requests:
+              cpu: "2"
+              memory: 768Mi
+            limits:
+              cpu: "4"
+              memory: 2Gi
+          env:
+            - name: RUNKU_BENCH_SHARED_SCOPE
+              value: K8S_AGENT_POOL_20260830
+            - name: RUNKU_BENCH_CONCURRENCY
+              value: "2"
+            - name: RUNKU_BENCH_REQUEST_TIMEOUT_SECS
+              value: "120"
+            - name: RUNKU_TEST_NATS_URL
+              value: nats://nats.runku-fc-scale.svc.cluster.local:4222
+            - name: RUNKU_TEST_S3_ENDPOINT
+              value: http://minio.runku-fc-scale.svc.cluster.local:9000
+            - name: RUNKU_TEST_S3_BUCKET
+              value: runku-artifacts
+            - name: RUNKU_TEST_S3_ACCESS_KEY
+              value: runku_test
+            - name: RUNKU_TEST_S3_SECRET_KEY
+              value: runku_test_secret
+          volumeMounts:
+            - name: kvm
+              mountPath: /dev/kvm
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - name: netns
+              mountPath: /run/netns
+              mountPropagation: Bidirectional
+            - name: state
+              mountPath: /var/lib/runku/firecracker
+      volumes:
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: netns
+          hostPath:
+            path: /run/netns
+            type: DirectoryOrCreate
+        - name: state
+          emptyDir: {}

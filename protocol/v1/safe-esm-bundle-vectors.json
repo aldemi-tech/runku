@@ -1,0 +1,7 @@
+{
+  "format": "SafeEsmBundleV1",
+  "source": "export default (_ctx, args) => args;\n",
+  "implementation_sha256": "e22d461053ed9ef7160c3e06974016d632be7dc3cd58d9a8bd92dcdafa6e8b49",
+  "artifact_sha256": "34334eaea32d1dbed7e09404dc80f5660d263768a2b0efa809b8cac29baf317b",
+  "encoded_hex": "5242010001e22d461053ed9ef7160c3e06974016d632be7dc3cd58d9a8bd92dcdafa6e8b49000000256578706f72742064656661756c7420285f6374782c206172677329203d3e20617267733b0a"
+}

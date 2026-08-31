@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "project_id": "prj_00000000000000000000000033",
+  "release_id": "rel_00000000000000000000000001",
+  "build_id": "bld_00000000000000000000000002",
+  "created_at_micros": "1800000000000000",
+  "manifest_sha256": "ff830b626be1c50a75bf4c8c9743406280f62e2a8c5537fd2f8cc3d11a035218",
+  "artifact_sha256": "f3d3f6ff6f392ebb2acae4c4cb5a42392bf509fa863665894d4e2f4e557961c4",
+  "function_contract_sha256": "d977f4a740b4893dc7e80929ef6b4884977ec8b239ef5b36885465f32f0632df",
+  "schema_contract_sha256": "9060b1aae95d4e8350eb2553b81c1cd58d0eebf882dbcaf8925b7b0dafcaf74e",
+  "index_contract_sha256": "7e56943987595fa86171692c952a3112d1efd1a895a7a2fe4d52b5609861e9d7",
+  "functions": [
+    {
+      "name": "mutations.insert",
+      "id": "fnc_614RT0A6R70TTE2ZJ3THJR2QHZ"
+    },
+    {
+      "name": "queries.echo",
+      "id": "fnc_338C8ZTP550NEWHEKGCBXV5GXV"
+    }
+  ]
+}

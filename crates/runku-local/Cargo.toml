@@ -1,0 +1,50 @@
+[package]
+name = "runku-local"
+version = "0.1.0"
+description = "Reproducible local Product Base process composition for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+getrandom.workspace = true
+runku-core = { path = "../runku-core" }
+runku-compatibility = { path = "../runku-compatibility" }
+runku-cron = { path = "../runku-cron" }
+runku-data = { path = "../runku-data" }
+runku-data-sqlite = { path = "../runku-data-sqlite" }
+runku-development = { path = "../runku-development" }
+runku-development-access = { path = "../runku-development-access" }
+runku-execution = { path = "../runku-execution" }
+runku-gateway = { path = "../runku-gateway" }
+runku-identity = { path = "../runku-identity" }
+runku-identity-provider = { path = "../runku-identity-provider" }
+runku-identity-repository = { path = "../runku-identity-repository" }
+runku-observability = { path = "../runku-observability" }
+runku-node-runtime = { path = "../runku-node-runtime" }
+runku-otel = { path = "../runku-otel" }
+runku-realtime = { path = "../runku-realtime" }
+runku-release-repository = { path = "../runku-release-repository" }
+runku-releases = { path = "../runku-releases" }
+runku-runtime = { path = "../runku-runtime" }
+runku-value = { path = "../runku-value" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "sync", "time"] }
+ulid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+runku-protocol = { path = "../runku-protocol" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

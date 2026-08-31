@@ -1,0 +1,23 @@
+[package]
+name = "runku-compatibility"
+version = "0.1.0"
+description = "Deterministic fail-closed Release compatibility engine for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+runku-contracts = { path = "../runku-contracts" }
+runku-core = { path = "../runku-core" }
+runku-releases = { path = "../runku-releases" }
+runku-schema = { path = "../runku-schema" }
+thiserror.workspace = true
+
+[dev-dependencies]
+runku-value = { path = "../runku-value" }
+ulid.workspace = true
+
+[lints]
+workspace = true
