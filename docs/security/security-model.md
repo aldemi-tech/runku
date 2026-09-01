@@ -47,6 +47,12 @@ accounts, non-root/read-only images, seccomp/AppArmor guidance, immutable digest
 signatures, encrypted secret providers, NetworkPolicy deny-by-default, bounded resources, and
 separate application/management/Agent identities. Gateway never receives KVM/host privileges.
 
+Security-sensitive codec and cryptography dependencies are pinned and reviewed with their feature
+sets. An update must preserve canonical protocol bytes and must not silently enable optional unsafe
+acceleration. Identity, protocol-vector, Realtime, and affected adapter tests are required when a
+dependency crosses those boundaries. Test key generation uses the operating-system RNG interface
+from the same cryptographic dependency line instead of introducing an unrelated RNG version.
+
 One-time secret material belongs in a secret manager. Rotate with overlap, verify replacement, then
 revoke. Never place secrets in CLI arguments, ConfigMaps, image layers, source, generated types,
 public env prefixes, logs, traces, errors, or unencrypted backups.

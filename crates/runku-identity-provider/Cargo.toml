@@ -21,8 +21,7 @@ url.workspace = true
 
 [dev-dependencies]
 jsonwebtoken.workspace = true
-rand = "=0.8.8"
-rsa = "=0.9.10"
+rsa = { version = "=0.9.10", features = ["getrandom"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
