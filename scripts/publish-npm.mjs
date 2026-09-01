@@ -8,9 +8,7 @@ import { releasePlatforms } from "./release-platforms.mjs"
 const directory = resolve(process.argv[2] ?? "")
 if (!process.argv[2]) throw new Error("usage: publish-npm.mjs DIRECTORY")
 
-const tarballs = readdirSync(directory)
-  .filter((file) => file.endsWith(".tgz"))
-  .map((file) => describeTarball(join(directory, file)))
+const tarballs = findTarballs(directory).map(describeTarball)
 
 const expectedNames = new Set([
   ...releasePlatforms.map((platform) => platform.packageName),
@@ -56,6 +54,14 @@ function describeTarball(path) {
   const manifest = JSON.parse(run("tar", ["-xOzf", path, "package/package.json"]).stdout)
   const integrity = `sha512-${createHash("sha512").update(readFileSync(path)).digest("base64")}`
   return { path, name: manifest.name, version: manifest.version, integrity }
+}
+
+function findTarballs(parent) {
+  return readdirSync(parent, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(parent, entry.name)
+    if (entry.isDirectory()) return findTarballs(path)
+    return entry.isFile() && entry.name.endsWith(".tgz") ? [path] : []
+  })
 }
 
 function publishOrder(name) {

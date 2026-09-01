@@ -68,7 +68,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-npm-independent
-          path: out/npm/*.tgz
+          path: out
           if-no-files-found: error
           compression-level: 0
 
@@ -184,7 +184,7 @@ jobs:
       - name: Publish or verify the complete npm release
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: node scripts/publish-npm.mjs out/npm
+        run: node scripts/publish-npm.mjs out
 
   github-release:
     if: github.ref_type == 'tag'
