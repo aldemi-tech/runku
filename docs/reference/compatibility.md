@@ -12,6 +12,34 @@ Runku versions contracts at every boundary that can outlive one process:
 Unknown versions fail closed. A client-selected Release is served only while its contract and
 runtime remain supported. Channel routing cannot silently replace an explicit incompatible Release.
 
-The source line currently reports version `0.1.0` and has not established a stable compatibility
-window. The first stable release will publish an exact CLI, server, agent, SDK, protocol, storage,
-and runtime support matrix.
+The source line reports version `0.1.0` and has not established a stable compatibility window.
+Tagged releases coordinate the CLI and both TypeScript SDKs. Server, Agent, deployment, protocol,
+storage, and runtime support windows remain separate distribution gates.
+
+## Pre-release matrix
+
+| Boundary | Current rule |
+|---|---|
+| Published CLI | Same version on GitHub and npm; macOS/Linux GNU/Windows on ARM64/x86_64 |
+| Source CLI | Record the Git commit; a modified checkout is not identified by `0.1.0` alone |
+| Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
+| Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
+| TypeScript packages | `@runku/client`, `@runku/server`, and `@runku/cli` update together |
+| HTTP/WebSocket | v1 envelopes; unknown versions rejected |
+| Values/index keys | v1 canonical encodings; existing vectors immutable |
+| Release/artifact | Version/digest/size/runtime descriptors verified |
+| SQLite/PostgreSQL | Same logical contract; physical schema/files are internal |
+| Deployment | No published server/agent support window yet |
+
+## Change rules
+
+Additive fields require old/new reader tests and safe defaults. Auth, retry, ordering, limits,
+pinning, and failure-outcome changes are compatibility changes even without shape changes. Breaking
+wire/persisted behavior requires a new version and migration; existing vectors are never rewritten.
+
+Release compatibility includes Function kind/visibility/contracts, schema/index prerequisites,
+runtime/Platform Ops, artifacts, Cron, and pending code pins. Channel promotion fails if a candidate
+cannot safely share data. Rollback cannot undo migrations; use expand/migrate/contract.
+
+A stable release matrix must publish CLI↔server↔agent↔SDK versions, protocol/persisted readers,
+dependency/OS/architecture profiles, upgrade paths, deprecation/security window, and provenance.

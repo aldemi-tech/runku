@@ -4,6 +4,11 @@
   "description": "Declarative Function, schema and Cron SDK for Runku",
   "type": "module",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/aldemi-tech/runku/tree/main/packages/server#readme",
+  "bugs": {
+    "url": "https://github.com/aldemi-tech/runku/issues"
+  },
+  "keywords": ["runku", "server", "typescript", "functions", "schema"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/aldemi-tech/runku.git",
@@ -19,6 +24,10 @@
     }
   },
   "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.check.json",

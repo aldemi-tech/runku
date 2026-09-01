@@ -28,3 +28,15 @@ source workspace and SDK links; the npm lock defines the immutable runtime depen
 
 PostgreSQL is intentionally not an example dependency. Storage conformance validates PostgreSQL
 separately from this runtime scenario.
+
+## Source map and scope
+
+- `images.ts`: Node directive, built-in, npm package, canonical bytes;
+- `bridge.ts`: Safe↔Node Action composition and internal visibility;
+- `data.ts`: Safe Mutation/Query with OCC persistence;
+- scheduling: Node Action creates a pinned Safe Mutation invocation.
+
+Local Node is a development profile; this example does not prove shared-host isolation or a
+production Agent. Reinstall the CLI after core changes, use Node 20.18.1+, preserve both workspace
+and npm locks, and stop another `runku dev` using the example root. Use `RUNKU_BIN` when the gate
+needs an explicit repository-built binary.

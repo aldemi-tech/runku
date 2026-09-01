@@ -1,9 +1,9 @@
-# Conformance manifest, not a production deployment. See deployments/kubernetes/README.md.
+# Full Node conformance only; this is not a product installation manifest.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: runku-firecracker-agent
-  namespace: runku-fc-scale
+  name: runku-full-node-agent-conformance
+  namespace: runku-conformance
 spec:
   replicas: __REPLICAS__
   strategy:
@@ -13,27 +13,30 @@ spec:
       maxSurge: 0
   selector:
     matchLabels:
-      app: runku-firecracker-agent
+      app.kubernetes.io/name: runku-full-node-agent
+      app.kubernetes.io/component: conformance
   template:
     metadata:
       labels:
-        app: runku-firecracker-agent
+        app.kubernetes.io/name: runku-full-node-agent
+        app.kubernetes.io/component: conformance
     spec:
       terminationGracePeriodSeconds: 45
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       nodeSelector:
-        runku.app/firecracker: "true"
+        runku.io/full-node-isolation: microvm
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  app: runku-firecracker-agent
+                  app.kubernetes.io/name: runku-full-node-agent
+                  app.kubernetes.io/component: conformance
               topologyKey: kubernetes.io/hostname
       containers:
         - name: agent
-          image: runku/firecracker-scale-benchmark:20260830
+          image: runku/full-node-conformance:20260830
           imagePullPolicy: Never
           command: ["/opt/runku/firecracker-kubernetes-agent.sh"]
           securityContext:
@@ -59,9 +62,9 @@ spec:
             - name: RUNKU_BENCH_REQUEST_TIMEOUT_SECS
               value: "120"
             - name: RUNKU_TEST_NATS_URL
-              value: nats://nats.runku-fc-scale.svc.cluster.local:4222
+              value: nats://nats.runku-conformance.svc.cluster.local:4222
             - name: RUNKU_TEST_S3_ENDPOINT
-              value: http://minio.runku-fc-scale.svc.cluster.local:9000
+              value: http://minio.runku-conformance.svc.cluster.local:9000
             - name: RUNKU_TEST_S3_BUCKET
               value: runku-artifacts
             - name: RUNKU_TEST_S3_ACCESS_KEY
@@ -77,7 +80,7 @@ spec:
               mountPath: /run/netns
               mountPropagation: Bidirectional
             - name: state
-              mountPath: /var/lib/runku/firecracker
+              mountPath: /var/lib/runku/full-node
       volumes:
         - name: kvm
           hostPath:

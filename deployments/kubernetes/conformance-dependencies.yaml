@@ -1,14 +1,14 @@
-# Ephemeral conformance dependencies, not production NATS/S3. See deployments/kubernetes/README.md.
+# Ephemeral conformance dependencies. Never use these credentials or emptyDir volumes in production.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: runku-fc-scale
+  name: runku-conformance
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nats
-  namespace: runku-fc-scale
+  namespace: runku-conformance
 spec:
   replicas: 1
   selector:
@@ -29,8 +29,6 @@ spec:
           readinessProbe:
             tcpSocket:
               port: client
-            initialDelaySeconds: 1
-            periodSeconds: 1
           volumeMounts:
             - name: data
               mountPath: /data
@@ -42,7 +40,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: nats
-  namespace: runku-fc-scale
+  namespace: runku-conformance
 spec:
   selector:
     app: nats
@@ -55,7 +53,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: minio
-  namespace: runku-fc-scale
+  namespace: runku-conformance
 spec:
   replicas: 1
   selector:
@@ -81,8 +79,6 @@ spec:
           readinessProbe:
             tcpSocket:
               port: api
-            initialDelaySeconds: 1
-            periodSeconds: 1
           volumeMounts:
             - name: data
               mountPath: /data
@@ -94,7 +90,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: minio
-  namespace: runku-fc-scale
+  namespace: runku-conformance
 spec:
   selector:
     app: minio
@@ -107,7 +103,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: minio-init
-  namespace: runku-fc-scale
+  namespace: runku-conformance
 spec:
   backoffLimit: 3
   template:

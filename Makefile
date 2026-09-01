@@ -1,4 +1,4 @@
-.PHONY: toolchain toolchain-check check fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check mutation-engine-benchmark schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
+.PHONY: toolchain toolchain-check check fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check cli-package-check release-package-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check mutation-engine-benchmark schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
 
 RUST_TOOLCHAIN_CHANNEL := $(shell sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
 
@@ -15,7 +15,7 @@ toolchain-check:
 	cargo --version; \
 	rust-analyzer --version
 
-check: toolchain-check fmt-check lint test docs incomplete-check sdk-typescript-check sdk-server-check chat-example-check node-example-check
+check: toolchain-check fmt-check lint test docs incomplete-check sdk-typescript-check sdk-server-check cli-package-check release-package-check chat-example-check node-example-check
 
 fmt:
 	cargo fmt --all
@@ -33,7 +33,7 @@ docs:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 
 incomplete-check:
-	@! rg -n "TODO|FIXME|todo!|unimplemented!|#\[ignore" crates protocol packages Cargo.toml rust-toolchain.toml rustfmt.toml
+	@! rg -n "TODO|FIXME|todo!|unimplemented!|#\[ignore" crates protocol packages scripts distribution .github Cargo.toml rust-toolchain.toml rustfmt.toml
 
 js-install:
 	pnpm install --frozen-lockfile
@@ -47,6 +47,12 @@ install-cli-check:
 	$(MAKE) --no-print-directory install-cli CARGO_INSTALL_ROOT="$$install_root"; \
 	"$$install_root/bin/runku" --version | rg -x 'runku 0\.1\.0'; \
 	"$$install_root/bin/runku" --help | rg -F 'runku dev [--root PATH]'
+
+cli-package-check: js-install
+	cd packages/cli && pnpm check
+
+release-package-check:
+	node scripts/verify-release.mjs
 
 chat-example-check: js-install
 	@node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major < 20 || (major === 20 && (minor < 18 || (minor === 18 && patch < 1)))) { console.error("Runku Chat requires Node.js >=20.18.1 (see examples/chat-next/.nvmrc)"); process.exit(1) }'

@@ -1,12 +1,83 @@
-# Kubernetes integration
+# Runku on Kubernetes
 
-The manifests in this directory reproduce the distributed Full Node conformance topology: Gateway,
-NATS, S3-compatible artifacts, Linux/KVM Agents, replacement, and scale tests.
+Kubernetes schedules Runku product roles; it does not replace Runku's data, release, execution,
+Realtime, or administration semantics. This directory currently contains only Full Node
+conformance manifests. A supported Helm/Kustomize package and official images are not published.
 
-They contain test placeholders, local credentials, `emptyDir`, and non-production image policies.
-Before becoming a supported deployment package they require released server and Agent images,
-external secrets, TLS, persistent and replicated dependencies, health probes, disruption budgets,
-resource limits, topology constraints, and upgrade-tested packaging.
+## Complete product topology
 
-Only the Agent requires KVM and microVM lifecycle privileges. The Gateway must not receive those
-host permissions.
+```text
+Applications ─► Ingress/TLS ─► API Service/Pods ─► PostgreSQL
+                                      │                 ▲
+                                      ├─ Safe V8        │
+                                      ├─ Realtime       │
+                                      └─ Background ────┘
+
+Operator/CI ─► Management Service/Pods ─► lifecycle/config/audit
+
+Optional Full Node: Background/API ─► NATS ─► Full Node Agent Pods
+                                S3/OCI ◄───────────────┘
+```
+
+API, background, and management run on ordinary nodes without KVM. Only the selected
+shared-untrusted Full Node Agent profile needs microVM host privileges.
+
+## Scheduling and security
+
+- non-root, dropped capabilities, RuntimeDefault seccomp, read-only filesystem for ordinary roles;
+- distinct ServiceAccounts and network policies per role;
+- topology spread/anti-affinity and PDB aligned with actual replica availability;
+- resource requests/limits from role-specific measured workloads;
+- PostgreSQL/S3/NATS/registry/KMS/OTLP external endpoints over TLS/workload identity;
+- exact Ingress hosts/origins/trusted proxies and WebSocket/drain settings;
+- immutable images by digest with admission checks, SBOM/provenance/signatures;
+- authoritative state outside `emptyDir`/Pod lifecycle.
+
+Full Node Agent nodes use explicit label/taint for isolation class, expose required KVM/cgroup/netns
+only to Agent Pods, keep controller/assets root-owned, prewarm before readiness, stop queue pulls
+before drain, and destructively replace uncertain workers. A privileged Agent Pod is not itself the
+user-code sandbox. API Pods never inherit Agent privileges.
+
+## Probes and rollout
+
+- startup: migrations/config/snapshot/prewarm complete within bounded time;
+- liveness: supervisor makes progress, not every dependency is healthy;
+- readiness: role can safely admit its work with valid schema/snapshot/capacity;
+- termination: readiness drops, Service/consumer removes work, HTTP/WS/workers/Agents drain.
+
+Rollout order is preflight → compatible migration → new ready replica → remove/drain old replica →
+verify serving/lag/errors → continue. No rolling-upgrade support until `N-1 → N`, interruption, mixed
+version, and recovery are tested.
+
+## Scaling signals
+
+- API: admission/queue wait, latency, in-flight, WebSocket/subscription load, DB pool pressure;
+- background: outbox/schedule/Cron age, lease contention, retry/poison rate;
+- Full Node Agent: NATS queue age, available/busy slots, startup/replacement, node provisioning;
+- management: operation latency/failure and serving-revision propagation.
+
+CPU alone is insufficient. Scaling must preserve leases, connection budgets, and dependency
+capacity.
+
+## Current conformance manifests
+
+| File | Bounded purpose | Not included |
+|---|---|---|
+| `conformance-dependencies.yaml` | Ephemeral NATS/MinIO for an isolated test | TLS, persistence, HA, real secrets |
+| `full-node-agent-conformance.yaml` | KVM Agent placement, slots, readiness, recovery | Product API/management package |
+| `full-node-load-conformance-job.yaml` | Distributed load/routing benchmark job | User-facing Gateway deployment |
+
+They use placeholders, local test credentials, `emptyDir`, a local conformance image, and
+`imagePullPolicy: Never`. Applying all three does not install Runku. Use only in an isolated campaign
+with exact source/assets/environment recorded.
+
+## Future package acceptance
+
+The Kubernetes package must install from released artifacts, validate config/secrets, support
+dedicated and multi-node roles, integrate probes/Service/Ingress/NetworkPolicy/PDB/topology/resources,
+run migrations/preflight, enable Full Node only when selected, export dashboards/alerts/runbooks,
+and pass clean install, node/dependency failure, backup/restore, upgrade, and uninstall campaigns.
+
+See [Self-hosting](../../docs/self-hosting/overview.md),
+[Production readiness](../../docs/self-hosting/production-readiness.md), and
+[Security](../../docs/security/security-model.md).

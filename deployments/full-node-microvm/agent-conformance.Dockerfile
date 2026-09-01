@@ -1,6 +1,6 @@
 FROM ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 
-LABEL org.opencontainers.image.description="Runku Kubernetes Firecracker conformance harness; not a product server image"
+LABEL org.opencontainers.image.description="Runku Full Node Agent microVM conformance harness; not a product server image"
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \

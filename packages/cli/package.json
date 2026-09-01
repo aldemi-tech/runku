@@ -1,0 +1,52 @@
+{
+  "name": "@runku/cli",
+  "version": "0.1.0",
+  "description": "Cross-platform installer and launcher for the Runku CLI",
+  "type": "module",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/aldemi-tech/runku#readme",
+  "bugs": {
+    "url": "https://github.com/aldemi-tech/runku/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aldemi-tech/runku.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "runku",
+    "cli",
+    "backend",
+    "functions",
+    "self-hosted"
+  ],
+  "bin": {
+    "runku": "bin/runku.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "node --check bin/runku.js && node --check lib/platform.js",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run typecheck && npm test"
+  },
+  "optionalDependencies": {
+    "@runku/cli-darwin-arm64": "0.1.0",
+    "@runku/cli-darwin-x64": "0.1.0",
+    "@runku/cli-linux-arm64-gnu": "0.1.0",
+    "@runku/cli-linux-x64-gnu": "0.1.0",
+    "@runku/cli-win32-arm64-msvc": "0.1.0",
+    "@runku/cli-win32-x64-msvc": "0.1.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}

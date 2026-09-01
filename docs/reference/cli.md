@@ -1,0 +1,277 @@
+# CLI reference
+
+The `runku` CLI manages the implemented local Environment lifecycle and remote Workspace client
+operations. Arguments are strict: unknown flags, duplicated singleton flags, missing values,
+unexpected positional arguments, and malformed IDs fail with exit code `2`.
+
+All project commands default `--root` to the current directory. Run automation from the application
+root or pass one explicit absolute/relative project path.
+
+## Output contract
+
+Successful non-streaming commands write compact JSON to stdout. Log queries write JSON Lines.
+Failures write a stable machine code plus a human explanation to stderr:
+
+```text
+error: LOCAL_PROCESS_STATE_INVALID
+message: Runku could not open a valid initialized project in the selected directory.
+hint: Run from the project root or pass --root PATH. ...
+```
+
+Automation should branch on exit code and `error:` code, not localized/human text. Secret material,
+source content, user arguments, manifests, artifacts, pepper, and user-supplied paths are not
+interpolated into generic failure explanations.
+
+## Exit codes
+
+| Code | Class | Retry/response guidance |
+|---:|---|---|
+| 0 | Complete | Parse stdout and persist relevant IDs/cursors |
+| 1 | Internal/process/signal failure | Preserve evidence; retry only after understanding state |
+| 2 | CLI usage invalid | Fix arguments; retrying unchanged input is unsafe/noisy |
+| 3 | Input, state, source, or package invalid | Correct input or restore valid state |
+| 4 | Conflict/compatibility/CAS failure | Re-read current state and reconcile intent |
+| 5 | Dependency/listener temporarily unavailable | Retry with bounded backoff after dependency check |
+| 6 | Durable corruption/inconsistency | Stop writes, preserve state, diagnose/restore |
+| 7 | Authentication failed | Replace/rotate the expected credential; do not broaden access |
+| 8 | Policy denied | Correct target, Environment protection, scope, or operation |
+| 9 | Outcome uncertain | Reconcile by operation ID/current state before any retry |
+
+## Initialization and local serving
+
+### `runku dev`
+
+```sh
+runku dev [--root PATH] \
+  [--origin http(s)://HOST[:PORT]]... \
+  [--prebuilt] \
+  [--auth-config RELATIVE] \
+  [--application-env RELATIVE] \
+  [--public-env-prefix PREFIX] \
+  [--prepare] \
+  [--replace-remote-credentials]
+```
+
+Normal behavior without flags:
+
+- discovers `runku/`;
+- initializes missing local state with Workspace `local` and `127.0.0.1:3210`;
+- reconciles reserved local Application Clients and dotenv values;
+- builds and publishes current source;
+- starts the local product process and watches source changes.
+
+`--origin` is repeatable and admits exact browser origins. `--prebuilt` serves already-published
+state without reading application source. `--prepare` prepares durable state/credentials and exits.
+`--replace-remote-credentials` is the explicit non-interactive authorization to replace foreign
+Environment values in the selected application dotenv; omit it to fail closed.
+
+### `runku init`
+
+```sh
+runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT]
+```
+
+Use only before first `dev` when changing defaults. Initialization is idempotent for identical
+settings and conflicts for divergent settings. The listener must be loopback; port `0` is accepted
+only when selected explicitly. The project root must be safe, existing, regular, non-symlinked, and
+must not be filesystem root or the user's home.
+
+### `runku doctor`
+
+```sh
+runku doctor [--root PATH]
+```
+
+Read-only verification of state paths/permissions, stores, identity pepper, Workspace HEAD,
+candidate manifest consistency, artifact integrity, and Cron activation consistency. `doctor`
+never repairs pointers, replaces files, initializes missing state, or deletes evidence.
+
+### `runku status`
+
+```sh
+runku status [--root PATH]
+```
+
+Returns one coherent Release/Channel snapshot. Use before promotion, rollback, compatibility
+investigation, or retrying a conflict.
+
+## Build and lifecycle
+
+### `runku build`
+
+```sh
+runku build [--root PATH]
+
+# Reproducible metadata tuple; all three flags must be supplied together:
+runku build [--root PATH] \
+  --release-id rel_* --build-id bld_* --created-at-micros I64
+```
+
+Discovers `runku/`, validates source/metadata/capabilities/contracts, produces an immutable package
+under `.runku/builds-v1/rel_*`, preserves Release-specific generated types, and updates
+`runku/_generated/api.d.ts`. Consume the `manifestPath` and `artifactPath` from its JSON result;
+never guess filenames or edit build output.
+
+### `runku publish`
+
+```sh
+runku publish [--root PATH] \
+  --manifest FILE --artifact FILE \
+  [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]
+```
+
+Validates and persists the artifact before updating a Workspace pointer. `--expected-head` turns
+the update into an operator-visible compare-and-set. A stale expectation returns conflict; re-read
+state before deciding whether to publish a newer package or retry exact bytes.
+
+### `runku release`
+
+```sh
+runku release [--root PATH] --release rel_* [--against CHANNEL]
+```
+
+Validates a published candidate and makes it explicitly servable if lifecycle and compatibility
+checks pass. `--against` selects a Channel compatibility baseline.
+
+### `runku promote`
+
+```sh
+runku promote [--root PATH] \
+  --channel CHANNEL --release rel_* [--expected empty|rel_*]
+```
+
+Moves or creates a Channel after compatibility validation. Use `--expected` in automation to avoid
+overwriting a concurrent operator decision.
+
+### `runku rollback`
+
+```sh
+runku rollback [--root PATH] \
+  --channel CHANNEL --expected rel_current --to rel_previous
+```
+
+Moves a Channel back only if it still points to the observed Release. Rollback changes routing, not
+data. It cannot reverse a schema/data migration and does not change already-pinned scheduled work or
+subscriptions.
+
+## Application Clients and keys
+
+### Clients
+
+```sh
+runku client create [--root PATH] \
+  --name NAME --kind public|confidential --scope SCOPE... [--client-id app_*]
+runku client list [--root PATH]
+```
+
+Client scopes are maximum grants for keys below that client. Use separate clients for browser,
+backend, CI, and independently deployed integrations.
+
+### Keys
+
+```sh
+runku key create [--root PATH] --client app_* --label LABEL \
+  --scope SCOPE... [--key-id crd_*] [--expires-at-micros I64]
+runku key list [--root PATH] --client app_*
+runku key reveal [--root PATH] --client app_* --key crd_*
+runku key rotate [--root PATH] --client app_* --key crd_* --label LABEL \
+  [--new-key-id crd_*] [--expires-at-micros I64]
+runku key revoke [--root PATH] --key crd_*
+runku key delete [--root PATH] --key crd_*
+```
+
+Confidential key material is one-time reveal. Publishable keys can be re-derived through `reveal`.
+Rotation creates a replacement with the source scopes and leaves the old key active so rollout can
+overlap. After consumers use the replacement, revoke the old credential; deletion requires a
+revoked key and tombstones it.
+
+## Development access and remote Workspaces
+
+### Development keys
+
+```sh
+runku workspace key create [--root PATH] --actor ACTOR --label LABEL \
+  [--key-id dvk_*] [--expires-at-micros I64]
+runku workspace key list [--root PATH]
+runku workspace key rotate [--root PATH] --key dvk_* --label LABEL \
+  [--new-key-id dvk_*] [--expires-at-micros I64]
+runku workspace key revoke [--root PATH] --key dvk_*
+runku workspace key delete [--root PATH] --key dvk_*
+```
+
+The revealed external token has the `rk_dev_*` form and authorizes development operations only.
+
+### Sync
+
+```sh
+RUNKU_DEV_KEY='rk_dev_...' runku workspace sync \
+  [--root PATH] \
+  --url https://runku.example \
+  --workspace dev/team/branch \
+  --token-env RUNKU_DEV_KEY \
+  [--expected-head empty|drv_*] [--create]
+```
+
+The token is read from the named environment variable and must not appear in arguments, logs, or
+shell history. The client uses exact-origin HTTPS, bounded payloads, byte-exact retry for uncertain
+requests, and state reconciliation. `--create` authorizes creating a missing Workspace;
+`--expected-head` protects shared updates.
+
+### Freeze a remote Release
+
+```sh
+RUNKU_DEV_KEY='rk_dev_...' runku workspace freeze \
+  --url https://runku.example \
+  --release rel_* \
+  --token-env RUNKU_DEV_KEY \
+  [--against rel_*]
+```
+
+Freezes an immutable Release through the remote development administrative protocol. Reconcile an
+uncertain result by querying remote state before repeating or publishing another candidate.
+
+## Operational logs
+
+### Query/follow
+
+```sh
+runku logs [--root PATH] [--after logc_N] [--limit 1..1000] \
+  [--stream platform|function] [--level debug|info|warn|error] \
+  [--function fnc_*] [--request req_*] [--invocation inv_*] \
+  [--client app_*] [--credential crd_*] [--release rel_*] [--follow]
+```
+
+`--after` is an exclusive durable cursor. Store the last processed cursor before continuing.
+Filters are exact and can be combined. `--follow` polls until interrupted.
+
+### Retention
+
+```sh
+runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000]
+runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] \
+  --apply --environment env_*
+```
+
+Without `--apply`, pruning is a dry run. Applying requires the exact Environment confirmation and
+deletes at most the bounded batch. Repeat while the result reports more matches.
+
+### OTLP export
+
+```sh
+runku logs export-otlp [--root PATH] --config RELATIVE [--once]
+```
+
+The strict config is relative to the project root. `--once` exports one bounded batch; without it,
+the exporter follows. Checkpointing is durable. Collector failure must not block serving.
+
+## Automation checklist
+
+- pin the source commit/CLI version;
+- pass `--root` explicitly in multi-repository jobs;
+- store IDs and cursors from JSON instead of scraping human text;
+- use expected/CAS flags for shared mutable pointers;
+- never pass keys through CLI arguments when a token environment option exists;
+- treat exit `9` as reconciliation, not a blind retry;
+- preserve build bytes for retry; do not rebuild between uncertain publish attempts;
+- run `doctor` and save logs before destructive recovery;
+- keep secret stdout from creation operations out of shared CI logs.

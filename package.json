@@ -8,7 +8,8 @@
     "node": ">=20.18.1"
   },
   "scripts": {
-    "check:packages": "pnpm --filter @runku/client check && pnpm --filter @runku/server check",
+    "check:packages": "pnpm --filter @runku/client check && pnpm --filter @runku/server check && pnpm --filter @runku/cli check",
+    "check:release": "node scripts/verify-release.mjs",
     "check:examples": "pnpm --filter @runku/example-chat-next check && pnpm --filter @runku/example-node-actions check"
   },
   "pnpm": {

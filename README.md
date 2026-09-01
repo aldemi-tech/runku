@@ -1,107 +1,303 @@
 # Runku
 
 Runku is an open-source, self-hosted Backend-as-a-Service for transactional TypeScript Functions,
-typed document data, realtime subscriptions, immutable releases, and durable scheduling.
+typed document data, realtime subscriptions, immutable releases, durable scheduling, and explicit
+application identity.
 
-Applications define a schema and `query`, `mutation`, and `action` Functions. Runku builds a
-versioned artifact, generates client types, executes data operations transactionally, and keeps
-subscriptions synchronized after commits.
+An application defines its schema and `query`, `mutation`, and `action` Functions under `runku/`.
+Runku builds an immutable artifact, generates client types, validates every call, executes data
+changes transactionally, and refreshes affected subscriptions only after commit.
+
+## Distribution status
+
+Runku is currently pre-release.
+
+| Capability | Current status |
+|---|---|
+| Versioned CLI for macOS, Linux GNU, and Windows on ARM64/x86_64 | Published from tagged releases through GitHub and npm |
+| `@runku/client` and `@runku/server` TypeScript SDKs | Published together with the CLI version |
+| Complete SQLite-backed local development process | Implemented and test-covered |
+| Safe V8, local Full Node, HTTP, WebSocket, scheduling, identity, logs | Implemented and test-covered |
+| PostgreSQL, S3-compatible artifacts, NATS execution queue | Implemented as adapters with conformance gates |
+| Remote Workspace protocols and services | Implemented as libraries and integration gates |
+| General-purpose `runku-server` and `runku-agent` distribution | Not published yet |
+| Official production images, Compose profile, or Kubernetes package | Not published yet |
+| Certified backup/restore, rolling upgrade, and multi-node support window | Not published yet |
+
+You can use the source checkout for local development and technical evaluation. Do not represent
+the conformance manifests under `deployments/` as a supported production installation. See
+[Self-hosting](docs/self-hosting/overview.md) and the
+[production-readiness checklist](docs/self-hosting/production-readiness.md) before planning a live
+deployment.
+
+## Choose a path
+
+| Goal | Start here |
+|---|---|
+| Run Runku locally | [Local development](docs/getting-started/local-development.md) |
+| Build a first application | [Application tutorial](docs/getting-started/application-tutorial.md) |
+| Learn schema and Functions | [`@runku/server`](packages/server/README.md) |
+| Call Runku from an application | [`@runku/client`](packages/client/README.md) |
+| Add authentication | [Application identity](docs/auth/application-identity.md) |
+| Use Realtime and transactional data | [Data and Realtime](docs/data/data-and-realtime.md) |
+| Publish, promote, or roll back code | [Releases and Workspaces](docs/development/releases-and-workspaces.md) |
+| Evaluate self-hosting | [Self-hosting overview](docs/self-hosting/overview.md) |
+| Operate or recover a local Environment | [Administration](docs/operations/administration.md) |
+| Contribute to Runku | [Contributing](CONTRIBUTING.md) |
+| Work with an AI coding assistant | [Agent instructions](AGENTS.md) |
 
 ## Core model
 
 ```text
 Project
-└── Environment             persistent data and configuration
-    ├── Release             immutable code and contracts
-    ├── Channel             mutable production routing pointer
-    └── Workspace           mutable development routing pointer
+└── Environment             persistent data, identity, configuration, and operational state
+    ├── Release             immutable code, contracts, schema metadata, and artifacts
+    ├── Channel             mutable routing pointer to one compatible Release
+    └── Workspace           mutable development target whose revisions remain immutable
 ```
 
-Old and new Releases can operate over the same Environment while both contracts remain supported.
-A Channel changes the default routing target without silently replacing a Release explicitly
-selected by a client.
+The separation is operational, not cosmetic:
 
-## Implemented capabilities
+- data belongs to an Environment, not to a deployment of code;
+- a Release never changes after publication;
+- a Channel promotion changes traffic without rebuilding the Release;
+- an explicit Release target is never silently redirected to another Release;
+- a request, subscription, nested call, Cron activation, or scheduled invocation pins exact code;
+- old and new Releases may share one Environment while their data contracts remain compatible.
 
-- declarative TypeScript schema and Function toolchain;
-- typed Query, Mutation, Action, nested invocation, and generated client contracts;
-- transactional documents and logical indexes over SQLite or PostgreSQL;
-- realtime WebSocket subscriptions driven by a durable outbox;
-- immutable Releases, Channels, Workspaces, compatibility checks, and rollback;
-- `runAfter`, `runAt`, and Cron over durable scheduled invocations;
-- publishable, service, development, guest, JWT, JWKS, and OIDC identity boundaries;
-- Safe V8 execution and opt-in Full Node execution for Node.js and npm dependencies;
-- operational logs and OTLP log export;
-- local and remote collaborative development protocols.
-
-The repository is pre-release. Local development is fully composed by the CLI. Distributed
-storage, execution, and Firecracker adapters are present, but production installation profiles are
-not certified until a versioned `runku-server`/`runku-agent` distribution is published.
+Read [Platform model](docs/concepts/platform-model.md) before designing deployment or lifecycle
+automation.
 
 ## Requirements
 
-- Rust from [`rust-toolchain.toml`](rust-toolchain.toml);
+For an npm installation and TypeScript application development:
+
 - Node.js 20.18.1 or newer;
+- npm, pnpm, or another compatible package manager.
+
+For development from this repository:
+
+- Git;
+- `rustup` and the Rust version in [`rust-toolchain.toml`](rust-toolchain.toml);
 - pnpm 10.18.1;
-- Docker for PostgreSQL, S3/NATS conformance, or container-based Full Node tests;
-- Linux with KVM, cgroup v2, namespaces, nftables, Firecracker, and jailer for the shared Full Node
-  isolation profile.
+- `make` and a POSIX-compatible shell.
 
-## Build from source
+Docker is optional and is used by PostgreSQL, object-storage, execution-queue, and OCI conformance
+gates. Linux/KVM is required only for the microVM Full Node isolation profile; it is not required
+for Safe V8 or ordinary local development.
 
-```bash
+## Install the CLI
+
+The shortest cross-platform installation is:
+
+```sh
+npm install --global @runku/cli
+runku --version
+```
+
+The npm launcher selects an exact-version native package for macOS, Linux GNU, or Windows on ARM64
+or x86_64. Do not disable optional dependencies. Update or remove it with:
+
+```sh
+npm update --global @runku/cli
+npm uninstall --global @runku/cli
+```
+
+GitHub Releases also provide `.tar.gz` archives for macOS/Linux and `.zip` archives for Windows.
+Direct archives do not require Node.js to launch the CLI. Verify the selected archive with the
+release's `SHA256SUMS` before placing `runku` or `runku.exe` on `PATH`. Exact commands and the
+platform table are in [Local development](docs/getting-started/local-development.md#install-the-cli).
+
+To install the current source checkout instead:
+
+```sh
+git clone https://github.com/aldemi-tech/runku.git
+cd runku
 make toolchain
 pnpm install --frozen-lockfile
 make install-cli
 runku --version
 ```
 
-The complete repository gate is:
+`make toolchain` installs the exact compiler and components selected by the repository.
+`make install-cli` installs the current checkout through Cargo. A source installation identifies
+the working tree, not necessarily the bytes of a published release; record its Git commit.
 
-```bash
-make check
+To use an explicit installation root:
+
+```sh
+make install-cli CARGO_INSTALL_ROOT="$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Run an example
+Repeat the installation after updating the checkout.
 
-The Node Actions example exercises Safe V8, Full Node, an external npm dependency, cross-runtime
-calls, typed data, persistence, and durable scheduling:
+## Run the first backend
 
-```bash
-make install-cli
+The Full Node example provides the shortest tested path through build, persistence, cross-runtime
+calls, and scheduling:
+
+```sh
 pnpm --dir examples/node-actions dev
 ```
 
-The chat example adds Better Auth, publishable-key browser access, service-key server access,
-rooms, messages, and realtime synchronization:
+The command runs `runku dev`. On first start, the CLI:
 
-```bash
-make install-cli
+1. detects the application's `runku/` source directory;
+2. initializes a local Project, Environment, and `local` Workspace under `.runku/`;
+3. reconciles development Application Clients and keys;
+4. writes a local application environment file with URL, target, and permitted credentials;
+5. builds and publishes an immutable Dev Revision;
+6. starts HTTP, WebSocket, runtime, outbox, scheduler, Cron, and log services on loopback;
+7. watches source files while keeping the last valid revision active after a failed build.
+
+Stop it with `Ctrl-C`. The next start reopens the same data, identity, and releases. In another
+terminal:
+
+```sh
+cd examples/node-actions
+runku status
+runku doctor
+runku logs --limit 20
+```
+
+For a browser application with Better Auth, two users, rooms, and Realtime:
+
+```sh
 pnpm --dir examples/chat-next dev
 ```
+
+See the [application tutorial](docs/getting-started/application-tutorial.md) for a source walkthrough
+instead of copying an example blindly.
+
+## Everyday local workflow
+
+Run commands from the application root; `--root PATH` is available when automation runs elsewhere.
+
+```sh
+runku dev
+runku build
+runku status
+runku doctor
+runku logs --follow
+```
+
+- `dev` is the normal interactive workflow: initialize, build, publish, serve, and watch.
+- `build` creates an immutable package and generated TypeScript contracts without serving it.
+- `status` reads Release and Channel state without changing it.
+- `doctor` validates local durable state and never repairs it automatically.
+- `logs` emits JSON Lines with durable cursors and correlation filters.
+
+`runku init` is only needed before the first `dev` when selecting a non-default Workspace or
+listener:
+
+```sh
+runku init --workspace integration --listen 127.0.0.1:3310
+```
+
+The initialized identity and listener are durable. Runku does not silently replace divergent local
+state. The complete command and exit-code reference is in [CLI reference](docs/reference/cli.md).
+
+## Define and call a Function
+
+Every Function declares authentication, external visibility, capabilities, argument contract,
+return contract, and handler:
+
+```ts
+import { mutation, v } from "@runku/server"
+import schema from "./schema.js"
+
+export const create = mutation({
+  auth: "user",
+  visibility: "public",
+  capabilities: ["auth:read", "db:read", "db:write"],
+  args: v.object({ title: v.string({ minBytes: 1, maxBytes: 200 }) }),
+  returns: v.documentId("notes"),
+  async handler(ctx, input) {
+    const principal = ctx.auth.principal
+    if (principal === null || principal.kind !== "user") throw new Error("user required")
+    const id = ctx.db.documentId(schema.tables.notes, ctx.invocation.invocationId)
+    await ctx.db.insert(schema.tables.notes, id, {
+      ownerId: principal.id,
+      title: input.title,
+      archived: false,
+    })
+    return id
+  },
+})
+```
+
+`runku build` generates `runku/_generated/api.d.ts`. The client uses that registry without generated
+runtime code:
+
+```ts
+import { RunkuClient, typedClient, type CodeTarget } from "@runku/client"
+import type { RunkuFunctions } from "./runku/_generated/api.js"
+
+const runku = typedClient<RunkuFunctions>(new RunkuClient({
+  baseUrl: process.env.RUNKU_URL!,
+  target: process.env.RUNKU_TARGET! as CodeTarget,
+  applicationKey: process.env.RUNKU_KEY!,
+  getBearer: () => session.accessToken,
+}))
+
+const result = await runku.mutation("notes.create", { title: "Read the runbook" })
+console.log(result.value)
+```
+
+Targets are explicit: `workspace:<ref>`, `release:<rel_...>`, or `channel:<name>`. There is no
+`latest` target.
+
+## Data and recovery warning
+
+Local authoritative state lives under `.runku/` in multiple SQLite databases plus immutable
+artifacts. Do not edit those files, copy individual databases while `runku dev` is running, or
+delete the directory as a repair step.
+
+For a consistent local backup:
+
+1. stop `runku dev` with `Ctrl-C` and wait for a clean exit;
+2. copy the complete `.runku/` directory while preserving private permissions;
+3. record the Git commit/CLI version, timestamp, and backup checksum;
+4. restore into the same application root;
+5. run `runku doctor` before serving traffic.
+
+See [Backup and recovery](docs/operations/backup-and-recovery.md) for scope, verification, and
+limitations. A coordinated production backup protocol for PostgreSQL and object storage is part of
+the production distribution gate and must not be inferred from the local procedure.
+
+## Repository quality gates
+
+The full source gate is:
+
+```sh
+make check
+```
+
+It verifies the pinned toolchain, Rust formatting and strict Clippy, all workspace tests, rustdoc,
+incomplete-marker policy, both TypeScript SDKs, and executable examples. Several narrower targets
+are documented in [Contributing](CONTRIBUTING.md) and the Makefile.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
-| [`crates/`](crates) | Rust engine, runtime, storage, protocol, gateway, and CLI crates |
-| [`packages/`](packages) | `@runku/client` and `@runku/server` TypeScript packages |
-| [`protocol/`](protocol) | Versioned protocol vectors and canonical formats |
-| [`deployments/`](deployments) | Standalone, container, Kubernetes, and Firecracker integration assets |
-| [`examples/`](examples) | Executable application and runtime examples |
-| [`benchmarks/`](benchmarks) | Reproducible local regression baselines |
-| [`docs/`](docs) | User, operator, security, reference, and internals documentation |
+| [`crates/`](crates) | Rust domain, storage, runtime, identity, protocol, gateway, and CLI components |
+| [`packages/`](packages) | Public CLI launcher/native packages and TypeScript SDKs |
+| [`distribution/`](distribution) | Files embedded in downloadable release archives |
+| [`protocol/`](protocol) | Versioned language-independent persisted and wire vectors |
+| [`deployments/`](deployments) | Product deployment contracts and explicitly bounded conformance assets |
+| [`examples/`](examples) | Executable integration examples, not hidden provisioning paths |
+| [`benchmarks/`](benchmarks) | Reproducible regression workloads and non-SLA baselines |
+| [`docs/`](docs) | User, operator, security, compatibility, and maintainer knowledge base |
+| [`AGENTS.md`](AGENTS.md) | Required context and rules for AI-assisted maintenance |
 
 ## Documentation
 
-Start with the [documentation index](docs/README.md), then read:
-
-- [Local development](docs/getting-started/local-development.md)
-- [Platform model](docs/concepts/platform-model.md)
-- [Functions and runtimes](docs/functions/functions-and-runtimes.md)
-- [Application identity](docs/auth/application-identity.md)
-- [Self-hosting](docs/self-hosting/overview.md)
-- [Architecture](docs/internals/architecture.md)
+The [documentation portal](docs/README.md) provides task-oriented reading paths for application
+developers, operators, security reviewers, maintainers, and AI assistants. Documentation status is
+explicit: implemented behavior, conformance evidence, production-readiness requirements, and
+unsupported future assumptions are not interchangeable.
 
 ## License
 

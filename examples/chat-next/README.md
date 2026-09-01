@@ -41,3 +41,16 @@ make chat-example-e2e-check
 The E2E gate uses two independent browser sessions, verifies key separation, joins a room from the
 directory, exchanges messages in both directions, restarts Runku, checks persistence and realtime
 recovery, and confirms that direct unauthenticated protocol access is rejected.
+
+## Configuration, state, and scope
+
+Copy `.env.example` to `.env` and replace `BETTER_AUTH_SECRET` with 32+ random characters outside the
+automated gate. It protects persisted Better Auth key material; keep it stable for an existing auth
+database. `runku dev --prepare` creates `.env.local` before Next reads configuration.
+
+Runku state is `.runku/`; Better Auth state is `.data/`. Stop processes before backup/reset. Never
+expose the confidential/development keys through `NEXT_PUBLIC_*`.
+
+Inspect `runku.auth.json`, browser/server clients, Function membership checks, generated API, and the
+two-session E2E. This example proves integration and restart/resync, not production capacity,
+unbounded retention, or every identity provider.
