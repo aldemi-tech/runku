@@ -34,11 +34,11 @@ The release owner needs:
 5. repository immutable releases enabled after validating the first release process;
 6. protected release tags so an unreviewed commit cannot trigger publication.
 
-All nine package names must exist before their package settings can select a trusted publisher. For
-the first publication only, create a short-lived granular npm token that can publish new public
-packages, store it as the repository secret `NPM_TOKEN`, and expose it to the publish step as
-`NODE_AUTH_TOKEN`. Keep `id-token: write`: npm uses OIDC when a trust relationship exists and falls
-back to the bootstrap token only for packages that do not have one yet.
+All nine current package names already use trusted publishing. The normal workflow contains no npm
+token or repository secret. A future new package name must exist before npm can select its trusted
+publisher; bootstrap only that new package with a short-lived granular token in a reviewed,
+temporary workflow change, then remove the token wiring immediately after configuring trust. Never
+leave `NPM_TOKEN` or `NODE_AUTH_TOKEN` in the normal release path.
 
 After the first successful publication, configure every package in npm with:
 
@@ -109,10 +109,11 @@ git push origin vX.Y.Z
 5. `github-release` generates checksums, attests assets, and publishes the release after npm passes.
 
 The release workflow intentionally does not run `make check`, examples, Docker, databases, a local
-server, HTTP/WebSocket flows, benchmarks, Clippy, rustdoc, or the Rust test suite. Those belong to
-the reviewed commit's ordinary CI. Repeating them after tagging increases release latency without
-changing the source. The release gate proves native compilation, launch, metadata, package shape,
-byte identity, and publication.
+server, HTTP/WebSocket flows, benchmarks, Clippy, rustdoc, or the Rust test suite. The hosted
+`make ci-check` gate proves compile and package coherence; maintainers run the focused behavioral
+gates required by the changed contract before merge. Repeating those gates after tagging increases
+release latency without changing the source. The release gate proves native compilation, launch,
+metadata, package shape, byte identity, and publication.
 
 Cargo registry, Git dependencies, and the target directory are cached per exact native target and
 lock/toolchain hash. Matrix jobs remain independent and `fail-fast` is disabled so one platform

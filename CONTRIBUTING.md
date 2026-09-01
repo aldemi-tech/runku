@@ -8,12 +8,14 @@ transaction, and runtime boundaries.
 ```bash
 make toolchain
 pnpm install --frozen-lockfile
-make check
+make ci-check
 ```
 
-`make check` runs formatting, strict Clippy, Rust tests, rustdoc, TypeScript package checks, and both
-examples. Smaller targets in the Makefile are available while iterating, but a pull request is not
-ready until the complete relevant gate passes.
+`make ci-check` matches the bounded hosted gate: formatting, policy checks, compile-only validation
+of every Rust target, public package checks, and release metadata. It does not start Runku or run
+Rust/integration behavioral tests. `make check` adds strict Clippy, Rust tests, rustdoc, and
+executable examples. Smaller behavioral targets in the Makefile are available while iterating, but
+a pull request is not ready until every gate relevant to the changed contract passes.
 
 ## Engineering rules
 
@@ -40,9 +42,9 @@ Read [`AGENTS.md`](AGENTS.md), the documentation portal, platform model, archite
 task-specific contracts. Classify compatibility before editing. Existing vectors/durable formats
 are never reinterpreted in place.
 
-Use focused gates while iterating (`make fmt-check`, `make lint`, affected SDK/process/vertical
-targets), then run every affected gate. Report exact commands and what was not run; do not describe a
-focused check as the full gate.
+Use `make ci-check` for the baseline and focused gates while iterating (`make lint`, affected
+SDK/process/vertical targets), then run every affected behavioral gate. Report exact commands and
+what was not run; do not describe compile-only validation as behavioral evidence.
 
 Update CLI/task docs, package READMEs, vectors, compatibility, operations, security, and examples in
 the same change. Follow [Evolving Runku](docs/development/evolving-runku.md).

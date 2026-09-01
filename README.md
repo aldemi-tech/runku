@@ -268,15 +268,27 @@ the production distribution gate and must not be inferred from the local procedu
 
 ## Repository quality gates
 
-The full source gate is:
+The hosted pull-request and `main` gate is:
+
+```sh
+make ci-check
+```
+
+It checks the pinned toolchain, Rust formatting, incomplete-marker policy, compilation of every
+workspace target with all features, all three public JavaScript packages, and coordinated release
+metadata. It does not link or execute Rust tests, start Runku, build examples, use Docker or a
+database, or run benchmarks. This keeps routine automation deterministic and bounded.
+
+The full maintainer gate remains:
 
 ```sh
 make check
 ```
 
-It verifies the pinned toolchain, Rust formatting and strict Clippy, all workspace tests, rustdoc,
-incomplete-marker policy, both TypeScript SDKs, and executable examples. Several narrower targets
-are documented in [Contributing](CONTRIBUTING.md) and the Makefile.
+It additionally runs strict Clippy, all workspace tests, rustdoc, and executable examples. Run the
+full gate, or the narrower behavioral gates affected by a change, before merging changes to runtime,
+storage, protocol, concurrency, or security semantics. The gate split changes automation cost, not
+the product's test contracts. See [Contributing](CONTRIBUTING.md) and the Makefile.
 
 ## Repository layout
 
