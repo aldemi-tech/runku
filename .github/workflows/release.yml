@@ -5,6 +5,15 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: Existing release workflow run whose artifacts should be published without rebuilding
+        required: false
+        type: string
+      release_tag:
+        description: Existing tag to finish when artifact_run_id is provided
+        required: false
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -40,6 +49,7 @@ jobs:
           fi
 
   sdk-packages:
+    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
     needs: metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -73,6 +83,7 @@ jobs:
           compression-level: 0
 
   cli-binaries:
+    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
     needs: metadata
     strategy:
       fail-fast: false
@@ -213,6 +224,61 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" out/release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Runku $RELEASE_TAG"
+          fi
+
+  recover-release:
+    if: github.event_name == 'workflow_dispatch' && inputs.artifact_run_id != '' && inputs.release_tag != ''
+    needs: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify requested release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/verify-release.mjs --tag "$RELEASE_TAG"
+      - name: Use an OIDC-capable npm CLI
+        run: npm install --global npm@11.16.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: out
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run_id }}
+      - name: Publish or verify the complete npm release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-npm.mjs out
+      - name: Generate release checksums
+        working-directory: out/release
+        run: sha256sum runku-* > SHA256SUMS
+      - name: Attest downloadable release assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/release/*
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "GitHub Release $RELEASE_TAG already exists"

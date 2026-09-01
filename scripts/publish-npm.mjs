@@ -43,10 +43,16 @@ for (const tarball of tarballs) {
   if (!isMissingPackage(existing)) {
     throw new Error(`could not determine whether ${spec} exists: ${existing.stderr.trim()}`)
   }
+  if (hasPublishedDistTag(tarball.name, tarball.version)) {
+    process.stdout.write(`verified existing ${spec} while registry metadata propagates\n`)
+    continue
+  }
 
   run("npm", ["publish", tarball.path, "--access", "public"])
-  const published = await waitForPublishedIntegrity(spec)
-  if (published !== tarball.integrity) throw new Error(`${spec} registry integrity does not match the tarball`)
+  const published = await waitForPublishedState(tarball)
+  if (published && published !== tarball.integrity) {
+    throw new Error(`${spec} registry integrity does not match the tarball`)
+  }
   process.stdout.write(`published and verified ${spec}\n`)
 }
 
@@ -75,14 +81,28 @@ function isMissingPackage(result) {
   return `${result.stdout}\n${result.stderr}`.includes("E404")
 }
 
-async function waitForPublishedIntegrity(spec) {
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
+async function waitForPublishedState(tarball) {
+  const spec = `${tarball.name}@${tarball.version}`
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
     const result = run("npm", ["view", spec, "dist.integrity", "--json"], { allowFailure: true })
     if (result.status === 0) return JSON.parse(result.stdout.trim())
     if (!isMissingPackage(result)) throw new Error(`registry verification failed for ${spec}`)
-    if (attempt < 6) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000))
+    if (hasPublishedDistTag(tarball.name, tarball.version)) return null
+    if (attempt < 10) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000))
   }
-  throw new Error(`${spec} was not visible in the registry after publication`)
+  throw new Error(`${spec} was not acknowledged by the registry after publication`)
+}
+
+function hasPublishedDistTag(name, version) {
+  const result = run("npm", ["dist-tag", "ls", name], { allowFailure: true })
+  if (result.status !== 0) {
+    if (isMissingPackage(result)) return false
+    throw new Error(`could not inspect dist-tags for ${name}: ${result.stderr.trim()}`)
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => line.slice(line.indexOf(":") + 1).trim())
+    .includes(version)
 }
 
 function run(command, argumentsValue, options = {}) {
