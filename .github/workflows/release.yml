@@ -193,8 +193,6 @@ jobs:
           path: out
           merge-multiple: true
       - name: Publish or verify the complete npm release
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-npm.mjs out
 
   github-release:
@@ -265,8 +263,6 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.artifact_run_id }}
       - name: Publish or verify the complete npm release
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-npm.mjs out
       - name: Generate release checksums
         working-directory: out/release
