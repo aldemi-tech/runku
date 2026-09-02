@@ -276,6 +276,29 @@ fn validate_oidc_client(config: &OidcClientConfiguration) -> Result<(), Platform
             return Err(PlatformIdentityError::InvalidInput);
         }
     }
+    if let Some(resource) = &config.resource {
+        validate_secure_resource(resource)?;
+    }
+    Ok(())
+}
+
+fn validate_secure_resource(value: &str) -> Result<(), PlatformIdentityError> {
+    if value.is_empty() || value.len() > 2_048 {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
+    let resource = url::Url::parse(value).map_err(|_| PlatformIdentityError::InvalidInput)?;
+    let loopback = resource
+        .host_str()
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback());
+    if resource.host_str().is_none()
+        || !resource.username().is_empty()
+        || resource.password().is_some()
+        || resource.fragment().is_some()
+        || !(resource.scheme() == "https" || resource.scheme() == "http" && loopback)
+    {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
     Ok(())
 }
 

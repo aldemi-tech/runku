@@ -124,6 +124,7 @@ async fn run() -> Result<(), &'static str> {
                 token_endpoint: native.token_endpoint.clone(),
                 client_id: native.client_id.clone(),
                 scopes: native.scopes.clone(),
+                resource: native.resource.clone(),
             })
     });
     let router =
@@ -264,6 +265,7 @@ struct OidcNativeClientConfig {
     token_endpoint: String,
     client_id: String,
     scopes: Vec<String>,
+    resource: Option<String>,
 }
 
 fn load_oidc(path: &Path) -> Result<OidcConfig, &'static str> {
@@ -400,6 +402,30 @@ fn validate_native_oidc(
         {
             return Err("SERVER_OIDC_CONFIG_INVALID");
         }
+    }
+    if let Some(resource) = &config.resource {
+        validate_oidc_resource(resource, allow_loopback_http)?;
+    }
+    Ok(())
+}
+
+fn validate_oidc_resource(value: &str, allow_loopback_http: bool) -> Result<(), &'static str> {
+    if value.is_empty() || value.len() > 2_048 {
+        return Err("SERVER_OIDC_CONFIG_INVALID");
+    }
+    let resource = url::Url::parse(value).map_err(|_| "SERVER_OIDC_CONFIG_INVALID")?;
+    let loopback = resource
+        .host_str()
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback());
+    if resource.host_str().is_none()
+        || !resource.username().is_empty()
+        || resource.password().is_some()
+        || resource.fragment().is_some()
+        || !(resource.scheme() == "https"
+            || allow_loopback_http && resource.scheme() == "http" && loopback)
+    {
+        return Err("SERVER_OIDC_CONFIG_INVALID");
     }
     Ok(())
 }

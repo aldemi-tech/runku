@@ -99,6 +99,10 @@ success only after the external token has passed Runku verification and the Runk
 persisted. `--oidc-token-env` remains available for an approved helper or workload identity.
 Neither flow stores the external IdP token.
 
+If the server advertises an RFC 8707 resource indicator, the CLI includes that exact value in both
+authorization and token exchange. This lets a provider mint a JWT access token whose audience is
+the selected Runku resource; the CLI cannot override the server-selected value.
+
 This command authenticates a platform operator. It does not create or use `rk_pub_*`, `rk_sec_*`,
 or `rk_dev_*` credentials. See the complete
 [operator identity runbook](../auth/platform-identity.md).

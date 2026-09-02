@@ -242,7 +242,7 @@ strict JSON file readable by the server identity:
   "providerId": "workforce-main",
   "issuer": "https://identity.example.com/realms/operators",
   "discoveryUrl": "https://identity.example.com/realms/operators/.well-known/openid-configuration",
-  "audience": "runku-management",
+  "audience": "https://runku.example.com",
   "allowedOrigins": ["https://identity.example.com"],
   "discriminatorClaim": "runku_actor_type",
   "discriminatorValue": "operator",
@@ -253,7 +253,8 @@ strict JSON file readable by the server identity:
     "authorizationEndpoint": "https://identity.example.com/realms/operators/protocol/openid-connect/auth",
     "tokenEndpoint": "https://identity.example.com/realms/operators/protocol/openid-connect/token",
     "clientId": "runku-cli",
-    "scopes": ["openid", "profile"]
+    "scopes": ["openid", "profile"],
+    "resource": "https://runku.example.com"
   }
 }
 ```
@@ -299,6 +300,13 @@ against the fixed token endpoint without a client secret, and sends the resultin
 token only to Runku's OIDC exchange. The browser sees success only after Runku validates that token,
 commits the operator session, and persists the local profile. `--no-open` prints the authorization
 URL to stderr for headless or controlled-browser automation while retaining those checks.
+
+`nativeClient.resource` is optional. When present, the CLI sends the exact RFC 8707 resource
+indicator in both the authorization and token requests. Use it when the provider requires an
+explicit protected resource to issue a JWT access token with the configured Runku audience. The
+value must be an HTTPS URL (literal-loopback HTTP is conformance-only), and it must agree with the
+provider client/resource registration and top-level `audience`. Omitting it preserves the ordinary
+OIDC flow for providers that issue the required JWT without a resource indicator.
 
 For workload identity, an approved helper, or deterministic protocol conformance, the external
 token can instead be supplied through an allowlisted environment variable:
@@ -398,7 +406,7 @@ plus Runku's stricter verifier rules above.
 | `GET /v1/auth/config` | none | returns versioned methods and an optional canonical Management origin; never returns secrets |
 | `POST /v1/auth/exchange` | single-use invitation in JSON body | creates operator/session atomically; do not replay after success |
 | `POST /v1/auth/oidc` | external bearer; invitation required only for first link | verifies OIDC and creates a Runku session |
-| `GET /v1/auth/oidc/config` | none | returns exact issuer and public native-client endpoints/ID/scopes; never returns secrets |
+| `GET /v1/auth/oidc/config` | none | returns exact issuer and public native-client endpoints/ID/scopes/optional RFC 8707 resource; never returns secrets |
 | `POST /v1/auth/refresh` | current `rk_rt_v1_*` in JSON body | atomically rotates both tokens; reconcile an uncertain response before retry |
 | `GET /v1/auth/me` | `rk_at_v1_*` bearer | reloads current operator and grants; safe to retry |
 | `GET /v1/auth/sessions` | `rk_at_v1_*` bearer | lists non-secret sessions owned by the operator; safe to retry |

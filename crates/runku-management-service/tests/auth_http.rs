@@ -96,6 +96,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             token_endpoint: "https://identity.runku.example/token".to_owned(),
             client_id: "runku-cli".to_owned(),
             scopes: vec!["openid".to_owned(), "profile".to_owned()],
+            resource: None,
         }),
     )?;
     let response = oidc_router

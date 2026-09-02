@@ -14,6 +14,8 @@ All notable changes are documented in this file.
 - Explicit offline recovery for a lost pre-enrollment bootstrap file; replacement revokes prior
   pending material atomically and closes permanently after the first operator exists.
 - Full PostgreSQL + Keycloak reference campaigns for identity and browser-driven Product lifecycle.
+- Optional server-selected RFC 8707 resource indication in browser authorization and token
+  exchange for providers that mint audience-bound JWT access tokens only for an explicit resource.
 
 ### Changed
 

@@ -3479,6 +3479,7 @@ struct OidcClientConfigurationWire {
     token_endpoint: String,
     client_id: String,
     scopes: Vec<String>,
+    resource: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3567,6 +3568,11 @@ async fn browser_oidc_token(
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256");
+    if let Some(resource) = &config.resource {
+        authorization
+            .query_pairs_mut()
+            .append_pair("resource", resource);
+    }
     eprintln!("authorization URL: {authorization}");
     if !no_open {
         open_system_browser(authorization.as_str()).await?;
@@ -3621,15 +3627,19 @@ async fn browser_oidc_token(
             return Err(error);
         }
     };
+    let mut token_form = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("redirect_uri", callback.as_str()),
+        ("client_id", config.client_id.as_str()),
+        ("code_verifier", verifier.as_str()),
+    ];
+    if let Some(resource) = &config.resource {
+        token_form.push(("resource", resource.as_str()));
+    }
     let Ok(response) = client
         .post(&config.token_endpoint)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code.as_str()),
-            ("redirect_uri", callback.as_str()),
-            ("client_id", config.client_id.as_str()),
-            ("code_verifier", verifier.as_str()),
-        ])
+        .form(&token_form)
         .send()
         .await
     else {
@@ -3864,6 +3874,33 @@ fn validate_oidc_client_configuration(
             || url.query().is_some()
             || url.fragment().is_some()
             || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
+        {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+    }
+    if let Some(raw) = &config.resource {
+        if raw.is_empty() || raw.len() > 2_048 {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+        let resource = reqwest::Url::parse(raw).map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+        let loopback = resource.host_str().is_some_and(|host| {
+            host.parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+        });
+        if resource.host_str().is_none()
+            || !resource.username().is_empty()
+            || resource.password().is_some()
+            || resource.fragment().is_some()
+            || !(resource.scheme() == "https" || resource.scheme() == "http" && loopback)
         {
             return Err(CliFailure {
                 code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
@@ -4720,6 +4757,7 @@ mod tests {
             token_endpoint: "https://identity.example.com/token".to_owned(),
             client_id: "runku-cli".to_owned(),
             scopes: vec!["openid".to_owned(), "profile".to_owned()],
+            resource: None,
         };
         assert!(validate_oidc_client_configuration(&valid()).is_ok());
 
@@ -4740,5 +4778,13 @@ mod tests {
         let mut duplicate_scope = valid();
         duplicate_scope.scopes.push("openid".to_owned());
         assert!(validate_oidc_client_configuration(&duplicate_scope).is_err());
+
+        let mut unsafe_resource = valid();
+        unsafe_resource.resource = Some("http://identity.example.com/api".to_owned());
+        assert!(validate_oidc_client_configuration(&unsafe_resource).is_err());
+
+        let mut safe_resource = valid();
+        safe_resource.resource = Some("https://api.example.com/runku".to_owned());
+        assert!(validate_oidc_client_configuration(&safe_resource).is_ok());
     }
 }

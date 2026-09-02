@@ -18,6 +18,9 @@ pub struct OidcClientConfiguration {
     pub client_id: String,
     /// Bounded scopes requested by the native client.
     pub scopes: Vec<String>,
+    /// Optional RFC 8707 resource indicator, sent during authorization and token exchange.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
 }
 
 /// Sanitized failure returned by a product adapter.
