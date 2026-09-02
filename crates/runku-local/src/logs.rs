@@ -1,11 +1,11 @@
 //! Safe local Operational Logs query and retention boundary.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use runku_core::{EnvironmentId, EnvironmentScope};
 use runku_observability::{
-    LogPage, LogQuery, LogRepository, LogRepositoryConfig, LogRepositoryError, PruneResult,
-    SqlLogRepository,
+    LogArchive, LogArchiveStatus, LogPage, LogQuery, LogRepository, LogRepositoryConfig,
+    LogRepositoryError, PruneResult, SqlLogRepository, TieredLogRepository,
 };
 use runku_value::TimestampMicros;
 use thiserror::Error;
@@ -42,11 +42,12 @@ impl LocalLogError {
     }
 }
 
-/// Scoped local read/retention manager over the dedicated `SQLite` repository.
+/// Scoped local read/retention manager over the hot SQLite and immutable Parquet tiers.
 #[derive(Debug)]
 pub struct LocalLogManager {
     state: LocalProjectState,
-    repository: SqlLogRepository,
+    repository: Arc<dyn LogRepository>,
+    archive: LogArchive,
 }
 
 impl LocalLogManager {
@@ -56,6 +57,19 @@ impl LocalLogManager {
     ///
     /// Rejects absent/unsafe state, a symlink/non-file database, or migration failure.
     pub async fn open(root: &Path) -> Result<Self, LocalLogError> {
+        Self::open_with_archive(root, None).await
+    }
+
+    /// Opens a project with an optional external archive shared by the serving process.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the same unsafe state as [`Self::open`] and propagates archive configuration or
+    /// availability failures.
+    pub async fn open_with_archive(
+        root: &Path,
+        external_archive: Option<LogArchive>,
+    ) -> Result<Self, LocalLogError> {
         let (state, paths) = load_local(root).await.map_err(map_state)?;
         let metadata = tokio::fs::symlink_metadata(&paths.observability_database)
             .await
@@ -63,13 +77,27 @@ impl LocalLogManager {
         if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
             return Err(LocalLogError::InvalidState);
         }
-        let repository = SqlLogRepository::connect_sqlite(
-            &sqlite_url(&paths.observability_database),
-            LogRepositoryConfig::LOCAL,
-        )
-        .await
-        .map_err(map_repository)?;
-        Ok(Self { state, repository })
+        let hot: Arc<dyn LogRepository> = Arc::new(
+            SqlLogRepository::connect_sqlite(
+                &sqlite_url(&paths.observability_database),
+                LogRepositoryConfig::LOCAL,
+            )
+            .await
+            .map_err(map_repository)?,
+        );
+        let archive = match external_archive {
+            Some(archive) => archive,
+            None => LogArchive::open_filesystem(paths.observability_archive)
+                .await
+                .map_err(map_repository)?,
+        };
+        let repository: Arc<dyn LogRepository> =
+            Arc::new(TieredLogRepository::new(hot, archive.clone()));
+        Ok(Self {
+            state,
+            repository,
+            archive,
+        })
     }
 
     /// Queries only this manager's exact Project/Environment scope.
@@ -88,6 +116,18 @@ impl LocalLogManager {
     #[must_use]
     pub const fn scope(&self) -> EnvironmentScope {
         self.state.scope()
+    }
+
+    /// Returns verified immutable archive coverage for this exact Environment.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on unavailable storage, malformed manifests, gaps, or modified segments.
+    pub async fn archive_status(&self) -> Result<LogArchiveStatus, LocalLogError> {
+        self.archive
+            .status(self.state.scope())
+            .await
+            .map_err(map_repository)
     }
 
     /// Dry-runs or applies one bounded retention transaction.

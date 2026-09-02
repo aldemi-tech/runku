@@ -1,0 +1,54 @@
+services:
+  server:
+    environment:
+      RUNKU_LOG_ARCHIVE_BACKEND: s3
+      RUNKU_LOG_ARCHIVE_S3_BUCKET: ${RUNKU_LOG_ARCHIVE_S3_BUCKET:?Set the immutable archive bucket}
+      RUNKU_LOG_ARCHIVE_S3_REGION: ${RUNKU_LOG_ARCHIVE_S3_REGION:?Set the archive region}
+      RUNKU_LOG_ARCHIVE_S3_PREFIX: ${RUNKU_LOG_ARCHIVE_S3_PREFIX:?Set a unique installation prefix}
+      RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE: ${RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE:-true}
+      RUNKU_LOG_JOURNAL_URL: ${RUNKU_LOG_JOURNAL_URL:?Set the TLS NATS endpoint}
+      RUNKU_LOG_JOURNAL_REPLICAS: ${RUNKU_LOG_JOURNAL_REPLICAS:-3}
+      RUNKU_LOG_JOURNAL_CREDENTIALS_FILE: /run/secrets/log-publisher-nats.creds
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/archive-aws-credentials
+      AWS_PROFILE: ${RUNKU_LOG_ARCHIVE_AWS_PROFILE:-default}
+    secrets:
+      - log-publisher-nats-creds
+      - archive-aws-credentials
+
+  logs-worker:
+    image: ${RUNKU_SERVER_IMAGE:?Set RUNKU_SERVER_IMAGE to an immutable version and digest}
+    user: "${RUNKU_UID:?Set RUNKU_UID}:${RUNKU_GID:?Set RUNKU_GID}"
+    command: ["logs-worker"]
+    environment:
+      RUNKU_LOG_ARCHIVE_BACKEND: s3
+      RUNKU_LOG_ARCHIVE_S3_BUCKET: ${RUNKU_LOG_ARCHIVE_S3_BUCKET:?Set the immutable archive bucket}
+      RUNKU_LOG_ARCHIVE_S3_REGION: ${RUNKU_LOG_ARCHIVE_S3_REGION:?Set the archive region}
+      RUNKU_LOG_ARCHIVE_S3_PREFIX: ${RUNKU_LOG_ARCHIVE_S3_PREFIX:?Set a unique installation prefix}
+      RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE: ${RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE:-true}
+      RUNKU_LOG_JOURNAL_URL: ${RUNKU_LOG_JOURNAL_URL:?Set the TLS NATS endpoint}
+      RUNKU_LOG_JOURNAL_REPLICAS: ${RUNKU_LOG_JOURNAL_REPLICAS:-3}
+      RUNKU_LOG_JOURNAL_CREDENTIALS_FILE: /run/secrets/log-worker-nats.creds
+      RUNKU_LOG_ARCHIVE_BATCH_WAIT_SECONDS: ${RUNKU_LOG_ARCHIVE_BATCH_WAIT_SECONDS:-30}
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/archive-aws-credentials
+      AWS_PROFILE: ${RUNKU_LOG_ARCHIVE_AWS_PROFILE:-default}
+    secrets:
+      - log-worker-nats-creds
+      - archive-aws-credentials
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${RUNKU_LOG_WORKER_PIDS_LIMIT:-256}
+    mem_limit: ${RUNKU_LOG_WORKER_MEMORY_LIMIT:-1g}
+    cpus: ${RUNKU_LOG_WORKER_CPU_LIMIT:-1.0}
+    restart: unless-stopped
+
+secrets:
+  log-publisher-nats-creds:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/log-publisher-nats.creds
+  log-worker-nats-creds:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/log-worker-nats.creds
+  archive-aws-credentials:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/archive-aws-credentials

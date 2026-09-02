@@ -1,14 +1,24 @@
 //! Management HTTP contract coverage for bootstrap exchange and authenticated identity.
 
-use std::{str::FromStr as _, sync::Arc};
+use std::{
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
+use runku_core::{EnvironmentId, EnvironmentScope, ProjectId};
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagementHttpConfig, ManagementHttpExposure,
+    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
+    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementWorkspacePublish,
     OidcClientConfiguration, build_management_router, build_management_router_with_product,
 };
 use runku_platform_identity::{
@@ -22,6 +32,90 @@ use tower::ServiceExt as _;
 
 #[derive(Debug)]
 struct RejectingExternalIdentity;
+
+#[derive(Debug)]
+struct ArchiveStatusProduct {
+    scope: EnvironmentScope,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ManagementProduct for ArchiveStatusProduct {
+    fn scope(&self) -> EnvironmentScope {
+        self.scope
+    }
+
+    async fn publish(
+        &self,
+        _actor: &str,
+        _request: &[u8],
+    ) -> Result<ManagementWorkspacePublish, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn release(
+        &self,
+        _release_id: &str,
+        _against: Option<&str>,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn promote(
+        &self,
+        _channel: &str,
+        _release_id: &str,
+        _expected: Option<Option<&str>>,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn rollback(
+        &self,
+        _channel: &str,
+        _expected: &str,
+        _target: &str,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn status(&self) -> Result<ManagementReleaseStatus, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn logs(
+        &self,
+        _query: &ManagementLogQuery,
+    ) -> Result<ManagementLogPage, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn log_archive_status(
+        &self,
+    ) -> Result<ManagementLogArchiveStatus, ManagementProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementLogArchiveStatus {
+            parquet_bytes: 4096,
+            records: 12,
+            segments: 2,
+            through: "logc_12".to_owned(),
+        })
+    }
+
+    async fn log_prune(
+        &self,
+        request: &ManagementLogPruneRequest,
+    ) -> Result<ManagementLogPruneResult, ManagementProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementLogPruneResult {
+            applied: request.apply,
+            deleted: u32::from(request.apply),
+            environment_id: self.scope.environment_id().to_string(),
+            matched: 1,
+            more: false,
+        })
+    }
+}
 
 #[async_trait]
 impl ExternalIdentityAuthenticator for RejectingExternalIdentity {
@@ -150,6 +244,97 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             .as_str()
             .is_some_and(|value| value.starts_with("rk_rt_v1_"))
     );
+
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let product = Arc::new(ArchiveStatusProduct {
+        scope,
+        calls: AtomicUsize::new(0),
+    });
+    let product_router = build_management_router_with_product(
+        ManagementHttpConfig {
+            max_concurrent_requests: 8,
+            exposure: ManagementHttpExposure::LoopbackPlaintext,
+            public_management_endpoint: None,
+        },
+        identity.clone(),
+        None,
+        Some(product.clone()),
+        None,
+    )?;
+    let archive_path = format!(
+        "/v1/projects/{}/environments/{}/logs/archive-status",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let response = product_router
+        .clone()
+        .oneshot(Request::get(&archive_path).body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(product.calls.load(Ordering::SeqCst), 0);
+
+    let response = product_router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/projects/{}/environments/{}/logs/archive-status",
+                scope.project_id(),
+                EnvironmentId::generate()
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(product.calls.load(Ordering::SeqCst), 0);
+
+    let response = product_router
+        .clone()
+        .oneshot(
+            Request::get(&archive_path)
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(
+        body,
+        json!({
+            "parquetBytes": 4096,
+            "records": 12,
+            "segments": 2,
+            "through": "logc_12"
+        })
+    );
+    assert_eq!(product.calls.load(Ordering::SeqCst), 1);
+
+    let prune_path = format!(
+        "/v1/projects/{}/environments/{}/logs/prune",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let response = product_router
+        .oneshot(
+            Request::post(prune_path)
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "beforeMicros": 1_800_000_000_000_000_i64,
+                        "maximum": 100,
+                        "apply": false,
+                        "environmentId": null
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["environmentId"], scope.environment_id().to_string());
+    assert_eq!(product.calls.load(Ordering::SeqCst), 2);
 
     let response = router
         .clone()

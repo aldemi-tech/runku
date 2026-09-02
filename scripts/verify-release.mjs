@@ -71,6 +71,12 @@ assertContains(
   "gcr.io/distroless/cc-debian12:nonroot@sha256:",
 )
 assertContains("source install smoke version", read("Makefile"), `runku ${version.replaceAll(".", "\\.")}`)
+assertContains(
+  "self-host image example",
+  read("deployments/docker/.env.example"),
+  `ghcr.io/aldemi-tech/runku-server:${version}@sha256:REPLACE_WITH_64_HEX_CHARACTERS`,
+)
+assertContains("self-host release package", releaseWorkflow, "prepare-selfhost-package.sh")
 
 const tagIndex = process.argv.indexOf("--tag")
 if (tagIndex !== -1) {

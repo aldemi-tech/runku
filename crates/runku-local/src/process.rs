@@ -39,8 +39,9 @@ use runku_identity_provider::JwtProviderManager;
 use runku_identity_repository::{IdentityRepositoryConfig, SqlApplicationIdentityRepository};
 use runku_node_runtime::{LocalNodeRuntime, LocalNodeRuntimeConfig};
 use runku_observability::{
-    BufferedLogSink, LogRepository, LogRepositoryConfig, LogSpoolConfig, OperationalLogSink,
-    SqlLogRepository,
+    BufferedLogSink, JournalForwardOutcome, LogArchive, LogArchiveRunOutcome, LogArchiver,
+    LogJournalForwarder, LogRepository, LogRepositoryConfig, LogSpoolConfig, NatsLogJournal,
+    OperationalLogSink, SqlLogRepository,
 };
 use runku_realtime::{
     ChangeDispatcher, DispatcherConfig, RegistryConfig, SubscriptionRegistry, SubscriptionRunner,
@@ -61,7 +62,7 @@ use crate::{
 };
 
 /// Validated bounded local daemon policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct LocalProcessConfig {
     /// Exact browser origins allowed to use HTTP/Realtime; non-browser requests need no Origin.
     pub allowed_origins: BTreeSet<CorsOrigin>,
@@ -71,6 +72,12 @@ pub struct LocalProcessConfig {
     pub worker_interval: Duration,
     /// Refresh cadence for immutable Release and Development serving snapshots.
     pub catalog_refresh_interval: Duration,
+    /// Cadence for committing bounded hot-log batches to immutable local Parquet.
+    pub log_archive_interval: Duration,
+    /// Optional external archive; absent selects `.runku/observability-archive`.
+    pub log_archive: Option<LogArchive>,
+    /// Optional replicated journal; absent archives directly in the same process.
+    pub log_journal: Option<NatsLogJournal>,
     /// Maximum time graceful shutdown waits before aborting a stuck task.
     pub shutdown_grace: Duration,
 }
@@ -82,6 +89,9 @@ impl Default for LocalProcessConfig {
             auth_config: None,
             worker_interval: Duration::from_millis(100),
             catalog_refresh_interval: Duration::from_millis(250),
+            log_archive_interval: Duration::from_secs(60),
+            log_archive: None,
+            log_journal: None,
             shutdown_grace: Duration::from_secs(5),
         }
     }
@@ -92,6 +102,8 @@ impl LocalProcessConfig {
         if !(Duration::from_millis(10)..=Duration::from_secs(30)).contains(&self.worker_interval)
             || !(Duration::from_millis(25)..=Duration::from_secs(30))
                 .contains(&self.catalog_refresh_interval)
+            || !(Duration::from_millis(100)..=Duration::from_secs(3600))
+                .contains(&self.log_archive_interval)
             || !(Duration::from_millis(100)..=Duration::from_secs(30))
                 .contains(&self.shutdown_grace)
         {
@@ -152,6 +164,14 @@ pub struct LocalProcessTelemetrySnapshot {
     pub cron_polls: u64,
     /// Successful serving/development catalog refresh cycles.
     pub catalog_refreshes: u64,
+    /// Successful Operational Log archive polls, including idle polls.
+    pub log_archive_polls: u64,
+    /// Operational Log records committed to immutable Parquet by this process.
+    pub log_archive_records: u64,
+    /// Successful replicated-journal forward polls, including idle polls.
+    pub log_journal_polls: u64,
+    /// Operational Log records confirmed by replicated-journal `PubAck`.
+    pub log_journal_records: u64,
     /// Sanitized background failures across all loops.
     pub background_failures: u64,
     /// Tasks forcibly aborted after the shutdown grace period.
@@ -164,6 +184,10 @@ struct LocalProcessTelemetry {
     scheduled_polls: AtomicU64,
     cron_polls: AtomicU64,
     catalog_refreshes: AtomicU64,
+    log_archive_polls: AtomicU64,
+    log_archive_records: AtomicU64,
+    log_journal_polls: AtomicU64,
+    log_journal_records: AtomicU64,
     background_failures: AtomicU64,
     forced_shutdowns: AtomicU64,
 }
@@ -175,6 +199,10 @@ impl LocalProcessTelemetry {
             scheduled_polls: self.scheduled_polls.load(Ordering::Relaxed),
             cron_polls: self.cron_polls.load(Ordering::Relaxed),
             catalog_refreshes: self.catalog_refreshes.load(Ordering::Relaxed),
+            log_archive_polls: self.log_archive_polls.load(Ordering::Relaxed),
+            log_archive_records: self.log_archive_records.load(Ordering::Relaxed),
+            log_journal_polls: self.log_journal_polls.load(Ordering::Relaxed),
+            log_journal_records: self.log_journal_records.load(Ordering::Relaxed),
             background_failures: self.background_failures.load(Ordering::Relaxed),
             forced_shutdowns: self.forced_shutdowns.load(Ordering::Relaxed),
         }
@@ -192,8 +220,11 @@ pub struct LocalProcess {
     telemetry: Arc<LocalProcessTelemetry>,
     shutdown: watch::Sender<bool>,
     log_shutdown: watch::Sender<bool>,
+    log_maintenance_shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
     log_task: Option<JoinHandle<()>>,
+    log_maintenance_tasks: Vec<JoinHandle<()>>,
+    log_repository: Arc<dyn LogRepository>,
     shutdown_grace: Duration,
     _process_lock: LocalLock,
 }
@@ -364,8 +395,51 @@ impl LocalProcess {
             .await
             .map_err(|_| LocalProcessError::Composition)?,
         );
-        let (log_sink, log_writer) = BufferedLogSink::new(LogSpoolConfig::LOCAL, log_repository)
+        let log_archive = match config.log_archive.clone() {
+            Some(archive) => archive,
+            None => LogArchive::open_filesystem(paths.observability_archive.clone())
+                .await
+                .map_err(|_| LocalProcessError::Composition)?,
+        };
+        let log_archive_frontier = if config.log_journal.is_some() {
+            log_archive
+                .status(state.scope())
+                .await
+                .map_err(|_| LocalProcessError::Composition)?
+                .through
+        } else {
+            runku_observability::LogCursor::START
+        };
+        let log_archiver = config
+            .log_journal
+            .is_none()
+            .then(|| {
+                LogArchiver::new(
+                    Arc::clone(&log_repository),
+                    log_archive.clone(),
+                    state.scope(),
+                    1_000,
+                )
+            })
+            .transpose()
             .map_err(|_| LocalProcessError::Composition)?;
+        let log_forwarder = config
+            .log_journal
+            .clone()
+            .map(|journal| {
+                LogJournalForwarder::resume_after(
+                    Arc::clone(&log_repository),
+                    journal,
+                    state.scope(),
+                    256,
+                    log_archive_frontier,
+                )
+            })
+            .transpose()
+            .map_err(|_| LocalProcessError::Composition)?;
+        let (log_sink, log_writer) =
+            BufferedLogSink::new(LogSpoolConfig::LOCAL, Arc::clone(&log_repository))
+                .map_err(|_| LocalProcessError::Composition)?;
         let log_boundary: Arc<dyn OperationalLogSink> = Arc::new(log_sink);
         let release_boundary: Arc<dyn ReleaseRepository> = releases;
         let serving = Arc::new(
@@ -458,10 +532,14 @@ impl LocalProcess {
         let telemetry = Arc::new(LocalProcessTelemetry::default());
         let (shutdown, _) = watch::channel(false);
         let (log_shutdown, log_shutdown_receiver) = watch::channel(false);
+        let (log_maintenance_shutdown, _) = watch::channel(false);
         let log_task = tokio::spawn(async move {
-            let _ = log_writer.run(log_shutdown_receiver).await;
+            let _ = log_writer
+                .run_preserving_repository(log_shutdown_receiver)
+                .await;
         });
-        let mut tasks = Vec::with_capacity(5);
+        let mut tasks = Vec::with_capacity(6);
+        let mut log_maintenance_tasks = Vec::with_capacity(1);
         tasks.push(spawn_server(
             listener,
             router,
@@ -534,6 +612,22 @@ impl LocalProcess {
             shutdown.subscribe(),
             Arc::clone(&telemetry),
         ));
+        if let Some(log_archiver) = log_archiver {
+            log_maintenance_tasks.push(spawn_log_archive_loop(
+                log_archiver,
+                config.log_archive_interval,
+                log_maintenance_shutdown.subscribe(),
+                Arc::clone(&telemetry),
+            ));
+        }
+        if let Some(log_forwarder) = log_forwarder {
+            log_maintenance_tasks.push(spawn_log_forward_loop(
+                log_forwarder,
+                config.log_archive_interval,
+                log_maintenance_shutdown.subscribe(),
+                Arc::clone(&telemetry),
+            ));
+        }
 
         Ok(Self {
             state,
@@ -545,8 +639,11 @@ impl LocalProcess {
             telemetry,
             shutdown,
             log_shutdown,
+            log_maintenance_shutdown,
             tasks,
             log_task: Some(log_task),
+            log_maintenance_tasks,
+            log_repository,
             shutdown_grace: config.shutdown_grace,
             _process_lock: process_lock,
         })
@@ -620,6 +717,18 @@ impl LocalProcess {
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
+        self.log_maintenance_shutdown.send_replace(true);
+        for mut task in self.log_maintenance_tasks.drain(..) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || tokio::time::timeout(remaining, &mut task).await.is_err() {
+                task.abort();
+                drop(task.await);
+                self.telemetry
+                    .forced_shutdowns
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.log_repository.close().await;
     }
 }
 
@@ -628,10 +737,14 @@ impl Drop for LocalProcess {
         self.ready.store(false, Ordering::Release);
         self.shutdown.send_replace(true);
         self.log_shutdown.send_replace(true);
+        self.log_maintenance_shutdown.send_replace(true);
         for task in &self.tasks {
             task.abort();
         }
         if let Some(task) = &self.log_task {
+            task.abort();
+        }
+        for task in &self.log_maintenance_tasks {
             task.abort();
         }
     }
@@ -779,6 +892,99 @@ fn spawn_catalog_loop(
             }
         })
         .await;
+    })
+}
+
+fn spawn_log_archive_loop(
+    archiver: LogArchiver,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+    telemetry: Arc<LocalProcessTelemetry>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let archive_once = || async {
+            match archiver.run_once().await {
+                Ok(LogArchiveRunOutcome::Archived { records, .. }) => {
+                    telemetry
+                        .log_archive_records
+                        .fetch_add(u64::from(records), Ordering::Relaxed);
+                    telemetry.log_archive_polls.fetch_add(1, Ordering::Relaxed);
+                    true
+                }
+                Ok(LogArchiveRunOutcome::Idle { .. }) => {
+                    telemetry.log_archive_polls.fetch_add(1, Ordering::Relaxed);
+                    false
+                }
+                Err(_) => {
+                    telemetry
+                        .background_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    false
+                }
+            }
+        };
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => { archive_once().await; }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        while archive_once().await {}
+                        return;
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn spawn_log_forward_loop(
+    mut forwarder: LogJournalForwarder,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+    telemetry: Arc<LocalProcessTelemetry>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => match forwarder.run_once().await {
+                    Ok(JournalForwardOutcome::Forwarded { records, .. }) => {
+                        telemetry.log_journal_records.fetch_add(u64::from(records), Ordering::Relaxed);
+                        telemetry.log_journal_polls.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(JournalForwardOutcome::Idle { .. }) => {
+                        telemetry.log_journal_polls.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        telemetry.background_failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        loop {
+                            match forwarder.run_once().await {
+                                Ok(JournalForwardOutcome::Forwarded { records, .. }) => {
+                                    telemetry.log_journal_records.fetch_add(u64::from(records), Ordering::Relaxed);
+                                    telemetry.log_journal_polls.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Ok(JournalForwardOutcome::Idle { .. }) => {
+                                    telemetry.log_journal_polls.fetch_add(1, Ordering::Relaxed);
+                                    break;
+                                }
+                                Err(_) => {
+                                    telemetry.background_failures.fetch_add(1, Ordering::Relaxed);
+                                    break;
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
     })
 }
 

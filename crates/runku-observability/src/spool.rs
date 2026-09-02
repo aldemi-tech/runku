@@ -163,7 +163,26 @@ impl fmt::Debug for LogSpoolWriter {
 impl LogSpoolWriter {
     /// Runs until explicit shutdown or all senders disconnect. Shutdown closes admission first,
     /// drains the channel, and performs bounded retries for every admitted batch.
-    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> LogSpoolTelemetrySnapshot {
+    pub async fn run(self, shutdown: watch::Receiver<bool>) -> LogSpoolTelemetrySnapshot {
+        self.run_inner(shutdown, true).await
+    }
+
+    /// Drains admitted records while leaving the repository open for a final archive cycle.
+    ///
+    /// Process composition owns the repository lifetime when using this method and must close it
+    /// after every dependent archival task has stopped.
+    pub async fn run_preserving_repository(
+        self,
+        shutdown: watch::Receiver<bool>,
+    ) -> LogSpoolTelemetrySnapshot {
+        self.run_inner(shutdown, false).await
+    }
+
+    async fn run_inner(
+        mut self,
+        mut shutdown: watch::Receiver<bool>,
+        close_repository: bool,
+    ) -> LogSpoolTelemetrySnapshot {
         loop {
             let first = tokio::select! {
                 biased;
@@ -192,7 +211,9 @@ impl LogSpoolWriter {
             }
             self.persist(&batch).await;
         }
-        self.repository.close().await;
+        if close_repository {
+            self.repository.close().await;
+        }
         snapshot(&self.counters)
     }
 

@@ -94,16 +94,23 @@ Configuration is strict:
 
 | Variable | Required | Contract |
 |---|---:|---|
-| `RUNKU_DATABASE_URL` | yes | `postgres://` or `postgresql://`; sensitive |
-| `RUNKU_PLATFORM_IDENTITY_PEPPER` | yes | URL-safe base64, exactly 32 decoded bytes; sensitive |
+| `RUNKU_DATABASE_URL` | one source | `postgres://` or `postgresql://`; sensitive |
+| `RUNKU_PLATFORM_IDENTITY_PEPPER` | one source | URL-safe base64, exactly 32 decoded bytes; sensitive |
+| `RUNKU_DATABASE_URL_FILE` | alternative | absolute one-line regular non-symlink file; mutually exclusive with direct URL |
+| `RUNKU_PLATFORM_IDENTITY_PEPPER_FILE` | alternative | absolute one-line regular non-symlink file; mutually exclusive with direct pepper |
 | `RUNKU_STATE_DIRECTORY` | yes | absolute path other than `/`; holds bootstrap material |
 | `RUNKU_MANAGEMENT_LISTEN` | no | defaults to `127.0.0.1:3220` |
 | `RUNKU_MANAGEMENT_TLS_TERMINATED` | no | exact `true` permits a non-loopback listener behind a trusted TLS boundary |
 | `RUNKU_PUBLIC_MANAGEMENT_URL` | no | canonical public HTTPS Management origin returned by login discovery; literal-loopback HTTP is local-only |
 | `RUNKU_PLATFORM_OIDC_CONFIG` | no | absolute path to a strict JSON file, at most 64 KiB |
 | `RUNKU_PRODUCT_ROOT` | no | absolute initialized Product Environment root exposed by authenticated lifecycle routes |
+| `RUNKU_PRODUCT_ALLOWED_ORIGINS` | no | up to 64 exact comma-separated browser origins; requires Product root |
+| `RUNKU_PRODUCT_AUTH_CONFIG` | no | Product-root-relative JWT descriptor without parent traversal; requires Product root |
 
-Unknown OIDC fields, malformed secrets, unsafe database schemes, relative state/config paths, and a
+Exactly one direct or `_FILE` source is required for each database/pepper secret. Secret files are
+bounded to 64 KiB and one canonical line; missing, empty, oversized, symlinked, multiline, or
+conflicting inputs fail before a connection. Unknown OIDC fields, malformed secrets, unsafe database
+schemes, relative state/config paths, and a
 non-loopback plaintext listener fail before readiness. `RUNKU_MANAGEMENT_TLS_TERMINATED=true` is an
 assertion by the operator; Runku cannot verify the reverse proxy. Restrict the backend listener and
 configure exact trusted-proxy behavior at the deployment boundary.

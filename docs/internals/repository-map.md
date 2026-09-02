@@ -59,7 +59,7 @@ Gateway tests are the preferred vertical evidence that multiple layers compose c
 | `runku-identity-repository` | Durable clients/keyrings and adapter conformance |
 | `runku-platform-identity` | Operator bootstrap, scoped grants, invitations, sessions, PostgreSQL schema/audit |
 | `runku-management-service` | Versioned authenticated Management HTTP boundary and OIDC adapter |
-| `runku-observability` | Operational event schema, storage, query, retention |
+| `runku-observability` | Operational events; SQLite hot tier; filesystem/S3 Parquet; embedded DuckDB query; NATS journal; safe retention |
 | `runku-otel` | OTLP mapping, batching, retry, durable checkpoint |
 
 Identity policy belongs before Function execution; observability failure must not corrupt or block
@@ -96,6 +96,8 @@ authoritative. The client contains no framework configuration discovery.
 - `runku/_generated/api.d.ts`: generated current application contract;
 - `.runku/builds-v1/`: immutable local packages;
 - `.runku/`: local authoritative Environment state; never fixture/scaffold material;
+- `.runku/observability.sqlite3`: hot cursor-ordered Operational Log tier;
+- `.runku/observability-archive/`: immutable Parquet segments and strict commit manifests;
 - protocol vector JSON/binary fixtures: committed compatibility authority.
 
 Do not edit generated output to change behavior. Change source/generator and prove reproduction.

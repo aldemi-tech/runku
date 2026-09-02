@@ -62,18 +62,22 @@ Read the support boundary before designing infrastructure:
    configuration domains, and current packaging state.
 2. [Production readiness](self-hosting/production-readiness.md): auditable go/no-go checklist for
    installation, administration, HA, security, recovery, upgrades, and release artifacts.
-3. [Administration](operations/administration.md): daily checks, lifecycle operations, credentials,
+3. [Docker standalone installation](../deployments/docker/README.md): exact compact-profile install,
+   TLS boundary, secrets, backup, restore, upgrade, and removal procedure.
+4. [Administration](operations/administration.md): daily checks, lifecycle operations, credentials,
    retention, capacity, maintenance windows, and incident workflow.
-4. [Authenticated remote lifecycle](operations/remote-lifecycle.md): exact server/CLI workflow,
+5. [Authenticated remote lifecycle](operations/remote-lifecycle.md): exact server/CLI workflow,
    authorization, failures, rollback, logs, and executable acceptance evidence.
-5. [Observability](operations/observability.md): signal catalog, correlation, privacy, dashboards,
+6. [Operational Log storage and administration](operations/operational-logs.md): choose standalone
+   or HA; configure filesystem/S3/NATS; query, stream, retain, recover, size, and upgrade it.
+7. [Observability](operations/observability.md): signal catalog, correlation, privacy, dashboards,
    alerts, capacity indicators, and OTLP behavior.
-6. [Backup and recovery](operations/backup-and-recovery.md): local procedure, production-state
+8. [Backup and recovery](operations/backup-and-recovery.md): local and packaged compact procedures,
    inventory, restore verification, disaster-recovery acceptance, and current limitations.
-7. [Security model](security/security-model.md): boundaries, threats, deployment controls, secrets,
+9. [Security model](security/security-model.md): boundaries, threats, deployment controls, secrets,
    incident response, and residual risk.
-8. [Platform operator identity](auth/platform-identity.md): configure and operate management trust.
-9. [Deployment assets](../deployments/README.md): standalone, Docker, and Kubernetes profile scope.
+10. [Platform operator identity](auth/platform-identity.md): configure and operate management trust.
+11. [Deployment assets](../deployments/README.md): standalone, Docker, and Kubernetes profile scope.
 
 ## Maintainer and AI-assistant path
 

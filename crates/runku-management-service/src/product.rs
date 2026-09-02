@@ -118,6 +118,50 @@ pub struct ManagementLogPage {
     pub next: String,
 }
 
+/// Verified immutable Operational Log archive coverage for one exact Environment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementLogArchiveStatus {
+    /// Total committed Parquet bytes.
+    pub parquet_bytes: u64,
+    /// Total committed records.
+    pub records: u64,
+    /// Total committed immutable segments.
+    pub segments: u32,
+    /// Highest contiguous committed cursor.
+    pub through: String,
+}
+
+/// Bounded Operational Log retention request for one authenticated Environment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementLogPruneRequest {
+    /// Delete only records strictly older than this timestamp.
+    pub before_micros: i64,
+    /// Maximum rows inspected or deleted in one transaction.
+    pub maximum: u32,
+    /// False performs a dry run; true deletes archive-covered hot rows.
+    pub apply: bool,
+    /// Exact Environment confirmation required when applying.
+    pub environment_id: Option<String>,
+}
+
+/// Result of one bounded Operational Log retention request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementLogPruneResult {
+    /// Whether deletion was requested and applied.
+    pub applied: bool,
+    /// Rows deleted; always zero for a dry run.
+    pub deleted: u32,
+    /// Exact Environment operated on.
+    pub environment_id: String,
+    /// Rows matched by this bounded call.
+    pub matched: u32,
+    /// Whether another bounded call may match more rows.
+    pub more: bool,
+}
+
 /// Product operations exposed behind Platform Identity.
 #[async_trait]
 pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
@@ -162,4 +206,15 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         &self,
         query: &ManagementLogQuery,
     ) -> Result<ManagementLogPage, ManagementProductError>;
+
+    /// Verifies immutable archive coverage for this exact Environment.
+    async fn log_archive_status(
+        &self,
+    ) -> Result<ManagementLogArchiveStatus, ManagementProductError>;
+
+    /// Dry-runs or applies archive-bounded hot-log retention.
+    async fn log_prune(
+        &self,
+        request: &ManagementLogPruneRequest,
+    ) -> Result<ManagementLogPruneResult, ManagementProductError>;
 }

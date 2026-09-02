@@ -1,0 +1,453 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ENV_FILE=${RUNKU_SELFHOST_ENV:-$SCRIPT_DIRECTORY/.env}
+COMPOSE_FILE=$SCRIPT_DIRECTORY/compose.yaml
+
+fail() {
+  printf 'error: %s\n' "$1" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+env_value() {
+  key=$1
+  test -f "$ENV_FILE" || fail "copy .env.example to $ENV_FILE and configure it"
+  count=$(awk -F= -v key="$key" '$1 == key { count += 1 } END { print count + 0 }' "$ENV_FILE")
+  test "$count" -eq 1 || fail "$key must occur exactly once in $ENV_FILE"
+  value=$(awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2) }' "$ENV_FILE")
+  test -n "$value" || fail "$key must not be empty in $ENV_FILE"
+  case "$value" in
+    *[!A-Za-z0-9_./:@+=,-]*) fail "$key contains unsupported shell-sensitive characters" ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+optional_env_value() {
+  key=$1
+  test -f "$ENV_FILE" || fail "copy .env.example to $ENV_FILE and configure it"
+  count=$(awk -F= -v key="$key" '$1 == key { count += 1 } END { print count + 0 }' "$ENV_FILE")
+  test "$count" -le 1 || fail "$key must not occur more than once in $ENV_FILE"
+  test "$count" -eq 1 || return 0
+  awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2) }' "$ENV_FILE"
+}
+
+compose() {
+  profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  case "${profile:-standalone}" in
+    standalone)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+      ;;
+    browser)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" "$@"
+      ;;
+    s3-logs)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.s3-logs.yaml" "$@"
+      ;;
+    browser-s3-logs)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-logs.yaml" "$@"
+      ;;
+    s3-logs-compatible)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.s3-logs.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-compatible.yaml" "$@"
+      ;;
+    browser-s3-logs-compatible)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-logs.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-compatible.yaml" "$@"
+      ;;
+    ha-logs)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.ha-logs.yaml" "$@"
+      ;;
+    browser-ha-logs)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" -f "$SCRIPT_DIRECTORY/compose.ha-logs.yaml" "$@"
+      ;;
+    ha-logs-s3-compatible)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.ha-logs.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-compatible.yaml" -f "$SCRIPT_DIRECTORY/compose.ha-s3-compatible.yaml" "$@"
+      ;;
+    browser-ha-logs-s3-compatible)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" -f "$SCRIPT_DIRECTORY/compose.ha-logs.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-compatible.yaml" -f "$SCRIPT_DIRECTORY/compose.ha-s3-compatible.yaml" "$@"
+      ;;
+    *) fail "RUNKU_DEPLOYMENT_PROFILE has an unsupported value" ;;
+  esac
+}
+
+sha256_file() {
+  openssl dgst -sha256 -r "$1" | awk '{ print $1 }'
+}
+
+write_secret() {
+  destination=$1
+  value=$2
+  temporary="$destination.new.$$"
+  umask 077
+  test ! -e "$destination" || fail "refusing to replace existing secret $destination"
+  ( printf '%s\n' "$value" >"$temporary" ) || fail "could not write $temporary"
+  chmod 0600 "$temporary"
+  mv "$temporary" "$destination"
+}
+
+require_external_secret() {
+  path=$1
+  test -f "$path" && test ! -L "$path" && test -s "$path" || fail "required external secret is missing, empty, or unsafe: $path"
+  chmod 0600 "$path"
+}
+
+validate_server_image() {
+  image=$1
+  if test "${RUNKU_SELFHOST_ALLOW_UNPINNED_IMAGE_FOR_TESTS:-false}" = true; then
+    case "$image" in
+      runku-selfhost-evidence:*) return 0 ;;
+    esac
+  fi
+  case "$image" in
+    ghcr.io/aldemi-tech/runku-server:*@sha256:*) ;;
+    *) fail "RUNKU_SERVER_IMAGE must use the versioned Runku image and an immutable sha256 digest" ;;
+  esac
+  image_version=${image#ghcr.io/aldemi-tech/runku-server:}
+  image_version=${image_version%%@sha256:*}
+  printf '%s\n' "$image_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "RUNKU_SERVER_IMAGE must use an exact semantic version tag"
+  digest=${image##*@sha256:}
+  test "${#digest}" -eq 64 || fail "RUNKU_SERVER_IMAGE digest must contain 64 hexadecimal characters"
+  case "$digest" in *[!0-9a-f]*) fail "RUNKU_SERVER_IMAGE digest must be lowercase hexadecimal" ;; esac
+}
+
+wait_ready() {
+  attempts=0
+  while test "$attempts" -lt 30; do
+    if compose exec -T server /usr/local/bin/runku-server probe-ready >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  compose logs --tail 100 server >&2 || true
+  fail "server did not become ready"
+}
+
+configure() {
+  need docker
+  need openssl
+  data_directory=$(env_value RUNKU_DATA_DIRECTORY)
+  secrets_directory=$(env_value RUNKU_SECRETS_DIRECTORY)
+  uid=$(env_value RUNKU_UID)
+  gid=$(env_value RUNKU_GID)
+  postgres_port=$(env_value RUNKU_POSTGRES_PORT)
+  server_image=$(env_value RUNKU_SERVER_IMAGE)
+  validate_server_image "$server_image"
+
+  case "$data_directory:$secrets_directory" in
+    /*:/*) ;;
+    *) fail "RUNKU_DATA_DIRECTORY and RUNKU_SECRETS_DIRECTORY must be absolute" ;;
+  esac
+  test "$data_directory" != / && test "$secrets_directory" != / || fail "data and secret directories must not be filesystem root"
+  test "$data_directory" != "$secrets_directory" || fail "data and secret directories must be distinct"
+  case "$data_directory:$secrets_directory" in
+    *'/../'*|*'/./'*|*'//'*) fail "data and secret paths must be canonical" ;;
+  esac
+  case "$secrets_directory/" in
+    "$data_directory/product/"*|"$data_directory/platform/"*) fail "secret directory must be outside Product and Platform state" ;;
+  esac
+  case "$uid:$gid:$postgres_port" in
+    *[!0-9:]*) fail "RUNKU_UID, RUNKU_GID, and RUNKU_POSTGRES_PORT must be decimal integers" ;;
+  esac
+  test "$uid" -ne 0 || fail "RUNKU_UID must be non-root"
+  test "$gid" -ne 0 || fail "RUNKU_GID must be non-root"
+
+  mkdir -p "$data_directory/product" "$data_directory/platform" "$secrets_directory"
+  for directory in "$data_directory" "$data_directory/product" "$data_directory/platform" "$secrets_directory"; do
+    test ! -L "$directory" || fail "persistent and secret directories must not be symlinks"
+  done
+  chmod 0700 "$data_directory" "$data_directory/product" "$data_directory/platform" "$secrets_directory"
+  case "$(uname -s)" in
+    Linux) actual_uid=$(stat -c '%u' "$data_directory/product"); actual_gid=$(stat -c '%g' "$data_directory/product") ;;
+    Darwin) actual_uid=$(stat -f '%u' "$data_directory/product"); actual_gid=$(stat -f '%g' "$data_directory/product") ;;
+    *) fail "unsupported host for ownership validation" ;;
+  esac
+  test "$actual_uid" = "$uid" && test "$actual_gid" = "$gid" || fail "data directories must be owned by RUNKU_UID:RUNKU_GID ($uid:$gid)"
+
+  existing=0
+  for file in postgres-password database-url platform-pepper; do
+    test ! -L "$secrets_directory/$file" || fail "secret files must not be symlinks"
+    test ! -e "$secrets_directory/$file" || existing=$((existing + 1))
+  done
+  test "$existing" -eq 0 || test "$existing" -eq 3 || fail "secret set is partial; restore the coordinated set instead of regenerating it"
+  if test "$existing" -eq 0; then
+    postgres_password=$(openssl rand -base64 36 | tr '+/' '-_' | tr -d '=\r\n')
+    platform_pepper=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\r\n')
+    write_secret "$secrets_directory/postgres-password" "$postgres_password"
+    write_secret "$secrets_directory/database-url" "postgres://runku:$postgres_password@127.0.0.1:$postgres_port/runku"
+    write_secret "$secrets_directory/platform-pepper" "$platform_pepper"
+  fi
+  chmod 0600 "$secrets_directory/postgres-password" "$secrets_directory/database-url" "$secrets_directory/platform-pepper"
+  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  case "${deployment_profile:-standalone}" in
+    *s3-logs*|*ha-logs*) require_external_secret "$secrets_directory/archive-aws-credentials" ;;
+  esac
+  case "${deployment_profile:-standalone}" in
+    *ha-logs*)
+      require_external_secret "$secrets_directory/log-publisher-nats.creds"
+      require_external_secret "$secrets_directory/log-worker-nats.creds"
+      ;;
+  esac
+  compose config --quiet
+  printf 'configuration valid; secrets and persistent directories are ready\n'
+}
+
+start() {
+  need docker
+  configure
+  if compose ps --status running --services | grep -qx server; then
+    wait_ready
+    deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+    case "${deployment_profile:-standalone}" in
+      *ha-logs*)
+        worker_replicas=$(env_value RUNKU_LOG_WORKER_REPLICAS)
+        compose up -d --scale "logs-worker=$worker_replicas" logs-worker
+        ;;
+    esac
+    printf 'server already running and ready\n'
+    return
+  fi
+  compose --profile setup up --abort-on-container-exit --exit-code-from product-prepare product-prepare
+  compose --profile setup rm --force product-init product-prepare >/dev/null
+  compose up -d --wait postgres
+  compose run --rm --no-deps server check
+  compose run --rm server migrate
+  compose up -d server
+  wait_ready
+  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  case "${deployment_profile:-standalone}" in
+    *ha-logs*)
+      worker_replicas=$(env_value RUNKU_LOG_WORKER_REPLICAS)
+      compose up -d --scale "logs-worker=$worker_replicas" logs-worker
+      ;;
+  esac
+  data_directory=$(env_value RUNKU_DATA_DIRECTORY)
+  printf 'server ready; initial owner invitation: %s\n' "$data_directory/platform/bootstrap/initial-owner.code"
+}
+
+status() {
+  need docker
+  compose ps
+  compose exec -T server /usr/local/bin/runku-server probe-live
+  compose exec -T server /usr/local/bin/runku-server probe-ready
+  compose exec -T server /usr/local/bin/runku-server version
+}
+
+backup_create() {
+  need docker
+  need jq
+  need openssl
+  need tar
+  test "$#" -eq 2 || fail "usage: runku-selfhost backup DIRECTORY ENCRYPTION_REFERENCE"
+  destination=$1
+  encryption_reference=$2
+  case "$encryption_reference" in
+    none|NONE|unencrypted|UNENCRYPTED|'') fail "an external encryption or encrypted-volume reference is required" ;;
+  esac
+  test ! -e "$destination" || fail "backup destination already exists"
+  parent=$(dirname -- "$destination")
+  mkdir -p "$parent"
+  parent=$(CDPATH= cd -- "$parent" && pwd)
+  destination="$parent/$(basename -- "$destination")"
+  temporary=$(mktemp -d "$parent/.runku-backup.XXXXXX")
+  was_running=false
+  if compose ps --status running --services | grep -qx server; then
+    was_running=true
+    compose stop -t 30 server
+  fi
+  cleanup_backup() {
+    rm -rf "$temporary"
+    if test "$was_running" = true; then
+      compose up -d server >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup_backup EXIT HUP INT TERM
+
+  data_directory=$(env_value RUNKU_DATA_DIRECTORY)
+  secrets_directory=$(env_value RUNKU_SECRETS_DIRECTORY)
+  test -f "$data_directory/product/.runku/local-state-v1.json" || fail "Product state is not initialized"
+  test -f "$secrets_directory/platform-pepper" || fail "platform pepper is missing"
+  compose up -d --wait postgres
+  compose exec -T postgres pg_dump -U runku -d runku --format=custom >"$temporary/platform.pgdump"
+  tar -C "$data_directory" -czf "$temporary/product-state.tar.gz" product platform
+  server_version=$(compose run --rm --no-deps server version | tr -d '\r\n')
+  database_sha=$(sha256_file "$temporary/platform.pgdump")
+  state_sha=$(sha256_file "$temporary/product-state.tar.gz")
+  pepper_sha=$(sha256_file "$secrets_directory/platform-pepper")
+  created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  jq -n \
+    --arg createdAt "$created_at" \
+    --arg serverVersion "$server_version" \
+    --arg encryptionReference "$encryption_reference" \
+    --arg databaseSha256 "$database_sha" \
+    --arg stateSha256 "$state_sha" \
+    --arg platformPepperSha256 "$pepper_sha" \
+    '{formatVersion:1,createdAt:$createdAt,serverVersion:$serverVersion,encryptionReference:$encryptionReference,containsSensitiveState:true,externalSecretFilesIncluded:false,files:{"platform.pgdump":$databaseSha256,"product-state.tar.gz":$stateSha256},requiredSecretFingerprints:{platformPepperSha256:$platformPepperSha256}}' \
+    >"$temporary/manifest.json"
+  chmod 0600 "$temporary"/*
+  mv "$temporary" "$destination"
+  temporary="$parent/.runku-backup-complete.$$"
+  mkdir "$temporary"
+  rmdir "$temporary"
+  trap - EXIT HUP INT TERM
+  if test "$was_running" = true; then
+    compose up -d server
+    wait_ready
+  fi
+  printf 'backup created: %s\n' "$destination"
+}
+
+backup_verify() {
+  need docker
+  need jq
+  need openssl
+  need tar
+  test "$#" -eq 1 || fail "usage: runku-selfhost verify-backup DIRECTORY"
+  backup=$1
+  test -d "$backup" || fail "backup directory does not exist"
+  jq -e '
+    (keys | sort) == ["containsSensitiveState","createdAt","encryptionReference","externalSecretFilesIncluded","files","formatVersion","requiredSecretFingerprints","serverVersion"] and
+    (.files | keys | sort) == ["platform.pgdump","product-state.tar.gz"] and
+    (.requiredSecretFingerprints | keys) == ["platformPepperSha256"] and
+    .formatVersion == 1 and .containsSensitiveState == true and
+    .externalSecretFilesIncluded == false and (.encryptionReference | length > 0) and
+    (.createdAt | type == "string") and (.serverVersion | startswith("runku-server "))
+  ' "$backup/manifest.json" >/dev/null
+  for file in platform.pgdump product-state.tar.gz; do
+    expected=$(jq -er --arg file "$file" '.files[$file]' "$backup/manifest.json")
+    actual=$(sha256_file "$backup/$file")
+    test "$actual" = "$expected" || fail "$file checksum does not match the manifest"
+  done
+  tar -tzf "$backup/product-state.tar.gz" | awk '$0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad }' || fail "state archive contains an unsafe path"
+  tar -tzf "$backup/product-state.tar.gz" | grep -qx 'product/.runku/local-state-v1.json' || fail "state archive does not contain Product identity"
+  compose run --rm -T --no-deps --entrypoint pg_restore postgres --list <"$backup/platform.pgdump" >/dev/null
+  printf 'backup verified: %s\n' "$backup"
+}
+
+restore_backup() {
+  need docker
+  need jq
+  need openssl
+  need tar
+  test "$#" -eq 1 || fail "usage: runku-selfhost restore DIRECTORY"
+  backup=$1
+  expected_confirmation="restore:$(basename -- "$backup")"
+  test "${RUNKU_RESTORE_CONFIRM:-}" = "$expected_confirmation" || fail "set RUNKU_RESTORE_CONFIRM=$expected_confirmation for an empty-install restore"
+  backup_verify "$backup"
+  data_directory=$(env_value RUNKU_DATA_DIRECTORY)
+  secrets_directory=$(env_value RUNKU_SECRETS_DIRECTORY)
+  expected_pepper=$(jq -er '.requiredSecretFingerprints.platformPepperSha256' "$backup/manifest.json")
+  actual_pepper=$(sha256_file "$secrets_directory/platform-pepper")
+  test "$actual_pepper" = "$expected_pepper" || fail "the configured Platform Identity pepper does not match this backup"
+  compose stop -t 30 server >/dev/null 2>&1 || true
+  test -z "$(find "$data_directory/product" -mindepth 1 -print -quit)" || fail "Product destination is not empty"
+  test -z "$(find "$data_directory/platform" -mindepth 1 -print -quit)" || fail "Platform destination is not empty"
+  compose up -d --wait postgres
+  table_count=$(compose exec -T postgres psql -X -U runku -d runku -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema')")
+  test "$table_count" = 0 || fail "PostgreSQL destination is not empty"
+
+  stage=$(mktemp -d "$data_directory/.restore-stage.XXXXXX")
+  cleanup_restore() { rm -rf "$stage"; }
+  trap cleanup_restore EXIT HUP INT TERM
+  tar -C "$stage" -xzf "$backup/product-state.tar.gz"
+  test -f "$stage/product/.runku/local-state-v1.json" || fail "restored Product state is incomplete"
+  compose exec -T postgres pg_restore -U runku -d runku --exit-on-error --single-transaction <"$backup/platform.pgdump"
+  rmdir "$data_directory/product" "$data_directory/platform"
+  mv "$stage/product" "$data_directory/product"
+  mv "$stage/platform" "$data_directory/platform"
+  rmdir "$stage"
+  trap - EXIT HUP INT TERM
+  compose run --rm --no-deps --entrypoint /usr/local/bin/runku server doctor --root /var/lib/runku/product
+  compose run --rm server check
+  compose run --rm server migrate
+  compose up -d server
+  wait_ready
+  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  case "${deployment_profile:-standalone}" in
+    *ha-logs*)
+      worker_replicas=$(env_value RUNKU_LOG_WORKER_REPLICAS)
+      compose up -d --scale "logs-worker=$worker_replicas" logs-worker
+      ;;
+  esac
+  printf 'restore complete and server ready\n'
+}
+
+upgrade() {
+  need docker
+  need openssl
+  test "$#" -eq 3 || fail "usage: runku-selfhost upgrade IMAGE_WITH_DIGEST BACKUP_DIRECTORY ENCRYPTION_REFERENCE"
+  image=$1
+  backup=$2
+  encryption_reference=$3
+  validate_server_image "$image"
+  image_version=${image#ghcr.io/aldemi-tech/runku-server:}
+  image_version=${image_version%%@sha256:*}
+  printf '%s\n' "$image_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "image tag must be an exact semantic version"
+  digest=${image##*@sha256:}
+  docker pull "$image"
+  docker run --rm --entrypoint /usr/local/bin/runku-server "$image" version
+  RUNKU_SERVER_IMAGE=$image compose run --rm --no-deps server check
+  backup_create "$backup" "$encryption_reference"
+  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  case "${deployment_profile:-standalone}" in
+    *ha-logs*)
+      worker_replicas=$(env_value RUNKU_LOG_WORKER_REPLICAS)
+      RUNKU_SERVER_IMAGE=$image compose up -d --force-recreate --scale "logs-worker=$worker_replicas" logs-worker
+      RUNKU_SERVER_IMAGE=$image compose exec -T logs-worker /usr/local/bin/runku-server version
+      ;;
+  esac
+  compose stop -t 30 server
+  RUNKU_SERVER_IMAGE=$image compose run --rm server migrate
+  RUNKU_SERVER_IMAGE=$image compose up -d server
+  attempts=0
+  while test "$attempts" -lt 30; do
+    if RUNKU_SERVER_IMAGE=$image compose exec -T server /usr/local/bin/runku-server probe-ready >/dev/null 2>&1; then
+      break
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  test "$attempts" -lt 30 || fail "new server failed readiness; preserve state and follow the migration rollback limit"
+  temporary="$ENV_FILE.new.$$"
+  awk -v image="$image" 'BEGIN { replaced=0 } /^RUNKU_SERVER_IMAGE=/ { print "RUNKU_SERVER_IMAGE=" image; replaced=1; next } { print } END { if (!replaced) exit 2 }' "$ENV_FILE" >"$temporary"
+  chmod --reference="$ENV_FILE" "$temporary" 2>/dev/null || chmod 0600 "$temporary"
+  mv "$temporary" "$ENV_FILE"
+  printf 'upgrade complete; pinned image persisted in %s\n' "$ENV_FILE"
+}
+
+uninstall() {
+  need docker
+  test "$#" -eq 1 || fail "usage: runku-selfhost uninstall keep-data|delete-data"
+  mode=$1
+  if test "$mode" = keep-data; then
+    compose down
+    printf 'containers removed; PostgreSQL volume, Product data, and secrets were retained\n'
+    return
+  fi
+  test "$mode" = delete-data || fail "usage: runku-selfhost uninstall keep-data|delete-data"
+  project=$(env_value COMPOSE_PROJECT_NAME)
+  test "${RUNKU_UNINSTALL_CONFIRM:-}" = "delete:$project" || fail "set RUNKU_UNINSTALL_CONFIRM=delete:$project to delete all installation data"
+  data_directory=$(env_value RUNKU_DATA_DIRECTORY)
+  compose down --volumes
+  test "$data_directory" != / || fail "refusing to delete a root data directory"
+  rm -rf "$data_directory/product" "$data_directory/platform"
+  printf 'installation containers, PostgreSQL volume, and Product state removed; secret files were retained\n'
+}
+
+command=${1:-}
+test -n "$command" || fail "usage: runku-selfhost configure|start|status|backup|verify-backup|restore|upgrade|uninstall"
+shift
+case "$command" in
+  configure) test "$#" -eq 0 || fail "configure takes no arguments"; configure ;;
+  start) test "$#" -eq 0 || fail "start takes no arguments"; start ;;
+  status) test "$#" -eq 0 || fail "status takes no arguments"; status ;;
+  backup) backup_create "$@" ;;
+  verify-backup) backup_verify "$@" ;;
+  restore) restore_backup "$@" ;;
+  upgrade) upgrade "$@" ;;
+  uninstall) uninstall "$@" ;;
+  *) fail "unknown command: $command" ;;
+esac

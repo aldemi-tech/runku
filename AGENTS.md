@@ -26,7 +26,7 @@ Then read the task-specific sources:
 | Release/Workspace | `docs/development/releases-and-workspaces.md`, `docs/reference/compatibility.md`, release/workspace tests |
 | Distribution/release automation | `docs/maintainers/releases.md`, `.github/workflows/release.yml`, `scripts/release-*.mjs`, package manifests |
 | Self-hosting/deployment | `docs/self-hosting/overview.md`, `docs/self-hosting/production-readiness.md`, `deployments/README.md`, role-specific runbooks |
-| Operations | `docs/operations/administration.md`, `docs/operations/observability.md`, `docs/operations/backup-and-recovery.md` |
+| Operations | `docs/operations/administration.md`, `docs/operations/operational-logs.md`, `docs/operations/observability.md`, `docs/operations/backup-and-recovery.md` |
 | Architecture/evolution | `docs/internals/repository-map.md`, `docs/development/evolving-runku.md`, protocol vectors, relevant crate APIs |
 
 Do not claim to have read a file unless you read it completely in the current task.
@@ -48,9 +48,10 @@ Do not claim to have read a file unless you read it completely in the current ta
 
 The source line is pre-release. Tagged releases publish the cross-platform CLI, TypeScript SDKs,
 and a compact Linux `runku-server` binary/non-root image that composes Platform Identity with one
-initialized Safe V8 Product Environment. The repository includes distributed adapters and
+initialized Safe V8 Product Environment. Releases include a supported compact Docker Compose
+package plus optional browser and HA-log overlays. The repository includes distributed adapters and
 conformance harnesses, but it does not yet publish separated general-purpose roles, a
-`runku-agent` binary, a production Compose profile, or a supported Helm chart.
+`runku-agent` binary, or a supported Helm chart.
 
 Never invent installation commands, image names, environment variables, Admin APIs, backup
 commands, or stability guarantees. When a required production capability is absent:
@@ -91,6 +92,8 @@ Do not reconcile contradictions by adding vague wording.
 - Shared untrusted Full Node code requires a VM-grade boundary; Docker alone is not that boundary.
 - Unknown wire, persisted, manifest, runtime, or configuration versions fail closed.
 - No realtime notification is visible before the corresponding commit.
+- Operational Log retention never deletes beyond the verified immutable archive frontier; raw logs
+  and authoritative usage/billing facts are distinct contracts.
 
 ## Documentation maintenance contract
 

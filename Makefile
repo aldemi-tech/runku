@@ -1,4 +1,4 @@
-.PHONY: toolchain toolchain-check check ci-check ci-rust-check ci-packages-check security-audit fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check cli-package-check release-package-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check mutation-engine-benchmark schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check platform-identity-check platform-identity-keycloak-check platform-lifecycle-keycloak-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
+.PHONY: toolchain toolchain-check check ci-check ci-rust-check ci-packages-check security-audit fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check cli-package-check release-package-check selfhost-package-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check platform-identity-check platform-identity-keycloak-check platform-lifecycle-keycloak-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check operational-logs-ha-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
 
 RUST_TOOLCHAIN_CHANNEL := $(shell sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
 
@@ -15,7 +15,7 @@ toolchain-check:
 	cargo --version; \
 	rust-analyzer --version
 
-check: toolchain-check fmt-check lint test docs incomplete-check sdk-typescript-check sdk-server-check cli-package-check release-package-check chat-example-check node-example-check
+check: toolchain-check fmt-check lint test docs incomplete-check sdk-typescript-check sdk-server-check cli-package-check release-package-check selfhost-package-check chat-example-check node-example-check
 
 # The hosted gate proves that every Rust target compiles and every public JavaScript package is
 # coherent without linking test binaries or starting application/runtime processes. Behavioral,
@@ -63,7 +63,7 @@ install-cli-check:
 	@install_root=$$(mktemp -d); \
 	trap 'rm -rf "$$install_root"' EXIT; \
 	$(MAKE) --no-print-directory install-cli CARGO_INSTALL_ROOT="$$install_root"; \
-	"$$install_root/bin/runku" --version | rg -x 'runku 0\.2\.0'; \
+	"$$install_root/bin/runku" --version | rg -x 'runku 0\.3\.0'; \
 	"$$install_root/bin/runku" --help | rg -F 'runku dev [--root PATH]'
 
 cli-package-check: js-install
@@ -71,6 +71,21 @@ cli-package-check: js-install
 
 release-package-check:
 	node scripts/verify-release.mjs
+
+selfhost-package-check:
+	@package_root=$$(mktemp -d); \
+	trap 'rm -rf "$$package_root"' EXIT; \
+	version=$$(node -p 'require("./package.json").version'); \
+	./scripts/prepare-selfhost-package.sh "$$version" "$$package_root/out"; \
+	tar -xzf "$$package_root/out/release/runku-selfhost-v$$version.tar.gz" -C "$$package_root"; \
+	cp "$$package_root/runku-selfhost-v$$version/.env.example" "$$package_root/runku-selfhost-v$$version/.env"; \
+	RUNKU_UID=$$(id -u) RUNKU_GID=$$(id -g) docker compose \
+	  --project-directory "$$package_root/runku-selfhost-v$$version" \
+	  --env-file "$$package_root/runku-selfhost-v$$version/.env" \
+	  -f "$$package_root/runku-selfhost-v$$version/compose.yaml" config --quiet; \
+	sh -n "$$package_root/runku-selfhost-v$$version/runku-selfhost"; \
+	test -z "$$(find "$$package_root/runku-selfhost-v$$version" -type f \
+	  \( -name '*password*' -o -name '*.creds' -o -name '*.key' \) -print -quit)"
 
 chat-example-check: js-install
 	@node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major < 20 || (major === 20 && (minor < 18 || (minor === 18 && patch < 1)))) { console.error("Runku Chat requires Node.js >=20.18.1 (see examples/chat-next/.nvmrc)"); process.exit(1) }'
@@ -266,6 +281,10 @@ nested-function-check:
 operational-logs-check: storage-up sdk-typescript-check sdk-server-check
 	RUNKU_TEST_POSTGRES_URL="postgres://runku:runku_local_test_only@127.0.0.1:$${RUNKU_POSTGRES_PORT:-55432}/runku_test" cargo test -p runku-observability -p runku-runtime -p runku-gateway -p runku-local -p runku-cli --all-features --locked -- --test-threads=1
 	cargo clippy -p runku-observability -p runku-runtime -p runku-gateway -p runku-local -p runku-cli --all-targets --all-features -- -D warnings
+
+# Explicit Docker acceptance; intentionally outside ci-check.
+operational-logs-ha-check:
+	./scripts/operational-logs-ha-evidence.sh
 
 otlp-export-check: storage-up sdk-typescript-check sdk-server-check
 	RUNKU_TEST_POSTGRES_URL="postgres://runku:runku_local_test_only@127.0.0.1:$${RUNKU_POSTGRES_PORT:-55432}/runku_test" cargo test -p runku-otel -p runku-observability -p runku-local -p runku-cli --all-features --locked -- --test-threads=1

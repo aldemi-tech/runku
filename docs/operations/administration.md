@@ -6,13 +6,18 @@ administration commands.
 
 ## Current administration boundary
 
-The pre-release CLI fully administers one local application root. The source server additionally
+The CLI fully administers one local application root. The compact Docker package additionally
 attaches one Product Environment to PostgreSQL-backed Platform Identity for browser/invitation
 login, scoped invitations, sessions, authenticated publish/release/promote/rollback/status, and
-historical/streaming logs. It is not the complete distributed multi-Environment package. Use the
+historical/streaming logs plus package-level backup, restore, upgrade, probes, and guarded removal.
+It is not the distributed multi-Environment package. Use the
 [authenticated remote lifecycle](remote-lifecycle.md) for exact commands, the
 [Platform Identity runbook](../auth/platform-identity.md) for trust configuration, and the
 [production-readiness checklist](../self-hosting/production-readiness.md) for the remaining boundary.
+
+For packaged process status use `./runku-selfhost status`. It checks container state, liveness,
+authoritative PostgreSQL readiness, and the exact server version. Back up with the package helper
+before filesystem, image, schema, or dependency maintenance; do not copy a live bind mount.
 
 ## Daily local checks
 
@@ -120,7 +125,13 @@ runku logs --remote --release rel_... --follow
 
 Save the last cursor. For retention, calculate an absolute Unix-microsecond cutoff, dry-run, review
 matched/more/Environment, then apply bounded batches with exact Environment confirmation. Retention
-is not credential revocation and does not erase exported or backed-up copies.
+is not credential revocation and does not erase exported or backed-up copies. Run
+Run `runku logs archive-status` for a local Product root, or
+`runku logs archive-status --remote` for an attached server, before deletion. Use the matching
+local `runku logs prune` or authenticated `runku logs prune --remote` path: Runku will not delete hot rows beyond the verified
+archive frontier. Standalone embeds this work; HA runs the archive consumer as the same
+`runku-server` artifact with `logs-worker`. Use the complete
+[Operational Log runbook](operational-logs.md) for configuration, capacity, failure, and restore.
 
 ## Incident workflow
 

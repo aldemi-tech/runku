@@ -22,12 +22,17 @@ Runku is currently pre-release.
 | Remote Workspace protocols and services | Implemented as libraries and integration gates |
 | Platform operator bootstrap, sessions, scoped invitations, browser OIDC, and remote lifecycle/logs | Implemented in source with a full PostgreSQL + browser + Product lifecycle campaign |
 | Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
+| Compact Docker standalone installation | Release-packaged with PostgreSQL, secret files, probes, backup/verify/restore/upgrade, and guarded removal |
+| Embedded Operational Log history | SQLite hot tier, filesystem/S3 Parquet, DuckDB query, safe retention, and live stream implemented and test-covered |
+| Optional HA Operational Log path | Same-package Compose overlay for externally operated NATS/S3 plus explicit failure-path acceptance |
 | General-purpose distributed roles and `runku-agent` package | Not published yet |
-| Distributed production Compose or Kubernetes package | Not published yet |
-| Certified backup/restore, rolling upgrade, and multi-node support window | Not published yet |
+| General distributed-role or Kubernetes package | Not published yet |
+| Compact offline backup/restore and upgrade procedure | Packaged and tested; 0.3.0 establishes the first supported upgrade floor |
+| Rolling multi-node upgrade/support window | Not published yet |
 
-You can use the source checkout for local development and technical evaluation. Do not represent
-the conformance manifests under `deployments/` as a supported production installation. See
+You can use the source checkout for local development and technical evaluation. The compact Docker
+package is the supported bounded installation; do not represent the root-level dependency fixtures
+or Kubernetes conformance manifests as a production installation. See
 [Self-hosting](docs/self-hosting/overview.md) and the
 [production-readiness checklist](docs/self-hosting/production-readiness.md) before planning a live
 deployment.
@@ -46,7 +51,9 @@ deployment.
 | Use Realtime and transactional data | [Data and Realtime](docs/data/data-and-realtime.md) |
 | Publish, promote, or roll back code | [Releases and Workspaces](docs/development/releases-and-workspaces.md) |
 | Evaluate self-hosting | [Self-hosting overview](docs/self-hosting/overview.md) |
+| Install the compact self-hosted product | [Docker standalone installation](deployments/docker/README.md) |
 | Operate or recover a local Environment | [Administration](docs/operations/administration.md) |
+| Store and administer logs in standalone or HA | [Operational Log storage](docs/operations/operational-logs.md) |
 | Contribute to Runku | [Contributing](CONTRIBUTING.md) |
 | Work with an AI coding assistant | [Agent instructions](AGENTS.md) |
 
@@ -267,8 +274,9 @@ For a consistent local backup:
 5. run `runku doctor` before serving traffic.
 
 See [Backup and recovery](docs/operations/backup-and-recovery.md) for scope, verification, and
-limitations. A coordinated production backup protocol for PostgreSQL and object storage is part of
-the production distribution gate and must not be inferred from the local procedure.
+limitations. The compact Docker package coordinates PostgreSQL and Product/Platform filesystem
+state. External S3 and NATS recovery remains an installation-owned HA procedure and must not be
+inferred from the local backup command.
 
 ## Repository quality gates
 

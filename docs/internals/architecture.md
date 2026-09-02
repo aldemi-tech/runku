@@ -65,6 +65,7 @@ every distributed management domain named above.
 | Realtime | subscription lifecycle/dependency matching | pre-commit events or business authorization bypass |
 | Background workers | outbox/schedules/Cron materialization with leases | changing pinned code |
 | Identity | Application/functional trust and policy | application resource ownership |
+| Observability | scoped events, hot log tier, archive/journal, historical query | billing authority or authorization decisions |
 
 ## Consistency and ownership
 
@@ -80,6 +81,14 @@ A packaged distribution may compose `api`, `background`, `management`, and optio
 not semantics or sources of truth. API/background/management do not require KVM. Only the selected
 shared-untrusted Full Node Agent profile receives host isolation privileges.
 
+Operational Logs follow the same composition rule. Local/standalone embeds capture, SQLite hot
+storage, filesystem or S3 Parquet archival, and DuckDB query in the Product process. The optional HA
+profile adds a replicated JetStream durability boundary and runs the archive loop as
+`runku-server logs-worker` from the same artifact. It does not require splitting other roles.
+Serving publishes exact-scope cursor-ordered records and waits for PubAck; a worker commits the
+Parquet object and strict manifest before explicit ACK. Query merges verified archive rows with
+newer hot rows. Raw Product logs never enter Platform Identity PostgreSQL.
+
 ## Failure containment
 
 - management outage: serve last valid known revision; reject unknown changes;
@@ -89,6 +98,8 @@ shared-untrusted Full Node Agent profile receives host isolation privileges.
 - Realtime socket loss: clients reconnect and resync authoritative Query state;
 - Agent loss/uncertain Node result: queue/reconcile and replace worker; never report uncertain success;
 - telemetry outage: bounded buffering/drop accounting without blocking authoritative state;
+- log journal/archive outage: retain admitted hot rows and pending journal deliveries; never prune
+  beyond the verified immutable archive frontier;
 - incompatible Release/config: reject activation/promotion before serving.
 
 ## Scaling constraints

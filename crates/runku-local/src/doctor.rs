@@ -16,7 +16,7 @@ use runku_development_access::{
 use runku_identity::{ApplicationIdentityRepository, EnvironmentScope};
 use runku_identity_repository::{IdentityRepositoryConfig, SqlApplicationIdentityRepository};
 use runku_observability::{
-    LogCursor, LogQuery, LogRepository, LogRepositoryConfig, SqlLogRepository,
+    LogArchive, LogCursor, LogQuery, LogRepository, LogRepositoryConfig, SqlLogRepository,
 };
 use runku_otel::{ExportCheckpointRepository, OtlpRepositoryConfig, SqlExportCheckpointRepository};
 use runku_release_repository::{RepositoryConfig, SqlReleaseRepository};
@@ -112,6 +112,7 @@ pub async fn doctor_local(root: &Path) -> Result<LocalDoctorReport, LocalDoctorE
     ] {
         validate_regular_file(path).await?;
     }
+    validate_directory(&paths.observability_archive).await?;
     load_identity_pepper(&paths).await.map_err(map_state)?;
     load_development_access_pepper(&paths)
         .await
@@ -220,6 +221,12 @@ pub async fn doctor_local(root: &Path) -> Result<LocalDoctorReport, LocalDoctorE
     .await
     .map_err(|_| LocalDoctorError::Unavailable)?;
     logs.close().await;
+    LogArchive::open_filesystem(paths.observability_archive.clone())
+        .await
+        .map_err(|_| LocalDoctorError::Unavailable)?
+        .status(state.scope())
+        .await
+        .map_err(|_| LocalDoctorError::Inconsistent)?;
     let otlp = SqlExportCheckpointRepository::connect_sqlite(
         &sqlite_url(&paths.otlp_database),
         OtlpRepositoryConfig::LOCAL,
@@ -273,6 +280,16 @@ async fn validate_regular_file(path: &Path) -> Result<(), LocalDoctorError> {
         .await
         .map_err(|_| LocalDoctorError::InvalidState)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
+        return Err(LocalDoctorError::InvalidState);
+    }
+    Ok(())
+}
+
+async fn validate_directory(path: &Path) -> Result<(), LocalDoctorError> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| LocalDoctorError::InvalidState)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(LocalDoctorError::InvalidState);
     }
     Ok(())

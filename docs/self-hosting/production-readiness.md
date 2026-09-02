@@ -1,8 +1,40 @@
 # Production-readiness contract
 
 This is the auditable acceptance contract for declaring a Runku Self-Hosted profile supported. The
-current source line has not completed this checklist. Component tests and deployment conformance
-assets are evidence inputs, not substitutes for a releasable product package.
+compact Docker profile completes a deliberately bounded subset of this checklist. Unchecked items
+remain requirements for general distributed roles, Full Node, active-active/multi-node, and
+Kubernetes; they do not silently expand the compact support boundary. Component tests and
+conformance assets are evidence inputs, not substitutes for a released package.
+
+## Compact Docker support decision
+
+Version 0.3.0 establishes the first supported compact-installation floor with this exact boundary:
+
+| Area | Included |
+|---|---|
+| Product | one persistent Environment and one active writer per server process |
+| Runtime | Safe V8; no Full Node Agent |
+| Processes | one `runku-server` plus PostgreSQL; optional same-image log workers |
+| Logs | embedded filesystem Parquet/DuckDB, optional external NATS/S3 HA log overlay |
+| Network | dedicated Linux host, loopback listeners, operator-owned TLS reverse proxy |
+| Lifecycle | setup, invitation/OIDC login, publish, promote, rollback, logs, backup, verify, restore, upgrade, guarded uninstall |
+| Upgrade floor | 0.3.0; later releases must qualify their exact previous-supported version |
+
+The release package and executable evidence cover:
+
+- [x] version/digest-pinned non-root image and coordinated CLI/server/self-host archive;
+- [x] mounted one-line secret files with conflict, symlink, size, and path rejection;
+- [x] configuration preflight, idempotent migration, liveness/readiness, and graceful stop;
+- [x] clean initialization, initial-owner login, Product publish/release/promote/invoke/log flow;
+- [x] offline PostgreSQL plus complete Product/Platform filesystem backup and verification;
+- [x] restore into empty state with secret fingerprint, `doctor`, migration, and readiness checks;
+- [x] restart with automatic serving of the persisted Channel;
+- [x] explicit image upgrade preflight and guarded data deletion;
+- [x] source-level standalone archive and NATS/S3 archive failure/conformance tests.
+
+The source gate is `make selfhost-package-check`; a pre-tag manual Release workflow additionally
+runs `scripts/selfhost-artifact-evidence.sh` with freshly built Linux archives and the packaged
+Compose profile. The HA dependency campaign remains `make operational-logs-ha-check`.
 
 ## Definition of supported
 
@@ -77,6 +109,12 @@ database rows, or reverse-engineering crates.
 ## Observability and operations
 
 - [ ] Operational logs and security audit are distinct, retained, redacted, and queryable.
+- [ ] Standalone log capture/archive/query works inside one Runku process with persistent Product
+      storage; it does not require an undeclared log database or observability daemon.
+- [ ] HA logs prove local admission → JetStream PubAck → immutable Parquet/manifest commit → ACK,
+      including worker crash/replay, journal full/quorum loss, object-store outage, and zone loss.
+- [ ] Log retention is bounded by both time and verified archive cursor; corruption and gaps fail
+      closed without deletion.
 - [ ] Metrics/traces cover gateway, identity, releases, runtime, data, Realtime, workers, dependencies,
       Full Node, and management.
 - [ ] Cardinality budgets prevent user-controlled labels from exhausting collectors.

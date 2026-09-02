@@ -1,4 +1,8 @@
-# Operational signals
+# Observability signals
+
+This page defines signal ownership and the minimum dashboards/alerts. The storage, streaming,
+retention, HA, recovery, and exact configuration runbook is
+[Operational Log storage and administration](operational-logs.md).
 
 Runku keeps diagnostic logs separate from security audit events and durable usage accounting.
 Best-effort telemetry must never become authoritative billing or scheduling state.
@@ -25,10 +29,16 @@ slot use, replacement, and artifact-cache behavior.
 Gateway, PostgreSQL, S3, NATS, Agent, scheduler, outbox, and realtime paths expose bounded labels.
 Environment and Function dimensions require explicit cardinality budgets.
 
-## OTLP
+## Storage and OTLP
 
-Operational logs can be exported over OTLP. Collector failure does not block the application hot
-path. Operators must configure buffering, retention, sampling, and redaction for their topology.
+Operational logs are stored natively in a hot SQLite tier and immutable Parquet history. DuckDB is
+an embedded historical query engine, not a service. Development and standalone archive inside the
+Product root by default. HA inserts a replicated NATS JetStream journal before an S3-compatible
+Parquet archive and runs the archive loop as `runku-server logs-worker` from the same image.
+
+Operational logs can additionally be exported over OTLP. Collector failure does not block the
+application hot path and OTLP is not the HA durability journal. Operators must configure collector
+buffering, retention, sampling, and redaction independently.
 
 The current source exports logs and performance aggregates. A production distribution must publish
 its complete metrics, traces, dashboards, alerts, and runbooks together with the supported profile.
@@ -45,8 +55,8 @@ follow requires `logs:follow` at the exact Project/Environment. `--follow` is on
 HTTP response, not repeated client requests; the server reauthenticates the session during the
 stream and terminates it after revocation or grant removal. Product Operational Logs remain in the
 Product log repository. Platform Identity PostgreSQL contains operator/session/grant/audit state,
-not the Product log payload stream. Use OTLP to copy Product records to a centralized backend and
-apply independent retention there.
+not the Product log payload stream. Raw log payloads do not belong in Platform Identity PostgreSQL.
+Use the filesystem/S3 archive for history and OTLP only when another telemetry copy is required.
 
 ## Required signal catalog
 
@@ -70,6 +80,8 @@ latency, storage/pool failure, outbox/schedule/queue age, Realtime resync spike,
 no Full Node capacity/replacement failure, telemetry loss, and backup verification. Thresholds come
 from measured workloads, not local benchmark numbers.
 
-Prune logs in bounded dry-run/apply batches. OTLP checkpoints are durable and retry may repeat
-unacknowledged events; collectors deduplicate by event identity. Collector failure never blocks
-serving. Restore may move cursors backward, requiring identity-based reconciliation.
+Prune logs in bounded dry-run/apply batches only after `runku logs archive-status` (local) or
+`runku logs archive-status --remote` (attached server) confirms coverage.
+OTLP checkpoints are durable and retry may repeat unacknowledged events; collectors deduplicate by
+event identity. Collector failure never blocks serving. Restore may move cursors backward,
+requiring identity-and-content reconciliation.

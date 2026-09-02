@@ -34,6 +34,15 @@ Remote log follow rechecks `logs:follow` during the single streaming connection,
 revocation or grant removal stops future records. Operator tokens never authorize Product
 invocation, and `rk_pub_*`/`rk_sec_*`/`rk_dev_*` never authorize management operations.
 
+Archived logs retain the exact Project/Environment namespace in subjects, object paths, manifests,
+and queries. Serving and worker NATS identities are separate; remote NATS requires TLS and rejects
+URL credentials. S3 credentials are never accepted through CLI arguments. Immutable manifest
+commit, digest verification, create-or-verify replay, and archive-frontier retention prevent a
+forged ACK, altered object, or partial write from silently authorizing deletion. Object storage and
+journal operators remain privileged trust boundaries and require least privilege, encryption,
+audit, and separate failure-domain backups. See
+[Operational Log storage](../operations/operational-logs.md).
+
 ## Residual risk
 
 The current repository is pre-release and its production packaging and distributed operational
@@ -82,6 +91,17 @@ updates even when RustSec reports no exploitable advisory.
 One-time secret material belongs in a secret manager. Rotate with overlap, verify replacement, then
 revoke. Never place secrets in CLI arguments, ConfigMaps, image layers, source, generated types,
 public env prefixes, logs, traces, errors, or unencrypted backups.
+
+The compact Docker profile mounts the PostgreSQL URL and Platform Identity pepper as separate
+one-line secret files. Runku rejects simultaneous direct/file sources, relative paths, symlinks,
+non-files, empty/oversized/multiline values, and control characters. Docker Compose file-backed
+secrets are an injection mechanism, not an encryption system: protect their host directory with a
+dedicated owner, `0700` directory permissions, encrypted storage, and backup access controls.
+
+That profile uses Linux host networking only to preserve the Product's loopback listener. Treat the
+dedicated host as the installation boundary, firewall the PostgreSQL/Runku loopback ports, and allow
+only the host TLS proxy to publish Product and Management. Do not use the profile on an untrusted
+shared host or expose its loopback ports through another forwarding mechanism.
 
 The native login client uses exact canonical origins, HTTPS except literal loopback, no proxy, no
 redirects, PKCE S256, fresh state, a loopback-only listener, exact callback Host/path/method,

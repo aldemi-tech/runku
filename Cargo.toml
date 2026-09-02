@@ -49,10 +49,11 @@ authors = ["Aldemi <opensource@aldemi.tech>"]
 
 [workspace.dependencies]
 async-trait = "=0.1.92"
-async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream", "kv", "ring", "server_2_14"] }
+async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream", "kv", "nkeys", "ring", "server_2_14"] }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 bytes = "=1.12.1"
+duckdb = { version = "=1.10505.0", default-features = false, features = ["parquet"] }
 deno_core = "=0.410.0"
 deno_ast = { version = "=0.53.3", features = ["transpiling"] }
 swc_ecma_transforms_module = "=33.0.0"
@@ -64,7 +65,7 @@ jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws
 proptest = "=1.11.0"
 prost = "=0.14.4"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "logs"] }
-object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
+object_store = { version = "=0.14.1", default-features = false, features = ["aws", "fs"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
 rpassword = "=7.5.4"
 serde = { version = "=1.0.229", features = ["derive"] }

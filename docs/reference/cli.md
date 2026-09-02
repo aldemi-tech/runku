@@ -334,13 +334,22 @@ for the original access-token lifetime.
 ### Retention
 
 ```sh
-runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000]
-runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] \
+runku logs archive-status [--root PATH] [--remote]
+runku logs prune [--root PATH] [--remote] --before-micros I64 [--maximum 1..10000]
+runku logs prune [--root PATH] [--remote] --before-micros I64 [--maximum 1..10000] \
   --apply --environment env_*
 ```
 
-Without `--apply`, pruning is a dry run. Applying requires the exact Environment confirmation and
-deletes at most the bounded batch. Repeat while the result reports more matches.
+`archive-status` verifies the immutable manifest chain and prints its contiguous cursor, rows,
+segments, and bytes. Add `--remote` for an attached self-hosted/S3/HA Environment using the current
+operator session and `logs:read`. Without `--apply`, pruning is a dry run. Applying requires the
+exact Environment confirmation and deletes at most the bounded batch. Add `--remote` to use the
+current operator session with `logs:prune` against the attached Environment. Repeat while the result
+reports more matches. Deletion is additionally bounded by the committed archive cursor; an
+unarchived hot row is never deleted merely because its timestamp matches.
+
+For filesystem/S3 selection, HA journaling, worker operation, backup, and incident handling, see
+[Operational Log storage](../operations/operational-logs.md).
 
 ### OTLP export
 

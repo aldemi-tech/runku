@@ -4,7 +4,7 @@ One repository tag coordinates the public CLI, TypeScript SDKs, and compact Linu
 The release workflow builds six native CLI executables and two native server executables, packages
 the same CLI bytes for GitHub and npm, publishes nine npm packages, publishes one multi-platform
 server image, generates checksums/SBOM/provenance, and creates the GitHub Release only after npm and
-the image are complete.
+the image are complete. It also publishes one compact self-host installation archive.
 
 This procedure publishes irreversible external state. Run it only from a reviewed, clean commit on
 `main`; never from an uncommitted working tree or a fork.
@@ -19,6 +19,8 @@ Version `X.Y.Z` produces:
 - six exact-version `@runku/cli-*` native packages;
 - four `.tar.gz` archives for macOS/Linux and two `.zip` archives for Windows;
 - two `runku-server` `.tar.gz` archives for Linux GNU ARM64/x86_64;
+- `runku-selfhost-vX.Y.Z.tar.gz` with the versioned compact Compose profile, overlays, operator
+  helper, and offline guide;
 - `ghcr.io/aldemi-tech/runku-server:X.Y.Z` as a non-root ARM64/x86_64 image, plus an immutable
   `sha-COMMIT` tag and architecture assembly tags;
 - `SHA256SUMS`, GitHub artifact attestations, npm integrity, and npm provenance.
@@ -76,6 +78,7 @@ pnpm check:release
 cargo build --package runku-cli --release --locked
 target/release/runku --version
 target/release/runku --help
+make selfhost-package-check
 git diff --check
 ```
 
@@ -89,7 +92,11 @@ gh workflow run release.yml --ref main
 ```
 
 A manual run builds, smoke-checks, archives, and packs every target but skips npm and GitHub
-publication. Use it to prove all native runners before creating irreversible registry versions.
+publication. It also builds a local Linux image from the fresh archives and exercises clean compact
+setup, invitation login, publish/release/promote/invoke/logs, coordinated backup, offline
+verification, empty-install restore, preserved operator session, and automatic serving after
+restart. Use it to prove all native runners and the release-shaped self-host package before creating
+irreversible registry versions.
 
 ## Trigger and workflow
 
@@ -105,17 +112,22 @@ git push origin vX.Y.Z
 1. `metadata` validates the immutable tag/version relationship.
 2. `sdk-packages` installs the locked JavaScript workspace, runs the three focused package checks,
    and packs client, server, and CLI launcher tarballs.
-3. Six `cli-binaries` jobs run concurrently on native ARM64/x86_64 macOS, Linux, and Windows
+3. `selfhost-package` creates the compact installation archive and statically validates its Compose
+   model without starting services.
+4. Six `cli-binaries` jobs run concurrently on native ARM64/x86_64 macOS, Linux, and Windows
    runners. Each builds only `runku-cli --release --locked`, then checks `--version`, `--help`,
    package content, and archive creation.
-4. Two `server-binaries` jobs build and smoke-check `runku-server` natively on Linux GNU ARM64 and
+5. Two `server-binaries` jobs build and smoke-check `runku-server` natively on Linux GNU ARM64 and
    x86_64 and produce downloadable archives plus exact image inputs.
-5. `server-image` combines those server bytes with the matching native CLI bytes into a digest-
+6. On a manual pre-tag run, `selfhost-artifact-smoke` assembles the Linux x86_64 image and runs the
+   bounded install/lifecycle/disaster-restore campaign. It is skipped on tags because the reviewed
+   commit already supplied this behavioral evidence.
+7. `server-image` combines those server bytes with the matching native CLI bytes into a digest-
    pinned distroless image, publishes both architectures, and creates the version/commit manifests
    with BuildKit SBOM and provenance attestations.
-6. `publish-npm` verifies the complete nine-package set, publishes native packages first and the
+8. `publish-npm` verifies the complete nine-package set, publishes native packages first and the
    launcher last, and compares registry integrity with the local tarballs.
-7. `github-release` generates checksums, attests assets, and publishes the release after npm and
+9. `github-release` generates checksums, attests assets, and publishes the release after npm and
    the server image pass.
 
 The release workflow intentionally does not run `make check`, examples, databases, a server

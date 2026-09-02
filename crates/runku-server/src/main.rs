@@ -16,6 +16,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use runku_gateway::CorsOrigin;
 use runku_identity::{
     ApplicationScope, JwtAlgorithm, JwtPrincipalProfile, JwtProviderConfig, KeyringCrypto,
 };
@@ -27,6 +28,10 @@ use runku_management_service::{
     ExternalIdentityAuthenticator, JwtExternalIdentityAuthenticator, ManagementHttpConfig,
     ManagementHttpExposure, ManagementProduct, OidcClientConfiguration,
     build_management_router_with_product, serve_management,
+};
+use runku_observability::{
+    JournalArchiveOutcome, LogArchive, LogJournalArchiver, NatsLogJournal, NatsLogJournalConfig,
+    S3LogArchiveConfig,
 };
 use runku_platform_identity::{
     BootstrapResult, OperatorName, PlatformIdentityCrypto, PlatformIdentityRepository,
@@ -41,10 +46,11 @@ use crate::product::ProductAdapter;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3220";
 const BOOTSTRAP_RECOVERY_CONFIRMATION: &str = "replace-lost-initial-owner-code";
+const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
+    match Box::pin(run()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => {
             eprintln!("error: {code}");
@@ -53,11 +59,19 @@ async fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run() -> Result<(), &'static str> {
     let command = env::args().nth(1).unwrap_or_else(|| "serve".to_owned());
     if !matches!(
         command.as_str(),
-        "serve" | "check" | "migrate" | "recover-bootstrap" | "version"
+        "serve"
+            | "check"
+            | "migrate"
+            | "recover-bootstrap"
+            | "logs-worker"
+            | "probe-live"
+            | "probe-ready"
+            | "version"
     ) || env::args().len() > 2
     {
         return Err("SERVER_USAGE_INVALID");
@@ -65,6 +79,15 @@ async fn run() -> Result<(), &'static str> {
     if command == "version" {
         println!("runku-server {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    if command == "probe-live" {
+        return probe_management("/health/live").await;
+    }
+    if command == "probe-ready" {
+        return probe_management("/health/ready").await;
+    }
+    if command == "logs-worker" {
+        return run_logs_worker_command().await;
     }
     let config = ServerConfig::load()?;
     if command == "check" {
@@ -102,6 +125,7 @@ async fn run() -> Result<(), &'static str> {
         repository.close().await;
         return result;
     }
+    let log_journal = open_log_journal(config.log_journal.as_ref()).await?;
     initialize_bootstrap(&identity, &config.state_directory).await?;
     let http = ManagementHttpConfig {
         max_concurrent_requests: 1_024,
@@ -109,12 +133,22 @@ async fn run() -> Result<(), &'static str> {
         public_management_endpoint: config.public_management_endpoint.clone(),
     };
     let external = external_authenticator(config.oidc.as_ref())?;
-    let product = match config.product_root.as_ref() {
-        Some(root) => {
-            Some(Arc::new(ProductAdapter::open(root.clone()).await?) as Arc<dyn ManagementProduct>)
-        }
+    let product_adapter = match config.product_root.as_ref() {
+        Some(root) => Some(Arc::new(
+            Box::pin(ProductAdapter::open(
+                root.clone(),
+                config.log_archive.clone(),
+                log_journal.clone(),
+                config.product_allowed_origins.clone(),
+                config.product_auth_config.clone(),
+            ))
+            .await?,
+        )),
         None => None,
     };
+    let product = product_adapter
+        .as_ref()
+        .map(|adapter| Arc::clone(adapter) as Arc<dyn ManagementProduct>);
     let oidc_client = config.oidc.as_ref().and_then(|oidc| {
         oidc.native_client
             .as_ref()
@@ -135,8 +169,20 @@ async fn run() -> Result<(), &'static str> {
         .map_err(|_| "SERVER_MANAGEMENT_LISTENER_UNAVAILABLE")?;
     println!("runku-server management listening on {}", config.listen);
     let result = serve_management(listener, router, config.exposure, shutdown()).await;
+    if let Some(product) = product_adapter {
+        product.shutdown().await;
+    }
     repository.close().await;
     result.map_err(|_| "SERVER_MANAGEMENT_STOPPED")
+}
+
+async fn run_logs_worker_command() -> Result<(), &'static str> {
+    let archive = load_log_archive()?.ok_or("SERVER_LOG_ARCHIVE_S3_REQUIRED")?;
+    let journal_config = load_log_journal()?.ok_or("SERVER_LOG_JOURNAL_CONFIGURATION_MISSING")?;
+    let journal = open_log_journal(Some(&journal_config))
+        .await?
+        .ok_or("SERVER_LOG_JOURNAL_CONFIGURATION_MISSING")?;
+    run_log_worker(journal, archive, log_archive_batch_wait()?).await
 }
 
 struct ServerConfig {
@@ -148,15 +194,19 @@ struct ServerConfig {
     public_management_endpoint: Option<String>,
     oidc: Option<OidcConfig>,
     product_root: Option<PathBuf>,
+    product_allowed_origins: BTreeSet<CorsOrigin>,
+    product_auth_config: Option<PathBuf>,
+    log_archive: Option<LogArchive>,
+    log_journal: Option<ServerLogJournalConfig>,
 }
 
 impl ServerConfig {
     fn load() -> Result<Self, &'static str> {
-        let database_url = required("RUNKU_DATABASE_URL")?;
+        let database_url = required_secret("RUNKU_DATABASE_URL")?;
         if !(database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")) {
             return Err("SERVER_DATABASE_URL_INVALID");
         }
-        let encoded = required("RUNKU_PLATFORM_IDENTITY_PEPPER")?;
+        let encoded = required_secret("RUNKU_PLATFORM_IDENTITY_PEPPER")?;
         let decoded = URL_SAFE_NO_PAD
             .decode(encoded)
             .map_err(|_| "SERVER_PLATFORM_PEPPER_INVALID")?;
@@ -207,6 +257,37 @@ impl ServerConfig {
                 }
             })
             .transpose()?;
+        let product_allowed_origins = load_product_allowed_origins()?;
+        let product_auth_config = env::var_os("RUNKU_PRODUCT_AUTH_CONFIG")
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute()
+                    || path.as_os_str().is_empty()
+                    || path.components().any(|component| {
+                        matches!(
+                            component,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    Err("SERVER_PRODUCT_AUTH_CONFIG_INVALID")
+                } else {
+                    Ok(path)
+                }
+            })
+            .transpose()?;
+        if product_root.is_none()
+            && (!product_allowed_origins.is_empty() || product_auth_config.is_some())
+        {
+            return Err("SERVER_PRODUCT_CONFIGURATION_WITHOUT_ROOT");
+        }
+        let log_archive = load_log_archive()?;
+        let log_journal = load_log_journal()?;
+        if log_journal.is_some() && log_archive.is_none() {
+            return Err("SERVER_LOG_ARCHIVE_S3_REQUIRED");
+        }
         Ok(Self {
             database_url,
             pepper,
@@ -216,7 +297,187 @@ impl ServerConfig {
             public_management_endpoint,
             oidc,
             product_root,
+            product_allowed_origins,
+            product_auth_config,
+            log_archive,
+            log_journal,
         })
+    }
+}
+
+fn load_product_allowed_origins() -> Result<BTreeSet<CorsOrigin>, &'static str> {
+    let Some(value) = env::var("RUNKU_PRODUCT_ALLOWED_ORIGINS").ok() else {
+        return Ok(BTreeSet::new());
+    };
+    if value.is_empty() || value.len() > 16 * 1024 {
+        return Err("SERVER_PRODUCT_ALLOWED_ORIGINS_INVALID");
+    }
+    let values = value.split(',').collect::<Vec<_>>();
+    if values.len() > 64 || values.iter().any(|origin| origin.is_empty()) {
+        return Err("SERVER_PRODUCT_ALLOWED_ORIGINS_INVALID");
+    }
+    let origins = values
+        .into_iter()
+        .map(|origin| {
+            origin
+                .parse::<CorsOrigin>()
+                .map_err(|_| "SERVER_PRODUCT_ALLOWED_ORIGINS_INVALID")
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if origins.len() != value.split(',').count() {
+        return Err("SERVER_PRODUCT_ALLOWED_ORIGINS_INVALID");
+    }
+    Ok(origins)
+}
+
+fn load_log_archive() -> Result<Option<LogArchive>, &'static str> {
+    let backend = env::var("RUNKU_LOG_ARCHIVE_BACKEND").unwrap_or_else(|_| "filesystem".to_owned());
+    match backend.as_str() {
+        "filesystem" => Ok(None),
+        "s3" => {
+            let mut config = S3LogArchiveConfig::new(
+                required("RUNKU_LOG_ARCHIVE_S3_BUCKET")?,
+                required("RUNKU_LOG_ARCHIVE_S3_REGION")?,
+            );
+            if let Ok(value) = env::var("RUNKU_LOG_ARCHIVE_S3_PREFIX") {
+                config.prefix = value;
+            }
+            config.endpoint = env::var("RUNKU_LOG_ARCHIVE_S3_ENDPOINT").ok();
+            config.virtual_hosted_style =
+                optional_bool("RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE", false)?;
+            config.allow_http = optional_bool("RUNKU_LOG_ARCHIVE_S3_ALLOW_HTTP", false)?;
+            LogArchive::open_s3(&config)
+                .map(Some)
+                .map_err(|_| "SERVER_LOG_ARCHIVE_CONFIGURATION_INVALID")
+        }
+        _ => Err("SERVER_LOG_ARCHIVE_CONFIGURATION_INVALID"),
+    }
+}
+
+#[derive(Clone)]
+struct ServerLogJournalConfig {
+    url: String,
+    credentials_file: Option<PathBuf>,
+    require_tls: bool,
+    journal: NatsLogJournalConfig,
+}
+
+fn load_log_journal() -> Result<Option<ServerLogJournalConfig>, &'static str> {
+    let Some(url) = env::var("RUNKU_LOG_JOURNAL_URL").ok() else {
+        return Ok(None);
+    };
+    let parsed = url::Url::parse(&url).map_err(|_| "SERVER_LOG_JOURNAL_CONFIGURATION_INVALID")?;
+    let loopback = parsed.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if !matches!(parsed.scheme(), "nats" | "tls")
+        || parsed.host_str().is_none()
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.scheme() == "nats" && !loopback
+    {
+        return Err("SERVER_LOG_JOURNAL_CONFIGURATION_INVALID");
+    }
+    let journal = NatsLogJournalConfig {
+        replicas: env::var("RUNKU_LOG_JOURNAL_REPLICAS")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .map_err(|_| "SERVER_LOG_JOURNAL_CONFIGURATION_INVALID")?
+            .unwrap_or(3),
+        ..NatsLogJournalConfig::default()
+    };
+    let credentials_file = env::var_os("RUNKU_LOG_JOURNAL_CREDENTIALS_FILE")
+        .map(PathBuf::from)
+        .map(|path| {
+            if !path.is_absolute() {
+                return Err("SERVER_LOG_JOURNAL_CONFIGURATION_INVALID");
+            }
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|_| "SERVER_LOG_JOURNAL_CONFIGURATION_INVALID")?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
+                return Err("SERVER_LOG_JOURNAL_CONFIGURATION_INVALID");
+            }
+            Ok(path)
+        })
+        .transpose()?;
+    Ok(Some(ServerLogJournalConfig {
+        url,
+        credentials_file,
+        require_tls: parsed.scheme() == "tls",
+        journal,
+    }))
+}
+
+async fn open_log_journal(
+    config: Option<&ServerLogJournalConfig>,
+) -> Result<Option<NatsLogJournal>, &'static str> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let mut options = async_nats::ConnectOptions::new().require_tls(config.require_tls);
+    if let Some(path) = &config.credentials_file {
+        options = options
+            .credentials_file(path)
+            .await
+            .map_err(|_| "SERVER_LOG_JOURNAL_CREDENTIALS_INVALID")?;
+    }
+    let client = options
+        .connect(&config.url)
+        .await
+        .map_err(|_| "SERVER_LOG_JOURNAL_UNAVAILABLE")?;
+    NatsLogJournal::open(client, config.journal.clone())
+        .await
+        .map(Some)
+        .map_err(|_| "SERVER_LOG_JOURNAL_UNAVAILABLE")
+}
+
+async fn run_log_worker(
+    journal: NatsLogJournal,
+    archive: LogArchive,
+    batch_wait: Duration,
+) -> Result<(), &'static str> {
+    let worker = LogJournalArchiver::new(journal, archive);
+    loop {
+        tokio::select! {
+            result = worker.run_once(batch_wait) => {
+                match result {
+                    Ok(JournalArchiveOutcome::Idle | JournalArchiveOutcome::Processed { .. }) => {}
+                    Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+                }
+            }
+            () = shutdown() => return Ok(()),
+        }
+    }
+}
+
+fn log_archive_batch_wait() -> Result<Duration, &'static str> {
+    let seconds = env::var("RUNKU_LOG_ARCHIVE_BATCH_WAIT_SECONDS")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| "SERVER_LOG_ARCHIVE_CONFIGURATION_INVALID")?
+        .unwrap_or(30);
+    if !(1..=60).contains(&seconds) {
+        return Err("SERVER_LOG_ARCHIVE_CONFIGURATION_INVALID");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn optional_bool(name: &str, default: bool) -> Result<bool, &'static str> {
+    match env::var(name) {
+        Ok(value) if value == "true" => Ok(true),
+        Ok(value) if value == "false" => Ok(false),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Ok(_) | Err(env::VarError::NotUnicode(_)) => {
+            Err("SERVER_LOG_ARCHIVE_CONFIGURATION_INVALID")
+        }
     }
 }
 
@@ -529,6 +790,74 @@ fn required(name: &str) -> Result<String, &'static str> {
         .ok_or("SERVER_CONFIGURATION_MISSING")
 }
 
+fn required_secret(name: &str) -> Result<String, &'static str> {
+    let direct = match env::var(name) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => return Err("SERVER_SECRET_VALUE_INVALID"),
+    };
+    let file_name = format!("{name}_FILE");
+    let file = env::var_os(&file_name);
+    match (direct, file) {
+        (Some(_), Some(_)) => Err("SERVER_SECRET_CONFIGURATION_CONFLICT"),
+        (Some(value), None) => validate_secret_value(value),
+        (None, Some(path)) => read_secret_file(Path::new(&path)),
+        (None, None) => Err("SERVER_CONFIGURATION_MISSING"),
+    }
+}
+
+fn validate_secret_value(value: String) -> Result<String, &'static str> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err("SERVER_SECRET_VALUE_INVALID");
+    }
+    Ok(value)
+}
+
+fn read_secret_file(path: &Path) -> Result<String, &'static str> {
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err("SERVER_SECRET_FILE_INVALID");
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| "SERVER_SECRET_FILE_INVALID")?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_SECRET_FILE_BYTES
+    {
+        return Err("SERVER_SECRET_FILE_INVALID");
+    }
+    let mut value = std::fs::read_to_string(path).map_err(|_| "SERVER_SECRET_FILE_INVALID")?;
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    validate_secret_value(value).map_err(|_| "SERVER_SECRET_FILE_INVALID")
+}
+
+async fn probe_management(path: &str) -> Result<(), &'static str> {
+    let listen = env::var("RUNKU_MANAGEMENT_LISTEN")
+        .unwrap_or_else(|_| DEFAULT_LISTEN.to_owned())
+        .parse::<SocketAddr>()
+        .map_err(|_| "SERVER_MANAGEMENT_LISTEN_INVALID")?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|_| "SERVER_HEALTH_PROBE_UNAVAILABLE")?;
+    let response = client
+        .get(format!("http://{listen}{path}"))
+        .send()
+        .await
+        .map_err(|_| "SERVER_HEALTH_PROBE_UNAVAILABLE")?;
+    if response.status().as_u16() != 204 {
+        return Err("SERVER_HEALTH_PROBE_FAILED");
+    }
+    Ok(())
+}
+
 fn now() -> Result<TimestampMicros, &'static str> {
     let micros = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -540,5 +869,56 @@ fn now() -> Result<TimestampMicros, &'static str> {
 }
 
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            return;
+        }
+    }
+    let _result = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::NamedTempFile;
+
+    use super::*;
+
+    #[test]
+    fn secret_file_accepts_one_line_and_rejects_ambiguous_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut valid = NamedTempFile::new()?;
+        writeln!(valid, "secret-value")?;
+        assert_eq!(read_secret_file(valid.path())?, "secret-value");
+
+        let mut multiline = NamedTempFile::new()?;
+        writeln!(multiline, "first")?;
+        writeln!(multiline, "second")?;
+        assert_eq!(
+            read_secret_file(multiline.path()),
+            Err("SERVER_SECRET_FILE_INVALID")
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_rejects_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("target");
+        std::fs::write(&target, "secret-value\n")?;
+        let link = directory.path().join("link");
+        symlink(&target, &link)?;
+        assert_eq!(read_secret_file(&link), Err("SERVER_SECRET_FILE_INVALID"));
+        Ok(())
+    }
 }

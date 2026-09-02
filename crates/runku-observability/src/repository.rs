@@ -223,6 +223,19 @@ pub trait LogRepository: fmt::Debug + Send + Sync {
         dry_run: bool,
     ) -> Result<PruneResult, LogRepositoryError>;
 
+    /// Counts or removes only rows that are older than `cutoff` and have already been committed
+    /// through the supplied archive cursor.
+    async fn prune_archived_before(
+        &self,
+        _scope: EnvironmentScope,
+        _cutoff: TimestampMicros,
+        _archived_through: LogCursor,
+        _maximum: u32,
+        _dry_run: bool,
+    ) -> Result<PruneResult, LogRepositoryError> {
+        Err(LogRepositoryError::Unsupported)
+    }
+
     /// Closes pooled resources after writers have drained.
     async fn close(&self);
 }

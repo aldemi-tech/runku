@@ -13,12 +13,12 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use runku_build::{BuildError, BuildMetadata, build_project, source_fingerprint};
 use runku_cli::{
-    CliCommand, DEFAULT_LOCAL_LISTENER, DEFAULT_LOCAL_WORKSPACE, HELP, LOGIN_HELP, MANAGEMENT_HELP,
-    TokenEnvironmentName, WORKSPACE_FREEZE_HELP, parse_args,
+    CliCommand, DEFAULT_LOCAL_LISTENER, DEFAULT_LOCAL_WORKSPACE, HELP, LOG_ARCHIVE_HELP,
+    LOGIN_HELP, MANAGEMENT_HELP, TokenEnvironmentName, WORKSPACE_FREEZE_HELP, parse_args,
 };
 use runku_core::{
-    ApplicationClientId, CredentialId, OperationId, OperatorId, OperatorSessionId, WorkspaceId,
-    WorkspaceRef,
+    ApplicationClientId, CredentialId, EnvironmentId, OperationId, OperatorId, OperatorSessionId,
+    WorkspaceId, WorkspaceRef,
 };
 use runku_development::DevelopmentActor;
 use runku_development_access::{DevelopmentCredentialStatus, DevelopmentLifecycleResult};
@@ -70,7 +70,7 @@ const DEFAULT_AUTHENTICATION_SERVER: &str = "https://api.runku.app";
 #[tokio::main]
 async fn main() -> ExitCode {
     if let Ok(command) = parse_args(std::env::args_os().skip(1)) {
-        match execute(command).await {
+        match Box::pin(execute(command)).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 print_failure(error);
@@ -83,7 +83,7 @@ async fn main() -> ExitCode {
             exit: EXIT_USAGE,
         });
         eprintln!();
-        eprintln!("{HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
+        eprintln!("{HELP}{LOG_ARCHIVE_HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
         ExitCode::from(EXIT_USAGE)
     }
 }
@@ -838,7 +838,7 @@ impl From<OtlpExporterTelemetrySnapshot> for OtlpTelemetryWire {
 async fn execute(command: CliCommand) -> Result<(), CliFailure> {
     match command {
         CliCommand::Help => {
-            print!("{HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
+            print!("{HELP}{LOG_ARCHIVE_HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
             Ok(())
         }
         CliCommand::Version => {
@@ -1066,12 +1066,16 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             result
         }
         CliCommand::LogsPrune {
+            remote,
             root,
             before,
             maximum,
             apply,
             environment,
         } => {
+            if remote {
+                return remote_log_prune(&root, before, maximum, apply, environment).await;
+            }
             let manager = LocalLogManager::open(&root).await.map_err(map_logs)?;
             let result = manager
                 .prune_before(before, maximum, apply, environment)
@@ -1082,6 +1086,25 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             println!(
                 "{{\"applied\":{},\"deleted\":{},\"environmentId\":\"{}\",\"matched\":{},\"more\":{}}}",
                 apply, result.deleted, environment_id, result.matched, result.more
+            );
+            Ok(())
+        }
+        CliCommand::LogsArchiveStatus { remote, root } => {
+            if remote {
+                return remote_log_archive_status(&root).await;
+            }
+            let manager = LocalLogManager::open(&root).await.map_err(map_logs)?;
+            let result = manager.archive_status().await;
+            let environment_id = manager.environment_id();
+            manager.close().await;
+            let status = result.map_err(map_logs)?;
+            println!(
+                "{{\"environmentId\":\"{}\",\"parquetBytes\":{},\"records\":{},\"segments\":{},\"status\":\"ok\",\"through\":\"{}\"}}",
+                environment_id,
+                status.parquet_bytes,
+                status.records,
+                status.segments,
+                status.through
             );
             Ok(())
         }
@@ -3389,6 +3412,47 @@ fn product_path(scope: runku_core::EnvironmentScope, suffix: &str) -> String {
         scope.environment_id(),
         suffix
     )
+}
+
+async fn remote_log_archive_status(root: &Path) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    let mut client = ManagementClient::load()?;
+    let url = client.url(&product_path(state.scope(), "/logs/archive-status"))?;
+    let response = client
+        .request(reqwest::Method::GET, url, None, None)
+        .await?;
+    emit_management_response(response).await
+}
+
+async fn remote_log_prune(
+    root: &Path,
+    before: TimestampMicros,
+    maximum: u32,
+    apply: bool,
+    environment: Option<EnvironmentId>,
+) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    let mut client = ManagementClient::load()?;
+    let url = client.url(&product_path(state.scope(), "/logs/prune"))?;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "beforeMicros": before.get(),
+        "maximum": maximum,
+        "apply": apply,
+        "environmentId": environment.map(|value| value.to_string()),
+    }))
+    .map_err(|_| CliFailure {
+        code: "PLATFORM_REQUEST_INVALID",
+        exit: EXIT_INTERNAL,
+    })?;
+    let response = client
+        .request(
+            reqwest::Method::POST,
+            url,
+            Some(body),
+            Some("application/json"),
+        )
+        .await?;
+    emit_management_response(response).await
 }
 
 async fn emit_management_response(response: reqwest::Response) -> Result<(), CliFailure> {

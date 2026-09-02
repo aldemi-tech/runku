@@ -158,11 +158,24 @@ the operator terminates the stream; a client cannot continue seeing new records 
 that has been withdrawn. Snapshot reads require `logs:read`; streaming additionally requires
 `logs:follow`.
 
+Inspect immutable history coverage and apply retention through the same authenticated Product
+scope. Dry-run first; applying requires the exact Environment ID:
+
+```sh
+runku logs archive-status --remote --root /var/lib/runku/product
+runku logs prune --remote --root /var/lib/runku/product \
+  --before-micros 1735689600000000 --maximum 1000
+runku logs prune --remote --root /var/lib/runku/product \
+  --before-micros 1735689600000000 --maximum 1000 \
+  --apply --environment env_01...
+```
+
 Operational events include exact Project, Environment, Release, Function, request, invocation,
 Application Client, and credential attribution. They exclude keys, JWTs, arguments, results, and
-secret values. The Product profile stores its authoritative local log journal in its dedicated
-SQLite database; OTLP export can ship records to an external log backend without putting log
-payloads in Platform Identity PostgreSQL.
+secret values. The Product profile keeps the hot tier in its dedicated SQLite database and archives
+immutable Parquet to the configured filesystem or S3-compatible store. DuckDB reads historical
+segments in-process; optional OTLP export remains independent. Raw logs are not written to Platform
+Identity PostgreSQL.
 
 ## Promote a replacement and roll back
 
@@ -204,6 +217,8 @@ exit `4` means another operator changed the Channel; re-read status before takin
 | promote and rollback | `channels:promote` | URL Project/Environment |
 | log snapshot | `logs:read` | URL Project/Environment |
 | log follow | `logs:follow` | URL Project/Environment, rechecked during stream |
+| archive status | `logs:read` | URL Project/Environment |
+| hot-log retention | `logs:prune` | URL Project/Environment plus apply confirmation |
 
 Authentication occurs before the Product adapter is called. A valid operator without the
 capability receives `403`; a malformed/expired/revoked session receives `401`; a different
@@ -235,6 +250,7 @@ drives an actual browser, and proves:
 - Authorization Code + PKCE, an incorrect password rejection, and invitation-bound enrollment;
 - invitation replay rejection and linked-identity re-login;
 - authenticated publish/replay/release/promote/invoke/log snapshot/log stream;
+- authenticated archive inspection, retention dry-run/apply, and `logs:prune` denial;
 - a second Release, exact Channel CAS, and rollback behavior;
 - missing authentication, insufficient capability, and cross-Environment denial;
 - live log-stream termination after session revocation and recovery through OIDC re-login.

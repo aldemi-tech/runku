@@ -1,0 +1,5 @@
+services:
+  logs-worker:
+    environment:
+      RUNKU_LOG_ARCHIVE_S3_ENDPOINT: ${RUNKU_LOG_ARCHIVE_S3_ENDPOINT:?Set the exact HTTPS S3-compatible endpoint}
+      RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE: ${RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE:-false}

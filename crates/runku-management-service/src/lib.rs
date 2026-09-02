@@ -9,7 +9,8 @@ mod router;
 
 pub use oidc::JwtExternalIdentityAuthenticator;
 pub use product::{
-    ManagementLogPage, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
+    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
     ManagementReleaseOutcome, ManagementReleaseStatus, ManagementWorkspacePublish,
     OidcClientConfiguration,
 };

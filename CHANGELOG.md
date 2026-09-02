@@ -2,6 +2,56 @@
 
 All notable changes are documented in this file.
 
+## 0.3.0 - 2026-09-02
+
+### Added
+
+- Embedded Operational Log history with SQLite hot storage, immutable filesystem or S3-compatible
+  Parquet segments, strict manifests, DuckDB historical query, archive-frontier retention, and
+  authenticated one-connection live streaming.
+- Optional HA log admission and archival using replicated NATS JetStream and the same
+  `runku-server logs-worker` artifact, including PubAck, redelivery, create-or-verify replay, and
+  explicit NATS/MinIO failure-path acceptance.
+- A release-packaged Docker standalone profile for one Safe V8 Product Environment, with
+  digest-pinned images, mounted secret files, non-root/read-only execution, bounded resources,
+  liveness/readiness probes, setup, backup, offline verification, empty-install restore, upgrade,
+  and guarded uninstall operations.
+- An optional Compose overlay for browser origins/Product JWT verification and optional HA log
+  overlays for AWS S3 or an HTTPS S3-compatible endpoint.
+- Remote archive inspection and dry-run/confirmed hot-log pruning through the same scoped operator
+  session used for release lifecycle operations.
+
+### Changed
+
+- `runku-server` accepts `RUNKU_DATABASE_URL_FILE` and
+  `RUNKU_PLATFORM_IDENTITY_PEPPER_FILE` as mutually exclusive alternatives to direct secret
+  variables. Mounted files must be absolute, regular, non-symlinked, bounded, and contain one
+  canonical line.
+- The compact server accepts exact Product browser origins and a Product-root-relative JWT
+  descriptor without weakening its loopback-only Product listener.
+- Tagged releases now include `runku-selfhost-vX.Y.Z.tar.gz` beside the CLI/server assets and
+  validate that its image example matches the coordinated release version.
+
+### Security
+
+- Log manifests, paths, queries, NATS subjects, Management authorization, and retention preserve
+  exact Project/Environment scope; changed archive bytes, gaps, overlaps, stale grants, unsafe NATS
+  endpoints, and ambiguous secret sources fail closed.
+- The installation helper never overwrites a complete secret set, rejects partial secret state,
+  excludes external peppers from backup payloads, verifies their fingerprint before restore, and
+  requires exact confirmations for restore and data deletion.
+
+### Compatibility and rollback
+
+- Existing Product, Management HTTP v1, Platform Identity schema v1, Release, and Operational Log
+  hot-row formats remain readable. Parquet archive/manifests begin at version 1 and reject unknown
+  versions.
+- Version 0.3.0 establishes the first packaged compact-installation upgrade floor. Source-managed
+  0.2.0 deployments must take a verified backup and adopt the 0.3.0 package deliberately; no
+  automated mixed-version or database downgrade window is claimed.
+- Channel rollback continues to change future code routing only. It cannot reverse a database
+  migration, restored data, completed Action effect, or archive retention.
+
 ## 0.2.0 - 2026-09-01
 
 ### Added

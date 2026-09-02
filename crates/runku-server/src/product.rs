@@ -1,22 +1,27 @@
 //! Product Base adapter behind the authenticated Management API.
 
-use std::{path::PathBuf, str::FromStr};
+use std::{collections::BTreeSet, path::PathBuf, str::FromStr};
 
 use async_trait::async_trait;
 use runku_core::{ChannelName, EnvironmentScope, ReleaseId};
 use runku_development::DevelopmentActor;
+use runku_gateway::CorsOrigin;
 use runku_local::{
     LocalChannelExpectation, LocalLogError, LocalLogManager, LocalProcess, LocalProcessConfig,
     LocalPublishError, LocalReleaseError, LocalReleaseManager, LocalReleaseOutcome,
     LocalReleaseStatusReport, load_local, publish_local_if_head,
 };
 use runku_management_service::{
-    ManagementLogPage, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
+    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
     ManagementReleaseOutcome, ManagementReleaseStatus, ManagementWorkspacePublish,
 };
-use runku_observability::{LogLevel, LogQuery, LogStream, SequencedOperationalEvent};
+use runku_observability::{
+    LogArchive, LogLevel, LogQuery, LogStream, NatsLogJournal, SequencedOperationalEvent,
+};
 use runku_protocol::{WireValueV1, decode_development_publish_request_v1};
 use runku_releases::FunctionType;
+use runku_value::TimestampMicros;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -24,6 +29,9 @@ use tokio::sync::Mutex;
 pub struct ProductAdapter {
     root: PathBuf,
     scope: EnvironmentScope,
+    log_archive: Option<LogArchive>,
+    log_journal: Option<NatsLogJournal>,
+    process_config: LocalProcessConfig,
     process: Mutex<Option<LocalProcess>>,
 }
 
@@ -38,25 +46,68 @@ impl std::fmt::Debug for ProductAdapter {
 }
 
 impl ProductAdapter {
-    pub async fn open(root: PathBuf) -> Result<Self, &'static str> {
+    pub async fn open(
+        root: PathBuf,
+        log_archive: Option<LogArchive>,
+        log_journal: Option<NatsLogJournal>,
+        allowed_origins: BTreeSet<CorsOrigin>,
+        auth_config: Option<PathBuf>,
+    ) -> Result<Self, &'static str> {
         let state = load_local(&root)
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?
             .0;
-        Ok(Self {
+        let adapter = Self {
             root,
             scope: state.scope(),
+            log_archive,
+            log_journal,
+            process_config: LocalProcessConfig {
+                allowed_origins,
+                auth_config,
+                ..LocalProcessConfig::default()
+            },
             process: Mutex::new(None),
-        })
+        };
+        let releases = LocalReleaseManager::open(&adapter.root)
+            .await
+            .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let has_channels = match releases.status().await {
+            Ok(status) => !status.channels.is_empty(),
+            // A freshly initialized Product root has no Release Environment row until its first
+            // publish. That is a valid idle state, not corrupt Product state.
+            Err(LocalReleaseError::NotFound) => false,
+            Err(_) => return Err("SERVER_PRODUCT_ROOT_INVALID"),
+        };
+        if has_channels {
+            Box::pin(adapter.ensure_serving())
+                .await
+                .map_err(|_| "SERVER_PRODUCT_UNAVAILABLE")?;
+        }
+        Ok(adapter)
+    }
+
+    /// Stops the attached Product listener and every background loop within its grace period.
+    pub async fn shutdown(&self) {
+        if let Some(process) = self.process.lock().await.take() {
+            process.shutdown().await;
+        }
     }
 
     async fn ensure_serving(&self) -> Result<(), ManagementProductError> {
         let mut process = self.process.lock().await;
         if process.is_none() {
             *process = Some(
-                LocalProcess::start(&self.root, LocalProcessConfig::default())
-                    .await
-                    .map_err(|_| ManagementProductError::Unavailable)?,
+                LocalProcess::start(
+                    &self.root,
+                    LocalProcessConfig {
+                        log_archive: self.log_archive.clone(),
+                        log_journal: self.log_journal.clone(),
+                        ..self.process_config.clone()
+                    },
+                )
+                .await
+                .map_err(|_| ManagementProductError::Unavailable)?,
             );
         }
         Ok(())
@@ -148,7 +199,7 @@ impl ManagementProduct for ProductAdapter {
             .promote(channel, release, expected)
             .await
             .map_err(map_release)?;
-        self.ensure_serving().await?;
+        Box::pin(self.ensure_serving()).await?;
         Ok(outcome(result))
     }
 
@@ -188,7 +239,9 @@ impl ManagementProduct for ProductAdapter {
         &self,
         query: &ManagementLogQuery,
     ) -> Result<ManagementLogPage, ManagementProductError> {
-        let manager = LocalLogManager::open(&self.root).await.map_err(map_logs)?;
+        let manager = LocalLogManager::open_with_archive(&self.root, self.log_archive.clone())
+            .await
+            .map_err(map_logs)?;
         let query = parse_log_query(self.scope, query)?;
         let result = manager.query(&query).await.map_err(map_logs);
         manager.close().await;
@@ -200,6 +253,61 @@ impl ManagementProduct for ProductAdapter {
                 .map(log_record)
                 .collect::<Result<Vec<_>, _>>()?,
             next: page.next.to_string(),
+        })
+    }
+
+    async fn log_archive_status(
+        &self,
+    ) -> Result<ManagementLogArchiveStatus, ManagementProductError> {
+        let manager = LocalLogManager::open_with_archive(&self.root, self.log_archive.clone())
+            .await
+            .map_err(map_logs)?;
+        let result = manager.archive_status().await.map_err(map_logs);
+        manager.close().await;
+        let status = result?;
+        Ok(ManagementLogArchiveStatus {
+            parquet_bytes: status.parquet_bytes,
+            records: status.records,
+            segments: status.segments,
+            through: status.through.to_string(),
+        })
+    }
+
+    async fn log_prune(
+        &self,
+        request: &ManagementLogPruneRequest,
+    ) -> Result<ManagementLogPruneResult, ManagementProductError> {
+        if !(1..=10_000).contains(&request.maximum)
+            || request.before_micros < 0
+            || request.apply != request.environment_id.is_some()
+        {
+            return Err(ManagementProductError::Invalid);
+        }
+        let confirmation = request
+            .environment_id
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let manager = LocalLogManager::open_with_archive(&self.root, self.log_archive.clone())
+            .await
+            .map_err(map_logs)?;
+        let result = manager
+            .prune_before(
+                TimestampMicros::new(request.before_micros),
+                request.maximum,
+                request.apply,
+                confirmation,
+            )
+            .await;
+        manager.close().await;
+        let result = result.map_err(map_logs)?;
+        Ok(ManagementLogPruneResult {
+            applied: request.apply,
+            deleted: result.deleted,
+            environment_id: self.scope.environment_id().to_string(),
+            matched: result.matched,
+            more: result.more,
         })
     }
 }

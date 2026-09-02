@@ -227,7 +227,7 @@ RUNKU_CONFIG_HOME="$evidence_dir/alice-cli" "$runku_bin" promote --remote \
   --root "$evidence_dir/product" --channel stable --release "$release_v1" --expected empty \
   >"$evidence_dir/promote-v1.json"
 for attempt in {1..40}; do
-  curl --silent http://127.0.0.1:18310/health/ready >/dev/null && break
+  curl --fail --silent http://127.0.0.1:18310/readyz >/dev/null && break
   [[ "$attempt" != 40 ]] || exit 1
   sleep 0.25
 done
@@ -272,6 +272,29 @@ RUNKU_CONFIG_HOME="$evidence_dir/alice-cli" "$runku_bin" rollback --remote \
   --root "$evidence_dir/product" --channel stable --expected "$release_v2" --to "$release_v1" \
   >"$evidence_dir/rollback-v1.json"
 invoke_version v1 "$evidence_dir/invoke-after-rollback.json"
+
+printf '%s\n' 'restarting the server and proving persisted Channel serving recovers automatically'
+kill "$server_pid"
+wait "$server_pid"
+server_pid=""
+RUNKU_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
+RUNKU_PLATFORM_IDENTITY_PEPPER="$identity_pepper" \
+RUNKU_STATE_DIRECTORY="$evidence_dir/state" \
+RUNKU_MANAGEMENT_LISTEN='127.0.0.1:18220' \
+RUNKU_PLATFORM_OIDC_CONFIG="$evidence_dir/oidc.json" \
+RUNKU_PRODUCT_ROOT="$evidence_dir/product" \
+  "$server_bin" serve >>"$evidence_dir/runku-server.log" 2>&1 &
+server_pid="$!"
+for attempt in {1..40}; do
+  if curl --fail --silent http://127.0.0.1:18220/health/ready >/dev/null \
+    && curl --fail --silent http://127.0.0.1:18310/readyz >/dev/null; then
+    break
+  fi
+  [[ "$attempt" != 40 ]] || exit 1
+  sleep 0.25
+done
+invoke_version v1 "$evidence_dir/invoke-after-server-restart.json"
+
 set +e
 RUNKU_CONFIG_HOME="$evidence_dir/alice-cli" "$runku_bin" promote --remote \
   --root "$evidence_dir/product" --channel stable --release "$release_v2" --expected "$release_v2" \
@@ -279,6 +302,25 @@ RUNKU_CONFIG_HOME="$evidence_dir/alice-cli" "$runku_bin" promote --remote \
 stale_status="$?"
 set -e
 [[ "$stale_status" == 4 ]]
+
+printf '%s\n' 'validating authenticated archive inspection and bounded retention authority'
+RUNKU_CONFIG_HOME="$evidence_dir/alice-cli" "$runku_bin" logs archive-status --remote \
+  --root "$evidence_dir/product" >"$evidence_dir/alice-archive-status.json"
+set +e
+RUNKU_CONFIG_HOME="$evidence_dir/alice-cli" "$runku_bin" logs prune --remote \
+  --root "$evidence_dir/product" --before-micros 9223372036854775807 --maximum 100 \
+  >"$evidence_dir/alice-prune.stdout" 2>"$evidence_dir/alice-prune.stderr"
+alice_prune_status="$?"
+set -e
+[[ "$alice_prune_status" == 8 ]]
+RUNKU_CONFIG_HOME="$evidence_dir/owner-cli" "$runku_bin" logs prune --remote \
+  --root "$evidence_dir/product" --before-micros 9223372036854775807 --maximum 100 \
+  >"$evidence_dir/owner-prune-dry-run.json"
+RUNKU_CONFIG_HOME="$evidence_dir/owner-cli" "$runku_bin" logs prune --remote \
+  --root "$evidence_dir/product" --before-micros 9223372036854775807 --maximum 100 \
+  --apply --environment "$environment_id" >"$evidence_dir/owner-prune-apply.json"
+python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert value["applied"] is True; assert value["environmentId"] == sys.argv[2]' \
+  "$evidence_dir/owner-prune-apply.json" "$environment_id"
 
 printf '%s\n' 'validating missing auth, exact-scope isolation, capability denial, and revocation'
 missing_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -351,6 +393,8 @@ printf '%s\n' '  invitation binding and replay rejection: passed'
 printf '%s\n' '  authenticated publish/replay/release/promote/invoke/logs: passed'
 printf '%s\n' '  one-connection realtime log follow: passed'
 printf '%s\n' '  second release promotion and exact rollback: passed'
+printf '%s\n' '  persisted Channel serving after server restart: passed'
+printf '%s\n' '  archive inspection and bounded retention authorization: passed'
 printf '%s\n' '  stale CAS, missing auth, capability, and cross-scope denial: passed'
 printf '%s\n' '  live stream revocation and CLI session denial: passed'
 printf '%s\n' '  linked OIDC identity recovery after revocation: passed'

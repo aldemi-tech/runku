@@ -3,16 +3,27 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod archive;
 mod contract;
+mod journal;
 mod performance;
 mod repository;
 mod spool;
 mod sql;
 
+pub use archive::{
+    LogArchive, LogArchiveCredentials, LogArchiveManifestV1, LogArchiveRunOutcome,
+    LogArchiveStaticCredentials, LogArchiveStatus, LogArchiver, S3LogArchiveConfig,
+    TieredLogRepository,
+};
 pub use contract::{
     FUNCTION_FIELDS_MAX_BYTES, FUNCTION_LOGS_MAX_BYTES, FUNCTION_LOGS_MAX_RECORDS,
     FUNCTION_MESSAGE_MAX_BYTES, LogEventKind, LogLevel, LogMessage, LogPrincipalKind, LogStream,
     OperationalEventError, OperationalEventV1, OutcomeCode, sanitize_function_fields,
+};
+pub use journal::{
+    JournalArchiveOutcome, JournalForwardOutcome, LogJournalArchiver, LogJournalDelivery,
+    LogJournalError, LogJournalForwarder, NatsLogJournal, NatsLogJournalConfig,
 };
 pub use performance::{
     AggregateInvocationPerformanceSink, INVOCATION_PERFORMANCE_DURATION_BUCKETS_MICROS,

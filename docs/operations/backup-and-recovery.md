@@ -14,7 +14,7 @@ Release routing, credentials, schedules, and artifact references.
 | Workspaces/Dev Revisions | `.runku/development.sqlite3` | PostgreSQL/development repository | Authoritative when development is retained |
 | Application Clients/keys | `.runku/identity.sqlite3` + pepper | Identity repository + key protection | Authoritative and sensitive |
 | Cron activation/cursors | `.runku/cron.sqlite3` | PostgreSQL | Authoritative for exact scheduling behavior |
-| Operational logs/export checkpoints | `.runku/observability.sqlite3` | Operational store | Operational evidence; retention policy applies |
+| Operational logs/export checkpoints | `.runku/observability.sqlite3` + `.runku/observability-archive/` | hot Product store + filesystem/S3 Parquet; optional NATS journal | Operational evidence; retention policy applies |
 | Platform operators/grants/sessions/invitations/audit | not part of local application state | PostgreSQL Platform Identity schema | Authoritative and sensitive |
 | Platform credential/OIDC peppers | not part of local application state | Secret provider + coordinated recovery manifest | Authoritative cryptographic material |
 | Artifacts | `.runku/artifacts/` and build store | S3-compatible object storage | Authoritative immutable content by digest |
@@ -55,6 +55,46 @@ An older restore may move log cursors and application state backward. Downstream
 external-effect reconcilers must use event/operation identity, not assume monotonicity across a
 disaster restore.
 
+The local backup must include both `.runku/observability.sqlite3` and
+`.runku/observability-archive/`. After restore, run `runku logs archive-status` locally (or
+`runku logs archive-status --remote` through an attached server) and query a page that
+crosses the archive/hot frontier. If history uses S3-compatible storage, preserve bucket versions,
+manifests, and objects as one integrity unit; if HA is enabled, restore and reconcile the JetStream
+consumer against the archive frontier before allowing hot-log retention. See
+[Operational Log storage](operational-logs.md#backup-restore-and-disaster-recovery).
+
+## Packaged compact Docker backup and restore
+
+The release archive implements the coordinated offline procedure for its exact one-Environment
+profile:
+
+```sh
+./runku-selfhost backup /encrypted/backups/runku-2026-09-02 kms://backup-policy/version-7
+./runku-selfhost verify-backup /encrypted/backups/runku-2026-09-02
+```
+
+The helper quiesces `runku-server`, dumps Platform Identity PostgreSQL in custom format, archives
+the complete Product and Platform directories, writes SHA-256 digests and the exact server version,
+and restarts only a previously running server. Verification parses the PostgreSQL catalog and
+rejects corrupt digests, unsafe archive paths, missing Product identity, unknown manifest versions,
+and a missing encryption-policy reference without changing durable state.
+
+External secret files are deliberately excluded. Preserve the Platform Identity pepper under
+separate access control and the same recovery record; restore checks its SHA-256 fingerprint before
+changing the empty destination. The database connection credential may be replaced for a new
+PostgreSQL service, but the original Platform pepper and Product-root identity material are required.
+
+Restore requires empty Product/Platform directories, an empty PostgreSQL database, and an exact
+`restore:<backup-directory-name>` confirmation. It stages and validates filesystem data first,
+restores PostgreSQL in one transaction, moves the staged state into place, runs `runku doctor`,
+checks/migrates the schema, starts the server, and waits for readiness. Detailed commands and
+post-restore application/session checks are in the
+[Docker guide](../../deployments/docker/README.md#total-loss-restore).
+
+For the optional HA log overlay, this backup covers local Product hot state and Platform Identity;
+it does not copy the external S3 archive or JetStream. Protect and reconcile those systems using the
+same recovery point and the log-specific restore order below.
+
 ## Corruption response
 
 `doctor` corruption/inconsistency is fail-closed:
@@ -68,10 +108,14 @@ disaster restore.
 
 ## Production backup contract
 
-The future packaged profile must coordinate PostgreSQL and object storage. A backup manifest must
-include format version, installation/Project/Environment identities, database recovery position or
-snapshot identity, artifact roots, object checksums, configuration revision, creation time, tool
-version, encryption metadata, and verification result.
+The packaged profile must coordinate PostgreSQL, Product state, and object storage. A backup
+manifest must include format version, installation/Project/Environment identities, database
+recovery position or snapshot identity, artifact roots, object checksums, configuration revision,
+creation time, tool version, encryption metadata, and verification result.
+
+Raw Operational Logs are not stored in Platform Identity PostgreSQL. Their backup roots are the
+Product hot SQLite store, filesystem/S3 Parquet objects and manifests, and—in HA—the unconsumed NATS
+journal window. Backing up only PostgreSQL does not back up Product logs.
 
 When Platform Identity is enabled, the same recovery point also records the Platform Identity schema
 version/checksum, both pepper secret versions, OIDC configuration revision, and whether a pending

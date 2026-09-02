@@ -20,7 +20,7 @@ use runku_development::{
 };
 use runku_development_access::{DevelopmentAccessRepositoryConfig, SqlDevelopmentAccessRepository};
 use runku_identity_repository::{IdentityRepositoryConfig, SqlApplicationIdentityRepository};
-use runku_observability::{LogRepositoryConfig, SqlLogRepository};
+use runku_observability::{LogArchive, LogRepositoryConfig, SqlLogRepository};
 use runku_otel::{OtlpRepositoryConfig, SqlExportCheckpointRepository};
 use runku_release_repository::{RepositoryConfig, SqlReleaseRepository};
 use runku_releases::{FilesystemArtifactStore, FilesystemStoreRole};
@@ -144,6 +144,8 @@ pub struct LocalPaths {
     pub cron_database: PathBuf,
     /// Durable Product Base operational logs database.
     pub observability_database: PathBuf,
+    /// Immutable local Parquet Operational Log archive queried with embedded `DuckDB`.
+    pub observability_archive: PathBuf,
     /// Durable OTLP exporter checkpoint database, independent from source logs.
     pub otlp_database: PathBuf,
     /// Content-addressed artifact directory.
@@ -194,6 +196,7 @@ impl LocalPaths {
             development_database: state.join("development.sqlite3"),
             cron_database: state.join("cron.sqlite3"),
             observability_database: state.join("observability.sqlite3"),
+            observability_archive: state.join("observability-archive"),
             otlp_database: state.join("otel.sqlite3"),
             artifacts: state.join("artifacts"),
             root,
@@ -621,6 +624,9 @@ async fn initialize_repositories(
     )
     .await
     .map_err(|_| LocalStateError::Unavailable)?;
+    LogArchive::open_filesystem(paths.observability_archive.clone())
+        .await
+        .map_err(|_| LocalStateError::Unavailable)?;
     SqlExportCheckpointRepository::connect_sqlite(
         &sqlite_url(&paths.otlp_database),
         OtlpRepositoryConfig::LOCAL,

@@ -21,7 +21,10 @@ use runku_platform_identity::DeviceName;
 use runku_value::TimestampMicros;
 
 /// Stable base command-line help.
-pub const HELP: &str = "runku 0.2.0\n\nUSAGE:\n  runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT]\n  runku build [--root PATH] [--release-id rel_* --build-id bld_* --created-at-micros I64]\n  runku publish [--root PATH] --manifest FILE --artifact FILE [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]\n  runku release [--root PATH] --release rel_* [--against CHANNEL]\n  runku promote [--root PATH] --channel CHANNEL --release rel_* [--expected empty|rel_*]\n  runku rollback [--root PATH] --channel CHANNEL --expected rel_* --to rel_*\n  runku status [--root PATH]\n  runku dev [--root PATH] [--origin http(s)://HOST[:PORT]]... [--prebuilt] [--auth-config RELATIVE] [--application-env RELATIVE] [--public-env-prefix PREFIX] [--prepare] [--replace-remote-credentials]\n  runku doctor [--root PATH]\n  runku logs [--root PATH] [--after logc_N] [--limit 1..1000] [--stream platform|function] [--level debug|info|warn|error] [--function fnc_*] [--request req_*] [--invocation inv_*] [--client app_*] [--credential crd_*] [--release rel_*] [--follow]\n  runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  runku logs export-otlp [--root PATH] --config RELATIVE [--once]\n  runku client create [--root PATH] --name NAME --kind public|confidential --scope SCOPE... [--client-id app_*]\n  runku client list [--root PATH]\n  runku key create [--root PATH] --client app_* --label LABEL --scope SCOPE... [--key-id crd_*] [--expires-at-micros I64]\n  runku key list [--root PATH] --client app_*\n  runku key reveal [--root PATH] --client app_* --key crd_*\n  runku key rotate [--root PATH] --client app_* --key crd_* --label LABEL [--new-key-id crd_*] [--expires-at-micros I64]\n  runku key revoke [--root PATH] --key crd_*\n  runku key delete [--root PATH] --key crd_*\n  runku workspace key create [--root PATH] --actor ACTOR --label LABEL [--key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key list [--root PATH]\n  runku workspace key rotate [--root PATH] --key dvk_* --label LABEL [--new-key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key revoke [--root PATH] --key dvk_*\n  runku workspace key delete [--root PATH] --key dvk_*\n  runku workspace sync [--root PATH] --url ORIGIN --workspace REF --token-env RUNKU_NAME [--expected-head empty|drv_*] [--create]\n  runku --help\n  runku --version\n\nPROJECT ROOT:\n  --root PATH  Project directory; defaults to the current working directory.\n\nLOCAL DEVELOPMENT:\n  init defaults to workspace local and listener 127.0.0.1:3210.\n  dev initializes missing local state, reconciles local Application Credentials, builds, publishes, and watches runku/.\n  public dotenv aliases are detected for known frontend tools; the SDK itself is framework-agnostic.\n  RUNKU_SECRET_KEY always remains server-only and is never copied to a public alias.\n  --prebuilt serves an already-published package without reading application sources.\n";
+pub const HELP: &str = "runku 0.3.0\n\nUSAGE:\n  runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT]\n  runku build [--root PATH] [--release-id rel_* --build-id bld_* --created-at-micros I64]\n  runku publish [--root PATH] --manifest FILE --artifact FILE [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]\n  runku release [--root PATH] --release rel_* [--against CHANNEL]\n  runku promote [--root PATH] --channel CHANNEL --release rel_* [--expected empty|rel_*]\n  runku rollback [--root PATH] --channel CHANNEL --expected rel_* --to rel_*\n  runku status [--root PATH]\n  runku dev [--root PATH] [--origin http(s)://HOST[:PORT]]... [--prebuilt] [--auth-config RELATIVE] [--application-env RELATIVE] [--public-env-prefix PREFIX] [--prepare] [--replace-remote-credentials]\n  runku doctor [--root PATH]\n  runku logs [--root PATH] [--after logc_N] [--limit 1..1000] [--stream platform|function] [--level debug|info|warn|error] [--function fnc_*] [--request req_*] [--invocation inv_*] [--client app_*] [--credential crd_*] [--release rel_*] [--follow]\n  runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  runku logs export-otlp [--root PATH] --config RELATIVE [--once]\n  runku client create [--root PATH] --name NAME --kind public|confidential --scope SCOPE... [--client-id app_*]\n  runku client list [--root PATH]\n  runku key create [--root PATH] --client app_* --label LABEL --scope SCOPE... [--key-id crd_*] [--expires-at-micros I64]\n  runku key list [--root PATH] --client app_*\n  runku key reveal [--root PATH] --client app_* --key crd_*\n  runku key rotate [--root PATH] --client app_* --key crd_* --label LABEL [--new-key-id crd_*] [--expires-at-micros I64]\n  runku key revoke [--root PATH] --key crd_*\n  runku key delete [--root PATH] --key crd_*\n  runku workspace key create [--root PATH] --actor ACTOR --label LABEL [--key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key list [--root PATH]\n  runku workspace key rotate [--root PATH] --key dvk_* --label LABEL [--new-key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key revoke [--root PATH] --key dvk_*\n  runku workspace key delete [--root PATH] --key dvk_*\n  runku workspace sync [--root PATH] --url ORIGIN --workspace REF --token-env RUNKU_NAME [--expected-head empty|drv_*] [--create]\n  runku --help\n  runku --version\n\nPROJECT ROOT:\n  --root PATH  Project directory; defaults to the current working directory.\n\nLOCAL DEVELOPMENT:\n  init defaults to workspace local and listener 127.0.0.1:3210.\n  dev initializes missing local state, reconciles local Application Credentials, builds, publishes, and watches runku/.\n  public dotenv aliases are detected for known frontend tools; the SDK itself is framework-agnostic.\n  RUNKU_SECRET_KEY always remains server-only and is never copied to a public alias.\n  --prebuilt serves an already-published package without reading application sources.\n";
+
+/// Immutable archive administration help appended by the executable.
+pub const LOG_ARCHIVE_HELP: &str = "\nLOG ARCHIVE:\n  runku logs archive-status [--root PATH] [--remote]\n  runku logs prune [--root PATH] [--remote] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  Archive status verifies contiguous Parquet manifests. Prune never passes the verified frontier.\n";
 
 /// Default Workspace created by zero-configuration local development.
 pub const DEFAULT_LOCAL_WORKSPACE: &str = "local";
@@ -192,8 +195,17 @@ pub enum CliCommand {
         /// Continue polling from each emitted cursor until interrupted.
         follow: bool,
     },
-    /// Dry-run or explicitly apply bounded local Operational Logs retention.
+    /// Verify and summarize immutable Operational Log archive coverage.
+    LogsArchiveStatus {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
+        /// Initialized project root.
+        root: PathBuf,
+    },
+    /// Dry-run or explicitly apply bounded Operational Logs retention.
     LogsPrune {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
         /// Initialized project root.
         root: PathBuf,
         /// Delete records strictly older than this timestamp.
@@ -695,6 +707,20 @@ fn parse_doctor(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
 fn parse_logs(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
     if matches!(
         args.first().and_then(|value| value.to_str()),
+        Some("archive-status")
+    ) {
+        args.remove(0);
+        let remote = take_switch(&mut args, "--remote")?;
+        let mut flags = Flags::new(args)?;
+        let command = CliCommand::LogsArchiveStatus {
+            remote,
+            root: flags.project_root()?,
+        };
+        flags.finish()?;
+        return Ok(command);
+    }
+    if matches!(
+        args.first().and_then(|value| value.to_str()),
         Some("export-otlp")
     ) {
         args.remove(0);
@@ -710,28 +736,7 @@ fn parse_logs(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
     }
     if matches!(args.first().and_then(|value| value.to_str()), Some("prune")) {
         args.remove(0);
-        let apply = take_switch(&mut args, "--apply")?;
-        let mut flags = Flags::new(args)?;
-        let root = flags.project_root()?;
-        let before = parse_required_timestamp(&mut flags, "--before-micros")?;
-        let maximum = flags
-            .optional_string("--maximum")?
-            .map_or(Ok(10_000_u32), |value| canonical_integer(&value))?;
-        if !(1..=10_000).contains(&maximum) {
-            return Err(CliUsageError);
-        }
-        let environment = parse_optional(&mut flags, "--environment")?;
-        if apply && environment.is_none() || !apply && environment.is_some() {
-            return Err(CliUsageError);
-        }
-        flags.finish()?;
-        return Ok(CliCommand::LogsPrune {
-            root,
-            before,
-            maximum,
-            apply,
-            environment,
-        });
+        return parse_logs_prune(args);
     }
     let follow = take_switch(&mut args, "--follow")?;
     let remote = take_switch(&mut args, "--remote")?;
@@ -779,6 +784,33 @@ fn parse_logs(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
     };
     flags.finish()?;
     Ok(command)
+}
+
+fn parse_logs_prune(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let apply = take_switch(&mut args, "--apply")?;
+    let remote = take_switch(&mut args, "--remote")?;
+    let mut flags = Flags::new(args)?;
+    let root = flags.project_root()?;
+    let before = parse_required_timestamp(&mut flags, "--before-micros")?;
+    let maximum = flags
+        .optional_string("--maximum")?
+        .map_or(Ok(10_000_u32), |value| canonical_integer(&value))?;
+    if !(1..=10_000).contains(&maximum) {
+        return Err(CliUsageError);
+    }
+    let environment = parse_optional(&mut flags, "--environment")?;
+    if apply && environment.is_none() || !apply && environment.is_some() {
+        return Err(CliUsageError);
+    }
+    flags.finish()?;
+    Ok(CliCommand::LogsPrune {
+        remote,
+        root,
+        before,
+        maximum,
+        apply,
+        environment,
+    })
 }
 
 fn parse_client(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
@@ -1376,6 +1408,16 @@ mod tests {
         assert!(matches!(
             parse_args(args(&[
                 "logs",
+                "archive-status",
+                "--root",
+                "/tmp/project",
+                "--remote",
+            ])),
+            Ok(CliCommand::LogsArchiveStatus { remote: true, .. })
+        ));
+        assert!(matches!(
+            parse_args(args(&[
+                "logs",
                 "--root",
                 "/tmp/project",
                 "--after",
@@ -1414,8 +1456,10 @@ mod tests {
                 "/tmp/project",
                 "--before-micros",
                 "1800000000000000",
+                "--remote",
             ])),
             Ok(CliCommand::LogsPrune {
+                remote: true,
                 maximum: 10_000,
                 apply: false,
                 environment: None,
@@ -1449,6 +1493,7 @@ mod tests {
                 "env_00000000000000000000000001",
             ])),
             Ok(CliCommand::LogsPrune {
+                remote: false,
                 maximum: 7,
                 apply: true,
                 environment: Some(_),

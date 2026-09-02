@@ -11,13 +11,19 @@ Node isolation adapters, and a PostgreSQL-backed Platform Identity Management AP
 first-owner invitation bootstrap, sessions, scoped grants, and optional OIDC.
 
 The compact `runku-server` distribution composes PostgreSQL-backed Platform Identity and can attach
-one initialized Product Environment through `RUNKU_PRODUCT_ROOT`. In that profile, authenticated
+one initialized Product Environment through `RUNKU_PRODUCT_ROOT`. The same process embeds hot log
+capture, filesystem or S3-compatible Parquet archival, DuckDB historical query, safe retention, and
+authenticated live streaming; a small installation does not need a separate observability service.
+In that profile, authenticated
 operators use the real Workspace/Release/Channel lifecycle, Product Gateway/runtime/background
 process, historical logs, and one-connection log streaming. Tagged releases publish Linux GNU
 ARM64/x86_64 server archives plus a matching multi-platform, non-root Safe V8 OCI image. The
-project does not yet publish distributed role/Agent binaries, a production Compose profile, a
-supported Kubernetes package, multi-Environment orchestration, or a certified backup/upgrade
-window. See
+source also implements `runku-server logs-worker` for the optional NATS-to-S3 HA log path, using the
+same server artifact. The project does not yet publish general distributed role/Agent binaries, a
+supported Kubernetes package, multi-Environment orchestration, active-active Product writers, or
+rolling multi-node upgrades. Tagged releases do include a supported Docker standalone package with
+mounted secret files, probes, bounded resources, a TLS-proxy boundary, offline backup verification,
+empty-install restore, upgrade preflight, guarded removal, and optional browser/HA-log overlays. See
 [Authenticated remote lifecycle](../operations/remote-lifecycle.md) for the exact compact profile.
 
 ## Product topology
@@ -33,6 +39,9 @@ Applications ──HTTP/WS──► Ingress/TLS ─► API/Gateway ────�
 
 Operator/CI ─► Authentication ─► Management ─► Projects, Environments, Releases,
                  login/refresh              Channels, Workspaces, identity/config/audit
+
+Logs, standalone: Product SQLite ─► embedded Parquet archive/DuckDB query
+Logs, optional HA: Product SQLite ─► replicated NATS ─► logs-worker ─► S3 Parquet
 
 Optional Full Node: API/Background ─► execution queue ─► Full Node Agents
                               artifacts/OCI registry ◄──────────┘
@@ -53,18 +62,26 @@ topology. Safe V8, Gateway, data, Realtime, management, and ordinary workers do 
 | `background` | Outbox, Realtime dispatch, schedules, Cron, reconciliation | Non-root, no KVM |
 | `management` | Project/Environment/code/key/config/backup/upgrade/audit lifecycle | Administrative network/identity, no KVM |
 | `all` | Single-instance composition with identical semantics | Dedicated profile |
+| `logs-worker` | Optional replicated-journal to immutable Parquet archive | Non-root, no KVM |
 | `agent` | Full Node queued execution and isolated worker lifecycle | Depends on selected trust profile |
 
-These role names describe the future distributed package. The compact `runku-server` publishes an
-`all`-style, single-Environment composition; separated role/Agent binaries and configuration are
-not published yet.
+The compact `runku-server` publishes an `all`-style, single-Environment composition. Its optional
+`logs-worker` command is the same binary/image and does not turn standalone into a multi-service
+requirement. Other separated product roles and Agent packages are not published yet.
+
+The compact Docker package is the supported installation path. One server container runs the `all`
+role and one PostgreSQL container stores Platform Identity. A host TLS proxy is required because
+both Product and Management listeners remain on loopback. See
+[Docker standalone installation](../../deployments/docker/README.md).
 
 ## Storage and dependency profiles
 
-- SQLite: implemented local single-process Environment.
+- SQLite: implemented local/standalone hot Product state and Operational Log tier.
 - PostgreSQL: authoritative production-oriented data/metadata adapter.
-- S3-compatible object storage: immutable distributed artifacts by digest.
-- NATS JetStream: distributed Full Node queue only when that runtime profile is enabled.
+- filesystem Parquet + embedded DuckDB: default standalone Operational Log history/query.
+- S3-compatible object storage: immutable distributed artifacts and optional log Parquet/manifests.
+- NATS JetStream: distributed Full Node queue when enabled and replicated Operational Log journal
+  only in the optional HA log profile; these use separate named streams/subjects.
 - OCI registry: Full Node images referenced by digest.
 - secret provider/KMS: required by packaged secret configuration and master-key rotation.
 - OTLP collector: optional telemetry destination, never hot-path authority.
@@ -102,8 +119,14 @@ backup/restore, upgrade/rollback, compatibility matrix, and failure-tested runbo
 
 See [Production readiness](production-readiness.md) for the complete gate and
 [Deployment assets](../../deployments/README.md) for profile-specific boundaries.
+For the exact one-process and HA Operational Log layouts, variables, failure modes, and runbook, see
+[Operational Log storage and administration](../operations/operational-logs.md).
 
-## Evaluation path today
+## Installation and maintainer validation
+
+For a released compact installation, download `runku-selfhost-vX.Y.Z.tar.gz`, verify it against
+`SHA256SUMS`, pin the OCI manifest digest, and follow the packaged Docker guide. Source evaluation
+and maintainer evidence use:
 
 ```sh
 make install-cli-check
@@ -118,5 +141,8 @@ make platform-lifecycle-keycloak-check
 ```
 
 Read each Makefile target before running it; several start Docker dependencies. These gates prove
-component and vertical contracts on the stated environment. They do not prove clean installation,
-HA, backup/restore, or supported upgrades for the full product.
+component and vertical contracts on the stated environment. The explicit compact installation
+campaign additionally proves clean setup, invitation login, Product lifecycle, backup/offline
+verification, empty-install restore, and restart from release-shaped artifacts. HA NATS/S3 failure
+evidence remains separate, and neither campaign certifies a future distributed or Kubernetes
+profile.

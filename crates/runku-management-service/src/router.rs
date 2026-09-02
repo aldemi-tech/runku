@@ -31,7 +31,8 @@ use tokio::{
 use zeroize::Zeroizing;
 
 use crate::{
-    ManagementLogQuery, ManagementProduct, ManagementProductError, OidcClientConfiguration,
+    ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -169,6 +170,14 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/logs/follow",
             get(product_logs_follow),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/logs/archive-status",
+            get(product_log_archive_status),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/logs/prune",
+            post(product_log_prune),
         )
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
@@ -490,6 +499,59 @@ async fn product_logs(
     };
     match product.logs(&query).await {
         Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_log_archive_status(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::LogsRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.log_archive_status().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_log_prune(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementLogPruneRequest>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::LogsPrune,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.log_prune(&request).await {
+        Ok(result) => json(StatusCode::OK, &result, true),
         Err(error) => product_failure(error),
     }
 }

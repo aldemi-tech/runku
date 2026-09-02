@@ -1,0 +1,130 @@
+name: ${COMPOSE_PROJECT_NAME:-runku}
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      POSTGRES_DB: runku
+      POSTGRES_USER: runku
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - postgres-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${RUNKU_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runku -d runku"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256mb
+
+  product-init:
+    profiles: ["setup"]
+    image: ${RUNKU_SERVER_IMAGE:?Set RUNKU_SERVER_IMAGE to an immutable version and digest}
+    user: "${RUNKU_UID:?Set RUNKU_UID}:${RUNKU_GID:?Set RUNKU_GID}"
+    entrypoint: ["/usr/local/bin/runku"]
+    command:
+      - init
+      - --root
+      - /var/lib/runku/product
+      - --workspace
+      - local
+      - --listen
+      - 127.0.0.1:3210
+    volumes:
+      - type: bind
+        source: ${RUNKU_DATA_DIRECTORY:?Set RUNKU_DATA_DIRECTORY}/product
+        target: /var/lib/runku/product
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
+  product-prepare:
+    profiles: ["setup"]
+    image: ${RUNKU_SERVER_IMAGE:?Set RUNKU_SERVER_IMAGE to an immutable version and digest}
+    user: "${RUNKU_UID:?Set RUNKU_UID}:${RUNKU_GID:?Set RUNKU_GID}"
+    entrypoint: ["/usr/local/bin/runku"]
+    command:
+      - dev
+      - --root
+      - /var/lib/runku/product
+      - --prepare
+    volumes:
+      - type: bind
+        source: ${RUNKU_DATA_DIRECTORY:?Set RUNKU_DATA_DIRECTORY}/product
+        target: /var/lib/runku/product
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      product-init:
+        condition: service_completed_successfully
+
+  server:
+    image: ${RUNKU_SERVER_IMAGE:?Set RUNKU_SERVER_IMAGE to an immutable version and digest}
+    user: "${RUNKU_UID:?Set RUNKU_UID}:${RUNKU_GID:?Set RUNKU_GID}"
+    network_mode: host
+    environment:
+      RUNKU_DATABASE_URL_FILE: /run/secrets/database-url
+      RUNKU_PLATFORM_IDENTITY_PEPPER_FILE: /run/secrets/platform-pepper
+      RUNKU_STATE_DIRECTORY: /var/lib/runku/platform
+      RUNKU_PRODUCT_ROOT: /var/lib/runku/product
+      RUNKU_MANAGEMENT_LISTEN: 127.0.0.1:3220
+      RUNKU_PUBLIC_MANAGEMENT_URL: ${RUNKU_PUBLIC_MANAGEMENT_URL:?Set the canonical HTTPS Management origin}
+    secrets:
+      - database-url
+      - platform-pepper
+    volumes:
+      - type: bind
+        source: ${RUNKU_DATA_DIRECTORY:?Set RUNKU_DATA_DIRECTORY}/product
+        target: /var/lib/runku/product
+      - type: bind
+        source: ${RUNKU_DATA_DIRECTORY:?Set RUNKU_DATA_DIRECTORY}/platform
+        target: /var/lib/runku/platform
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${RUNKU_PIDS_LIMIT:-512}
+    mem_limit: ${RUNKU_MEMORY_LIMIT:-2g}
+    cpus: ${RUNKU_CPU_LIMIT:-2.0}
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
+    stop_grace_period: 30s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/runku-server", "probe-ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+
+secrets:
+  postgres-password:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/postgres-password
+  database-url:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/database-url
+  platform-pepper:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/platform-pepper

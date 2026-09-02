@@ -1,0 +1,5 @@
+services:
+  server:
+    environment:
+      RUNKU_PRODUCT_ALLOWED_ORIGINS: ${RUNKU_PRODUCT_ALLOWED_ORIGINS:?Set exact comma-separated browser origins}
+      RUNKU_PRODUCT_AUTH_CONFIG: ${RUNKU_PRODUCT_AUTH_CONFIG:?Set the Product-root-relative JWT provider configuration}

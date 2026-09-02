@@ -2,7 +2,8 @@
 
 Kubernetes schedules Runku product roles; it does not replace Runku's data, release, execution,
 Realtime, or administration semantics. This directory currently contains only Full Node
-conformance manifests. A supported Helm/Kustomize package and official images are not published.
+conformance manifests. A supported Helm/Kustomize package is not published; the released compact
+server image is not by itself a Kubernetes installation.
 
 ## Complete product topology
 
@@ -15,12 +16,23 @@ Applications ─► Ingress/TLS ─► API Service/Pods ─► PostgreSQL
 
 Operator/CI ─► Management Service/Pods ─► lifecycle/config/audit
 
+Small profile: one Runku Pod + persistent Product volume
+               └─ hot SQLite + embedded Parquet/DuckDB
+
+HA logs: serving cells ─► replicated NATS journal ─► Runku log-worker Pods ─► S3 Parquet
+
 Optional Full Node: Background/API ─► NATS ─► Full Node Agent Pods
                                 S3/OCI ◄───────────────┘
 ```
 
 API, background, and management run on ordinary nodes without KVM. Only the selected
 shared-untrusted Full Node Agent profile needs microVM host privileges.
+
+For one small Environment, prefer one Runku Pod with a `ReadWriteOnce` persistent Product volume;
+the embedded log archive/query path adds no sidecar. A StatefulSet replica count greater than one
+does not make the same SQLite Environment active-active. The HA log profile instead protects
+already-admitted logs with a three-replica JetStream journal and S3-compatible history. It can be
+added without enabling Full Node or splitting API/background/management.
 
 ## Scheduling and security
 
@@ -32,6 +44,9 @@ shared-untrusted Full Node Agent profile needs microVM host privileges.
 - exact Ingress hosts/origins/trusted proxies and WebSocket/drain settings;
 - immutable images by digest with admission checks, SBOM/provenance/signatures;
 - authoritative state outside `emptyDir`/Pod lifecycle.
+- separate ServiceAccounts: serving cells publish logs, log workers consume/ACK and write archive;
+- three failure-domain JetStream replicas and object storage with a tested zone-loss objective;
+- no raw Product log rows in the Platform Identity PostgreSQL database.
 
 Full Node Agent nodes use explicit label/taint for isolation class, expose required KVM/cgroup/netns
 only to Agent Pods, keep controller/assets root-owned, prewarm before readiness, stop queue pulls
@@ -55,6 +70,8 @@ version, and recovery are tested.
 - background: outbox/schedule/Cron age, lease contention, retry/poison rate;
 - Full Node Agent: NATS queue age, available/busy slots, startup/replacement, node provisioning;
 - management: operation latency/failure and serving-revision propagation.
+- logs: local admission drops, PubAck lag, journal bytes/oldest age/replica health, durable consumer
+  pending/redelivery, archive frontier/age, Parquet size/count, and historical query failures.
 
 CPU alone is insufficient. Scaling must preserve leases, connection budgets, and dependency
 capacity.
@@ -80,4 +97,6 @@ and pass clean install, node/dependency failure, backup/restore, upgrade, and un
 
 See [Self-hosting](../../docs/self-hosting/overview.md),
 [Production readiness](../../docs/self-hosting/production-readiness.md), and
-[Security](../../docs/security/security-model.md).
+[Security](../../docs/security/security-model.md). The standalone/HA decision, exact environment
+variables, ordering constraint, retention rules, and incident table are in
+[Operational Log storage](../../docs/operations/operational-logs.md).

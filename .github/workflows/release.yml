@@ -82,6 +82,33 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  selfhost-package:
+    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
+    needs: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Package and statically validate the compact installation
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          ./scripts/prepare-selfhost-package.sh "$VERSION" out
+          cp deployments/docker/.env.example out/archive/runku-selfhost-v${VERSION}/.env
+          RUNKU_UID=65532 RUNKU_GID=65532 \
+            docker compose \
+              --project-directory out/archive/runku-selfhost-v${VERSION} \
+              --env-file out/archive/runku-selfhost-v${VERSION}/.env \
+              -f out/archive/runku-selfhost-v${VERSION}/compose.yaml \
+              config --quiet
+          rm out/archive/runku-selfhost-v${VERSION}/.env
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-selfhost
+          path: out/release/*
+          if-no-files-found: error
+          compression-level: 0
+
   cli-binaries:
     if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
     needs: metadata
@@ -290,6 +317,35 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  selfhost-artifact-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.artifact_run_id == ''
+    needs: [metadata, selfhost-package, cli-binaries, server-binaries]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-server-x86_64-unknown-linux-gnu
+          path: inputs/server
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: inputs/cli
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-selfhost
+          path: inputs/selfhost
+      - name: Exercise the clean compact package and disaster restore
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          server_archive=$(find inputs/server -type f -name 'runku-server-*.tar.gz' -print -quit)
+          cli_archive=$(find inputs/cli -type f -name 'runku-*.tar.gz' -print -quit)
+          selfhost_archive=$(find inputs/selfhost -type f -name 'runku-selfhost-*.tar.gz' -print -quit)
+          ./scripts/selfhost-artifact-evidence.sh \
+            "$VERSION" "$server_archive" "$cli_archive" "$selfhost_archive"
+
   publish-npm:
     if: github.ref_type == 'tag'
     needs: [metadata, sdk-packages, cli-binaries]
@@ -317,7 +373,7 @@ jobs:
 
   github-release:
     if: github.ref_type == 'tag'
-    needs: [metadata, publish-npm, server-binaries, server-image]
+    needs: [metadata, publish-npm, selfhost-package, server-binaries, server-image]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

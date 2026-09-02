@@ -138,6 +138,42 @@ application hot path.
 
 Capacity evidence requires queue/admission wait and dependency pressure, not CPU alone.
 
+## Compact Docker installation failures
+
+Run `./runku-selfhost status` first. A configuration failure before PostgreSQL access usually means
+an unpinned image, unsafe/non-absolute data or secret directory, mismatched directory UID/GID,
+partial secret set, simultaneous direct and `_FILE` secret inputs, malformed public Management URL,
+or an invalid browser/HA overlay. Correct the exact input; do not copy secret values into `.env` to
+bypass a mount problem.
+
+`probe-live` proves the Management process answers on its configured loopback listener.
+`probe-ready` additionally performs the authoritative Platform Identity PostgreSQL check. Product
+port 3210 is expected to remain closed until a Channel has been promoted. After a restart with an
+existing Channel it must reopen automatically; if it does not, preserve server logs and Product
+state rather than re-promoting blindly.
+
+A backup failure restarts serving only when it was running before the attempt. Preserve a partial
+backup directory only as diagnostic evidence; it is never a recovery point without a valid manifest
+and successful `verify-backup`. Restore intentionally refuses non-empty PostgreSQL/Product/Platform
+destinations and a mismatched Platform pepper. Do not weaken those checks or use `pg_restore --clean`
+against an existing installation.
+
+## Operational Log failures
+
+For a local Product root run `runku doctor`, `runku logs archive-status`, then a bounded
+`runku logs --limit 20`. For an attached server use `runku logs archive-status --remote` and
+`runku logs --remote --limit 20`. A manifest
+gap, changed Parquet digest, changed manifest, or scope/path mismatch fails closed as corruption;
+stop retention and preserve every object. In HA, also capture JetStream stream/consumer state,
+replica health, pending/redelivery count, oldest age, and the first pending cursor. NATS/S3 outage
+must accumulate retryable work, not be “fixed” by deleting the stream or advancing the consumer.
+
+If live logs stop after a session or grant change, that is expected revocation enforcement. Login
+again only after the grant is intentionally restored. `--remote --follow` is one streaming HTTP
+connection, so repeated 250 ms requests indicate a proxy/client integration error rather than the
+Runku CLI behavior. Follow the symptom/action table in
+[Operational Log storage](../operations/operational-logs.md#failure-response).
+
 ## Corruption and recovery
 
 Stop all writers. Preserve state and checksums. Run `doctor` read-only. Verify a complete backup and

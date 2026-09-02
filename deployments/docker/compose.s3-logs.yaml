@@ -1,0 +1,16 @@
+services:
+  server:
+    environment:
+      RUNKU_LOG_ARCHIVE_BACKEND: s3
+      RUNKU_LOG_ARCHIVE_S3_BUCKET: ${RUNKU_LOG_ARCHIVE_S3_BUCKET:?Set the immutable archive bucket}
+      RUNKU_LOG_ARCHIVE_S3_REGION: ${RUNKU_LOG_ARCHIVE_S3_REGION:?Set the archive region}
+      RUNKU_LOG_ARCHIVE_S3_PREFIX: ${RUNKU_LOG_ARCHIVE_S3_PREFIX:?Set a unique installation prefix}
+      RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE: ${RUNKU_LOG_ARCHIVE_S3_VIRTUAL_HOSTED_STYLE:-true}
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/archive-aws-credentials
+      AWS_PROFILE: ${RUNKU_LOG_ARCHIVE_AWS_PROFILE:-default}
+    secrets:
+      - archive-aws-credentials
+
+secrets:
+  archive-aws-credentials:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/archive-aws-credentials

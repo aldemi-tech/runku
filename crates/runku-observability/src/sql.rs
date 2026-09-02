@@ -403,6 +403,71 @@ impl LogRepository for SqlLogRepository {
         })
     }
 
+    async fn prune_archived_before(
+        &self,
+        scope: EnvironmentScope,
+        cutoff: TimestampMicros,
+        archived_through: LogCursor,
+        maximum: u32,
+        dry_run: bool,
+    ) -> Result<PruneResult, LogRepositoryError> {
+        if cutoff.get() < 0 || !(1..=LOG_PRUNE_MAX_RECORDS).contains(&maximum) {
+            return Err(LogRepositoryError::InvalidRequest);
+        }
+        let archived_through = i64::try_from(archived_through.get())
+            .map_err(|_| LogRepositoryError::InvalidRequest)?;
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        if self.backend == LogRepositoryBackend::PostgreSQL {
+            sqlx::query("SELECT next_sequence FROM runku_log_sequences WHERE project_id = $1 AND environment_id = $2 FOR UPDATE")
+                .bind(scope.project_id().to_string())
+                .bind(scope.environment_id().to_string())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+        }
+        let fetch = maximum
+            .checked_add(1)
+            .ok_or(LogRepositoryError::LimitExceeded)?;
+        let sequences = sqlx::query_scalar::<_, i64>(
+            "SELECT sequence FROM runku_operational_logs WHERE project_id = $1 AND environment_id = $2 AND occurred_at_micros < $3 AND sequence <= $4 ORDER BY sequence ASC LIMIT $5",
+        )
+        .bind(scope.project_id().to_string())
+        .bind(scope.environment_id().to_string())
+        .bind(cutoff.get())
+        .bind(archived_through)
+        .bind(i64::from(fetch))
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
+        let maximum = usize::try_from(maximum).map_err(|_| LogRepositoryError::LimitExceeded)?;
+        let more = sequences.len() > maximum;
+        let selected = sequences.len().min(maximum);
+        let matched = u32::try_from(selected).map_err(|_| LogRepositoryError::LimitExceeded)?;
+        let deleted = if dry_run || selected == 0 {
+            0
+        } else {
+            let last = sequences[selected - 1];
+            let result = sqlx::query("DELETE FROM runku_operational_logs WHERE project_id = $1 AND environment_id = $2 AND occurred_at_micros < $3 AND sequence <= $4")
+                .bind(scope.project_id().to_string())
+                .bind(scope.environment_id().to_string())
+                .bind(cutoff.get())
+                .bind(last)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+            u32::try_from(result.rows_affected()).map_err(|_| LogRepositoryError::Corruption)?
+        };
+        transaction.commit().await.map_err(map_commit)?;
+        self.counters
+            .pruned
+            .fetch_add(u64::from(deleted), Ordering::Relaxed);
+        Ok(PruneResult {
+            matched,
+            deleted,
+            more,
+        })
+    }
+
     async fn close(&self) {
         self.pool.close().await;
     }
