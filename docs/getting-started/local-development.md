@@ -51,25 +51,25 @@ the table, and download `SHA256SUMS`. Verify before extraction:
 ```sh
 # Linux example
 sha256sum --check SHA256SUMS --ignore-missing
-tar -xzf runku-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 runku-v0.1.0-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
+tar -xzf runku-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 runku-v0.2.0-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```sh
 # macOS example (verify the named file with the SHA256SUMS value)
-shasum -a 256 runku-v0.1.0-aarch64-apple-darwin.tar.gz
-tar -xzf runku-v0.1.0-aarch64-apple-darwin.tar.gz
+shasum -a 256 runku-v0.2.0-aarch64-apple-darwin.tar.gz
+tar -xzf runku-v0.2.0-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 0755 runku-v0.1.0-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
+install -m 0755 runku-v0.2.0-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```powershell
 # Windows x86_64 example
-Get-FileHash .\runku-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-Expand-Archive .\runku-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
-& .\runku-cli\runku-v0.1.0-x86_64-pc-windows-msvc\runku.exe --version
+Get-FileHash .\runku-v0.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Expand-Archive .\runku-v0.2.0-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
+& .\runku-cli\runku-v0.2.0-x86_64-pc-windows-msvc\runku.exe --version
 ```
 
 Compare the printed Windows/macOS hash with the exact filename entry in `SHA256SUMS`. Move the

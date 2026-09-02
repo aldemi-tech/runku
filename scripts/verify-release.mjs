@@ -16,6 +16,9 @@ assertVersion("@runku/server", serverPackage.version, version)
 const cargoManifest = read("crates/runku-cli/Cargo.toml")
 const cargoVersion = cargoManifest.match(/^version = "([^"]+)"$/m)?.[1]
 assertVersion("runku-cli Cargo package", cargoVersion, version)
+const serverCargoManifest = read("crates/runku-server/Cargo.toml")
+const serverCargoVersion = serverCargoManifest.match(/^version = "([^"]+)"$/m)?.[1]
+assertVersion("runku-server Cargo package", serverCargoVersion, version)
 
 const cliSource = read("crates/runku-cli/src/lib.rs")
 if (!cliSource.includes(`runku ${version}\\n`)) {
@@ -33,6 +36,8 @@ assertEqual(
 
 const launcherSource = read("packages/cli/lib/platform.js")
 const releaseWorkflow = read(".github/workflows/release.yml")
+const cliWorkflow = section(releaseWorkflow, "  cli-binaries:", "  server-binaries:")
+const serverWorkflow = section(releaseWorkflow, "  server-binaries:", "  server-image:")
 const installGuide = read("docs/getting-started/local-development.md")
 
 for (const platform of releasePlatforms) {
@@ -51,10 +56,21 @@ for (const platform of releasePlatforms) {
     launcherSource,
     `"${platform.os}-${platform.cpu}": "${platform.packageName}"`,
   )
-  assertOccursOnce("release workflow target", releaseWorkflow, `target: ${platform.target}`)
+  assertOccursOnce("CLI release workflow target", cliWorkflow, `target: ${platform.target}`)
   assertContains("installation target table", installGuide, `\`${platform.target}\``)
   assertContains("installation package table", installGuide, `\`${platform.packageName}\``)
 }
+
+for (const target of ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]) {
+  assertOccursOnce("server release workflow target", serverWorkflow, `target: ${target}`)
+}
+assertContains("server image workflow", releaseWorkflow, "ghcr.io/aldemi-tech/runku-server:${VERSION}")
+assertContains(
+  "server image base",
+  read("deployments/docker/server.Dockerfile"),
+  "gcr.io/distroless/cc-debian12:nonroot@sha256:",
+)
+assertContains("source install smoke version", read("Makefile"), `runku ${version.replaceAll(".", "\\.")}`)
 
 const tagIndex = process.argv.indexOf("--tag")
 if (tagIndex !== -1) {
@@ -96,4 +112,13 @@ function assertContains(label, source, expected) {
 function assertOccursOnce(label, source, expected) {
   const occurrences = source.split(expected).length - 1
   if (occurrences !== 1) throw new Error(`${label} must contain ${expected} exactly once`)
+}
+
+function section(source, start, end) {
+  const startIndex = source.indexOf(start)
+  const endIndex = source.indexOf(end, startIndex + start.length)
+  if (startIndex === -1 || endIndex === -1) {
+    throw new Error(`release workflow section ${start}..${end} is missing`)
+  }
+  return source.slice(startIndex, endIndex)
 }

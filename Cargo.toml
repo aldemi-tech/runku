@@ -18,6 +18,9 @@ members = [
     "crates/runku-identity",
     "crates/runku-identity-provider",
     "crates/runku-identity-repository",
+    "crates/runku-platform-identity",
+    "crates/runku-management-service",
+    "crates/runku-server",
     "crates/runku-local",
     "crates/runku-node-runtime",
     "crates/runku-cli",
@@ -57,12 +60,13 @@ deno_error = "=0.7.1"
 getrandom = "=0.4.3"
 hmac = "=0.13.0"
 ipnet = "=2.12.1"
-jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }
 proptest = "=1.11.0"
 prost = "=0.14.4"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "logs"] }
 object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
+rpassword = "=7.5.4"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"

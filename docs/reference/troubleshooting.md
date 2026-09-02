@@ -34,6 +34,16 @@ public issue.
 | Scheduled work repeats | At-least-once delivery | Verify idempotent handler/effect key; inspect invocation logs |
 | `doctor` inconsistent/corrupt | Durable integrity | Stop writes, preserve state, restore verified backup |
 | Remote publish exit 9 | Outcome uncertain | Query remote state using operation/revision before retry |
+| `runku login` exit 7 | Platform invitation invalid/inactive | Obtain the intended unconsumed code; do not substitute an application key |
+| Remote lifecycle exit 7 | Missing, expired, malformed, or revoked operator session | Run `runku login`; the CLI already attempted one refresh and never falls back to `rk_sec` |
+| Remote lifecycle exit 8 | Current grant lacks the capability at the root's exact Environment | Delegate only the required capability/scope; do not widen the Application key |
+| Remote publish exit 2 with expected-head requirement | No explicit remote Workspace CAS was supplied | Read/reconcile the current head, then pass `--expected-head empty|drv_*` |
+| Remote log follow exits after revocation | Session/grant was rechecked during the stream | Re-authenticate or restore the intended `logs:follow` grant; do not reconnect with a stale bearer |
+| Management readiness fails | PostgreSQL/schema unavailable | Preserve server error code; verify dependency and migration checksum |
+| OIDC login returns 401 | Issuer/audience/claim/signature/JWKS/link | Check exact provider policy and whether first login included a valid invitation |
+| Browser OIDC callback times out | Browser could not complete provider flow or reach loopback callback | Verify native-client loopback redirect policy, local firewall, provider endpoints, and retry with fresh PKCE state |
+| `PLATFORM_AUTH_CONFIGURATION_*` | Authentication discovery was unavailable, malformed, contradictory, or advertised an unsafe Management origin | Verify the exact authentication URL, TLS certificate, `/v1/auth/config` v1 response, and public Management URL; do not follow a redirect manually |
+| `PLATFORM_LOGIN_SELECTION_REQUIRED` | More than one login method was advertised but stdin is non-interactive | Select explicitly with `--browser`, `--code-env`, or `--oidc-token-env` |
 
 ## Local startup failures
 
@@ -83,6 +93,13 @@ Check independently:
 
 A publishable key is not a secret but is still required. A valid user JWT does not replace an
 Application Key. A development key cannot invoke Functions.
+
+For Management API failures, validate a different axis: `rk_at_v1_*` authenticates a current
+operator session, then capabilities are checked at installation/Project/Environment scope.
+`rk_pub_*`, `rk_sec_*`, and `rk_dev_*` are always rejected at this boundary. An external OIDC token
+authenticates only the configured provider identity and creates a Runku session; first enrollment
+also requires a scoped single-use invitation. See
+[Platform operator identity](../auth/platform-identity.md#failure-handling).
 
 ## Data and Mutation failures
 

@@ -561,8 +561,8 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::PublicKeyUse};
-    use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, rand_core::OsRng};
     use runku_identity::{
         ApplicationScope, JwtAlgorithm, JwtPrincipalProfile, JwtProviderConfig, PrincipalKind,
     };
@@ -584,9 +584,10 @@ mod tests {
     }
 
     fn signing_fixture(kid: &str) -> Result<SigningFixture, Box<dyn Error>> {
-        let private = RsaPrivateKey::new(&mut OsRng, 2_048)?;
-        let der = private.to_pkcs1_der()?;
-        let encoding = EncodingKey::from_rsa_der(der.as_bytes());
+        let der = STANDARD.decode(
+            include_str!("../../../tests/fixtures/identity/rsa-private.pkcs1.der.b64").trim(),
+        )?;
+        let encoding = EncodingKey::from_rsa_der(&der);
         let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&encoding, Algorithm::RS256)?;
         jwk.common.key_id = Some(kid.to_owned());
         jwk.common.public_key_use = Some(PublicKeyUse::Signature);

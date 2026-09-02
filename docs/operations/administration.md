@@ -6,10 +6,13 @@ administration commands.
 
 ## Current administration boundary
 
-The pre-release CLI fully administers one local application root. Distributed components exist as
-libraries and conformance adapters, but a general-purpose management service and production server
-distribution are not published. Use the [production-readiness checklist](../self-hosting/production-readiness.md)
-to distinguish current procedures from required deployment capabilities.
+The pre-release CLI fully administers one local application root. The source server additionally
+attaches one Product Environment to PostgreSQL-backed Platform Identity for browser/invitation
+login, scoped invitations, sessions, authenticated publish/release/promote/rollback/status, and
+historical/streaming logs. It is not the complete distributed multi-Environment package. Use the
+[authenticated remote lifecycle](remote-lifecycle.md) for exact commands, the
+[Platform Identity runbook](../auth/platform-identity.md) for trust configuration, and the
+[production-readiness checklist](../self-hosting/production-readiness.md) for the remaining boundary.
 
 ## Daily local checks
 
@@ -60,8 +63,8 @@ After an unclean stop:
    runku build
    ```
 
-2. Publish exact returned paths, optionally with observed Workspace HEAD.
-3. Validate candidate lifecycle against the target Channel.
+2. Publish exact returned paths. For `--remote`, an explicit observed Workspace HEAD is required.
+3. Validate candidate lifecycle against the target Channel; add `--remote` for the Management API.
 4. Record `runku status` before change.
 5. Promote with `--expected` equal to the observed binding.
 6. Run smoke tests using both `release:<id>` and `channel:<name>` targets.
@@ -88,6 +91,22 @@ Rotation:
 Never solve a scope problem by reusing a more privileged client. Never expose `rk_sec_*` or
 `rk_dev_*` through public frontend configuration.
 
+Operator credentials are separate. Bootstrap and delegated `rk_inv_v1_*` codes are single-use;
+`rk_at_v1_*` tokens are short-lived; `rk_rt_v1_*` tokens rotate on refresh; every device has an
+independently revocable `ops_*` session. Never use `rk_sec_*` as operator authentication or copy an
+operator refresh token into application configuration.
+
+If the initial-owner file is lost before the first enrollment, stop the server and use
+`runku-server recover-bootstrap` with the explicit confirmation documented in
+[Platform operator identity](../auth/platform-identity.md#enroll-the-initial-owner). The operation
+revokes the old pending code atomically and cannot reopen bootstrap after an operator exists.
+
+`runku login` normally starts at `https://api.runku.app`; self-hosted operators pass the
+installation authentication origin once and can reuse it on later interactive logins. The public
+authentication configuration may point at a separate canonical Management origin. Treat both DNS
+names, TLS certificates, ingress policies, and `RUNKU_PUBLIC_MANAGEMENT_URL` as one trust change;
+do not migrate either silently or through an HTTP redirect.
+
 ## Log investigation and retention
 
 Start from a request or invocation ID:
@@ -96,7 +115,7 @@ Start from a request or invocation ID:
 runku logs --request req_... --stream platform
 runku logs --invocation inv_... --stream function
 runku logs --client app_... --credential crd_... --level warn
-runku logs --release rel_... --follow
+runku logs --remote --release rel_... --follow
 ```
 
 Save the last cursor. For retention, calculate an absolute Unix-microsecond cutoff, dry-run, review

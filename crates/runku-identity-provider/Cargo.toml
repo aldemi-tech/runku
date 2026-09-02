@@ -20,8 +20,8 @@ tokio = { workspace = true, features = ["net", "sync", "time"] }
 url.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 jsonwebtoken.workspace = true
-rsa = { version = "=0.9.10", features = ["getrandom"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

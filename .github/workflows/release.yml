@@ -170,6 +170,126 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  server-binaries:
+    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-server-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Verify native Rust host
+        run: |
+          host_triple="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$host_triple" = '${{ matrix.target }}'
+      - name: Build only the server release binary
+        run: cargo build --package runku-server --release --locked
+      - name: Run basic server validation
+        run: test "$(target/release/runku-server version)" = 'runku-server ${{ needs.metadata.outputs.version }}'
+      - name: Prepare server archive and image input
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive_base="runku-server-v${VERSION}-${TARGET}"
+          mkdir -p "out/archive/${archive_base}" "out/release" "out/server/${TARGET}"
+          install -m 0755 target/release/runku-server "out/archive/${archive_base}/runku-server"
+          install -m 0755 target/release/runku-server "out/server/${TARGET}/runku-server"
+          install -m 0644 distribution/SERVER-README.md "out/archive/${archive_base}/README.md"
+          install -m 0644 LICENSE "out/archive/${archive_base}/LICENSE"
+          tar -czf "out/release/${archive_base}.tar.gz" -C out/archive "$archive_base"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-server-${{ matrix.target }}
+          path: out
+          if-no-files-found: error
+          compression-level: 0
+
+  server-image:
+    if: github.ref_type == 'tag'
+    needs: [metadata, cli-binaries, server-binaries]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-server-x86_64-unknown-linux-gnu
+          path: inputs/server-amd64
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-server-aarch64-unknown-linux-gnu
+          path: inputs/server-arm64
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-x86_64-unknown-linux-gnu
+          path: inputs/cli-amd64
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-aarch64-unknown-linux-gnu
+          path: inputs/cli-arm64
+      - name: Prepare architecture-specific image contexts
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          mkdir -p image-amd64 image-arm64 extract-amd64 extract-arm64
+          cp inputs/server-amd64/server/x86_64-unknown-linux-gnu/runku-server image-amd64/runku-server
+          cp inputs/server-arm64/server/aarch64-unknown-linux-gnu/runku-server image-arm64/runku-server
+          tar -xzf "inputs/cli-amd64/release/runku-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C extract-amd64
+          tar -xzf "inputs/cli-arm64/release/runku-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz" -C extract-arm64
+          cp "extract-amd64/runku-v${VERSION}-x86_64-unknown-linux-gnu/runku" image-amd64/runku
+          cp "extract-arm64/runku-v${VERSION}-aarch64-unknown-linux-gnu/runku" image-arm64/runku
+      - name: Authenticate to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username '${{ github.actor }}' --password-stdin
+      - name: Publish immutable architecture images and multi-platform manifest
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          REVISION: ${{ github.sha }}
+        run: |
+          docker buildx create --name runku-release-builder --use
+          docker buildx build --platform linux/amd64 --file deployments/docker/server.Dockerfile \
+            --build-arg "RUNKU_VERSION=${VERSION}" --build-arg "RUNKU_REVISION=${REVISION}" \
+            --provenance=mode=max --sbom=true --push \
+            --tag "ghcr.io/aldemi-tech/runku-server:${VERSION}-amd64" image-amd64
+          docker buildx build --platform linux/arm64 --file deployments/docker/server.Dockerfile \
+            --build-arg "RUNKU_VERSION=${VERSION}" --build-arg "RUNKU_REVISION=${REVISION}" \
+            --provenance=mode=max --sbom=true --push \
+            --tag "ghcr.io/aldemi-tech/runku-server:${VERSION}-arm64" image-arm64
+          docker buildx imagetools create \
+            --tag "ghcr.io/aldemi-tech/runku-server:${VERSION}" \
+            --tag "ghcr.io/aldemi-tech/runku-server:sha-${REVISION}" \
+            "ghcr.io/aldemi-tech/runku-server:${VERSION}-amd64" \
+            "ghcr.io/aldemi-tech/runku-server:${VERSION}-arm64"
+          mkdir -p out/release
+          docker buildx imagetools inspect \
+            "ghcr.io/aldemi-tech/runku-server:${VERSION}" \
+            >out/release/runku-server-image.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-server-image-metadata
+          path: out
+          if-no-files-found: error
+          compression-level: 0
+
   publish-npm:
     if: github.ref_type == 'tag'
     needs: [metadata, sdk-packages, cli-binaries]
@@ -197,7 +317,7 @@ jobs:
 
   github-release:
     if: github.ref_type == 'tag'
-    needs: [metadata, publish-npm]
+    needs: [metadata, publish-npm, server-binaries, server-image]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

@@ -35,7 +35,11 @@ Read in this order:
    outbox, subscriptions, and resync.
 6. [Application identity](auth/application-identity.md): Application Clients, key types, user/service
    identity, JWT/OIDC, browser/server separation, and rotation.
-7. [`@runku/server`](../packages/server/README.md) and
+7. [Platform operator identity](auth/platform-identity.md): first-owner bootstrap, `runku login`,
+   scoped invitations, sessions, OIDC, PostgreSQL state, and recovery.
+8. [Authenticated remote lifecycle](operations/remote-lifecycle.md): use one operator session for
+   publish, Release validation, promotion, rollback, historical logs, and streaming logs.
+9. [`@runku/server`](../packages/server/README.md) and
    [`@runku/client`](../packages/client/README.md): exact TypeScript APIs and examples.
 
 ## Release and CI/CD path
@@ -60,13 +64,16 @@ Read the support boundary before designing infrastructure:
    installation, administration, HA, security, recovery, upgrades, and release artifacts.
 3. [Administration](operations/administration.md): daily checks, lifecycle operations, credentials,
    retention, capacity, maintenance windows, and incident workflow.
-4. [Observability](operations/observability.md): signal catalog, correlation, privacy, dashboards,
+4. [Authenticated remote lifecycle](operations/remote-lifecycle.md): exact server/CLI workflow,
+   authorization, failures, rollback, logs, and executable acceptance evidence.
+5. [Observability](operations/observability.md): signal catalog, correlation, privacy, dashboards,
    alerts, capacity indicators, and OTLP behavior.
-5. [Backup and recovery](operations/backup-and-recovery.md): local procedure, production-state
+6. [Backup and recovery](operations/backup-and-recovery.md): local procedure, production-state
    inventory, restore verification, disaster-recovery acceptance, and current limitations.
-6. [Security model](security/security-model.md): boundaries, threats, deployment controls, secrets,
+7. [Security model](security/security-model.md): boundaries, threats, deployment controls, secrets,
    incident response, and residual risk.
-7. [Deployment assets](../deployments/README.md): standalone, Docker, and Kubernetes profile scope.
+8. [Platform operator identity](auth/platform-identity.md): configure and operate management trust.
+9. [Deployment assets](../deployments/README.md): standalone, Docker, and Kubernetes profile scope.
 
 ## Maintainer and AI-assistant path
 

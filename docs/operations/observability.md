@@ -3,6 +3,13 @@
 Runku keeps diagnostic logs separate from security audit events and durable usage accounting.
 Best-effort telemetry must never become authoritative billing or scheduling state.
 
+Platform Identity writes operator/invitation/session security audit events in the same PostgreSQL
+transaction as each successful state change. Its repository also maintains process-local aggregate
+counters for bootstrap, invitation, authentication, refresh, revocation, and retryable failures.
+The current source Management API does not yet expose those counters as a metrics endpoint or offer
+an audit query endpoint; operators must not treat ordinary logs as a substitute for the durable
+audit table.
+
 ## Correlation
 
 Requests and nested cross-runtime calls carry request, invocation, Project, Environment, Release or
@@ -33,6 +40,14 @@ Use `runku logs --limit 100`, continue with exclusive `--after logc_N`, and corr
 the last confirmed cursor. Function logs are bounded best-effort and never control Mutation success;
 persistence failures/drops are separate signals.
 
+For an attached server Product Environment, add `--remote`. Snapshot reads require `logs:read` and
+follow requires `logs:follow` at the exact Project/Environment. `--follow` is one NDJSON streaming
+HTTP response, not repeated client requests; the server reauthenticates the session during the
+stream and terminates it after revocation or grant removal. Product Operational Logs remain in the
+Product log repository. Platform Identity PostgreSQL contains operator/session/grant/audit state,
+not the Product log payload stream. Use OTLP to copy Product records to a centralized backend and
+apply independent retention there.
+
 ## Required signal catalog
 
 | Domain | Minimum signals |
@@ -44,6 +59,7 @@ persistence failures/drops are separate signals.
 | Full Node | queue age, slots, startup, cancellation, replacement, CPU/RSS/disk/cache |
 | Dependencies | PostgreSQL/S3/queue/registry/KMS/OTLP availability and latency |
 | Management | authenticated operation, revision propagation, failure, audit outcome |
+| Platform Identity | bootstrap state, invitation consume/replay, login/refresh, session revocation, OIDC/JWKS health |
 
 Never emit arguments/results, document contents, JWTs, keys, DSNs, secret headers, source, or
 artifacts. User-controlled values are not metric labels; cardinality budgets apply to Project,

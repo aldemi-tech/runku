@@ -20,9 +20,9 @@ pub use environment::{
 pub use function::{FunctionName, ParseFunctionNameError};
 pub use id::{
     ApplicationClientId, BuildId, CredentialId, DevRevisionId, DevelopmentCredentialId, DocumentId,
-    EnvironmentId, FunctionId, IndexId, InvocationId, OperationId, OperationalEventId,
-    OutboxEventId, ParseResourceIdError, ProjectId, ReleaseId, RequestId, ScheduledInvocationId,
-    SubscriptionId, TableId, WorkerId, WorkspaceId,
+    EnvironmentId, FunctionId, IndexId, InvocationId, OperationId, OperationalEventId, OperatorId,
+    OperatorInvitationId, OperatorSessionId, OutboxEventId, ParseResourceIdError, ProjectId,
+    ReleaseId, RequestId, ScheduledInvocationId, SubscriptionId, TableId, WorkerId, WorkspaceId,
 };
 pub use scope::EnvironmentScope;
 pub use target::{

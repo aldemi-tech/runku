@@ -13,12 +13,26 @@ Runku assumes application code, client input, artifacts, and network peers may b
 - Artifact size and digest are verified on every trust-boundary read.
 - Transactions publish outbox and scheduling state atomically with data changes.
 - Public and development credentials cannot exchange roles.
+- Platform operator access uses separate invitation/access/refresh credentials and scoped grants;
+  application and development keys never authenticate the Management API.
 
 ## Secrets
 
 Service and development keys are one-time reveal credentials. Logs, build output, generated types,
 browser bundles, traces, and error envelopes must redact them. An IdP private key and any secret
 configuration remain server-side.
+
+Platform invitation (`rk_inv_v1_*`), access (`rk_at_v1_*`), and refresh (`rk_rt_v1_*`) credentials
+are also bearer secrets. Only domain-separated HMAC digests are persisted. Bootstrap/session
+peppers and the independent OIDC subject pepper belong in the secret provider and coordinated
+backup; loss invalidates credentials or external links, while disclosure requires rotation and
+session/invitation incident response.
+
+Authenticated Product management reloads the operator session and current grants for every
+request. Project/Environment path scope is authorized before the Product adapter is reached.
+Remote log follow rechecks `logs:follow` during the single streaming connection, so session
+revocation or grant removal stops future records. Operator tokens never authorize Product
+invocation, and `rk_pub_*`/`rk_sec_*`/`rk_dev_*` never authorize management operations.
 
 ## Residual risk
 
@@ -34,6 +48,10 @@ VM-grade microVM boundary. See [SECURITY.md](../../SECURITY.md) to report vulner
 - SSRF, DNS rebinding, redirects/private ranges, and oversized HTTPS responses;
 - artifact/build dependency tampering and mutable image references;
 - JWT issuer/audience/algorithm/key confusion or stale JWKS;
+- operator bootstrap theft/replay, invitation privilege escalation, cross-scope grants, session
+  replay, external-subject collision, login CSRF/mix-up, callback injection, false browser
+  confirmation, authentication/Management endpoint substitution, or application/operator
+  credential confusion;
 - Realtime authorization drift or pre-commit disclosure;
 - OCC/idempotency/replay errors and repeated external effects;
 - sandbox escape, resource exhaustion, host/Agent secret exposure;
@@ -50,12 +68,33 @@ separate application/management/Agent identities. Gateway never receives KVM/hos
 Security-sensitive codec and cryptography dependencies are pinned and reviewed with their feature
 sets. An update must preserve canonical protocol bytes and must not silently enable optional unsafe
 acceleration. Identity, protocol-vector, Realtime, and affected adapter tests are required when a
-dependency crosses those boundaries. Test key generation uses the operating-system RNG interface
-from the same cryptographic dependency line instead of introducing an unrelated RNG version.
+dependency crosses those boundaries. Runtime randomness continues to come from the
+operating-system RNG; deterministic signing material exists only in the public unit-test fixture
+described below and is never part of deployment trust.
+
+Run `make security-audit` with a current RustSec database as an explicit networked gate. It remains
+separate from the fast compile/package gate. JWT verification uses `jsonwebtoken`'s `aws_lc_rs`
+backend; Runku does not retain an unfixed RustCrypto `rsa` implementation merely to generate test
+signatures. RSA signing tests use a repository-public, test-only fixture with no deployment trust.
+Unmaintained transitive warnings from the pinned Deno/V8/SWC graph must be tracked during upstream
+updates even when RustSec reports no exploitable advisory.
 
 One-time secret material belongs in a secret manager. Rotate with overlap, verify replacement, then
 revoke. Never place secrets in CLI arguments, ConfigMaps, image layers, source, generated types,
 public env prefixes, logs, traces, errors, or unencrypted backups.
+
+The native login client uses exact canonical origins, HTTPS except literal loopback, no proxy, no
+redirects, PKCE S256, fresh state, a loopback-only listener, exact callback Host/path/method,
+single-valued `state`/`code`/`iss`/`error`, a fixed validated token endpoint, bounded bodies and
+timeouts, and shell-free browser launching. External tokens are then verified server-side against
+the configured asymmetric algorithm, signature, exact issuer/audience/discriminator, expiry, JWKS
+origin policy, and subject namespace. A successful provider callback alone is never presented as a
+successful Runku login.
+
+Initial-owner recovery is deliberately local and pre-enrollment only. It requires administrative
+access to PostgreSQL, the installation pepper, configuration, and protected state directory;
+atomically revokes prior pending material and writes a security-audit event. It is never available
+through the network Management API and cannot reopen bootstrap after any operator exists.
 
 ## Incident response and residual risk
 

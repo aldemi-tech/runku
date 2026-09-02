@@ -1,0 +1,35 @@
+name: runku-platform-identity-evidence
+
+services:
+  platform-postgres:
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      POSTGRES_DB: runku_platform
+      POSTGRES_USER: runku_platform
+      POSTGRES_PASSWORD: runku_platform_test
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runku_platform -d runku_platform"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  platform-keycloak:
+    # Disposable OIDC interoperability fixture, not a required or recommended production IdP.
+    image: quay.io/keycloak/keycloak:26.7.3@sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54
+    command:
+      - start-dev
+      - --import-realm
+      - --hostname=https://identity.runku.test
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: runku-test-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: runku-test-admin-password
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./deployments/docker/platform-identity-keycloak:/opt/keycloak/data/import:ro
+    security_opt:
+      - no-new-privileges:true

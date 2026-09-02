@@ -1,9 +1,10 @@
 # Publishing a Runku distribution
 
-One repository tag coordinates the public CLI and TypeScript SDK release. The release workflow
-builds six native executables, packages the same bytes for GitHub and npm, publishes nine npm
-packages, generates checksums and provenance, and creates the GitHub Release only after npm is
-complete.
+One repository tag coordinates the public CLI, TypeScript SDKs, and compact Linux server release.
+The release workflow builds six native CLI executables and two native server executables, packages
+the same CLI bytes for GitHub and npm, publishes nine npm packages, publishes one multi-platform
+server image, generates checksums/SBOM/provenance, and creates the GitHub Release only after npm and
+the image are complete.
 
 This procedure publishes irreversible external state. Run it only from a reviewed, clean commit on
 `main`; never from an uncommitted working tree or a fork.
@@ -17,6 +18,9 @@ Version `X.Y.Z` produces:
 - `@runku/cli@X.Y.Z`;
 - six exact-version `@runku/cli-*` native packages;
 - four `.tar.gz` archives for macOS/Linux and two `.zip` archives for Windows;
+- two `runku-server` `.tar.gz` archives for Linux GNU ARM64/x86_64;
+- `ghcr.io/aldemi-tech/runku-server:X.Y.Z` as a non-root ARM64/x86_64 image, plus an immutable
+  `sha-COMMIT` tag and architecture assembly tags;
 - `SHA256SUMS`, GitHub artifact attestations, npm integrity, and npm provenance.
 
 The native target list lives in `scripts/release-platforms.mjs`. The npm launcher mapping, package
@@ -104,12 +108,19 @@ git push origin vX.Y.Z
 3. Six `cli-binaries` jobs run concurrently on native ARM64/x86_64 macOS, Linux, and Windows
    runners. Each builds only `runku-cli --release --locked`, then checks `--version`, `--help`,
    package content, and archive creation.
-4. `publish-npm` verifies the complete nine-package set, publishes native packages first and the
+4. Two `server-binaries` jobs build and smoke-check `runku-server` natively on Linux GNU ARM64 and
+   x86_64 and produce downloadable archives plus exact image inputs.
+5. `server-image` combines those server bytes with the matching native CLI bytes into a digest-
+   pinned distroless image, publishes both architectures, and creates the version/commit manifests
+   with BuildKit SBOM and provenance attestations.
+6. `publish-npm` verifies the complete nine-package set, publishes native packages first and the
    launcher last, and compares registry integrity with the local tarballs.
-5. `github-release` generates checksums, attests assets, and publishes the release after npm passes.
+7. `github-release` generates checksums, attests assets, and publishes the release after npm and
+   the server image pass.
 
-The release workflow intentionally does not run `make check`, examples, Docker, databases, a local
-server, HTTP/WebSocket flows, benchmarks, Clippy, rustdoc, or the Rust test suite. The hosted
+The release workflow intentionally does not run `make check`, examples, databases, a server
+lifecycle, HTTP/WebSocket flows, benchmarks, Clippy, rustdoc, or the Rust test suite. Its Docker
+work only assembles already native-validated server/CLI bytes into the OCI image. The hosted
 `make ci-check` gate proves compile and package coherence; maintainers run the focused behavioral
 gates required by the changed contract before merge. Repeating those gates after tagging increases
 release latency without changing the source. The release gate proves native compilation, launch,
@@ -128,6 +139,7 @@ npm view @runku/cli@X.Y.Z version dist.integrity
 npm view @runku/client@X.Y.Z version dist.integrity
 npm view @runku/server@X.Y.Z version dist.integrity
 gh release view vX.Y.Z --repo aldemi-tech/runku
+docker buildx imagetools inspect ghcr.io/aldemi-tech/runku-server:X.Y.Z
 ```
 
 Also verify one clean npm install and one direct archive on each supported operating-system family:
@@ -139,6 +151,8 @@ runku --version
 
 For direct assets, download `SHA256SUMS`, verify the exact filename, extract, and run `--version`.
 Confirm npm displays provenance and GitHub displays the release/asset attestation.
+Pull the server image by its reported digest on both Linux architecture families, run
+`runku-server version`, and execute the documented compact-profile smoke campaign before promotion.
 
 ## Failure and safe retry
 

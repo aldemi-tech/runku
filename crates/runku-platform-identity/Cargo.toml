@@ -1,0 +1,32 @@
+[package]
+name = "runku-platform-identity"
+version = "0.1.0"
+description = "Self-hosted operator bootstrap, invitations, sessions, and authorization for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+runku-core = { path = "../runku-core" }
+runku-value = { path = "../runku-value" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = ["any", "postgres", "sqlite", "runtime-tokio"] }
+subtle = "=2.6.1"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

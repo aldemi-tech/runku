@@ -163,6 +163,21 @@ resource_id!(
     "dvk_"
 );
 resource_id!(
+    /// Identifies one human operator of a Runku installation.
+    OperatorId,
+    "opr_"
+);
+resource_id!(
+    /// Identifies one independently revocable operator device session.
+    OperatorSessionId,
+    "ops_"
+);
+resource_id!(
+    /// Identifies one single-use platform access invitation.
+    OperatorInvitationId,
+    "opi_"
+);
+resource_id!(
     /// Identifies one request across component boundaries.
     RequestId,
     "req_"

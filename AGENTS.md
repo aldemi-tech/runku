@@ -46,10 +46,11 @@ Do not claim to have read a file unless you read it completely in the current ta
 
 ## Current release boundary
 
-The source line is pre-release. The local CLI is composed and usable. The repository includes
-distributed adapters and conformance harnesses, but it does not yet publish general-purpose
-`runku-server` or `runku-agent` binaries, official server images, a production Compose profile, or
-a supported Helm chart.
+The source line is pre-release. Tagged releases publish the cross-platform CLI, TypeScript SDKs,
+and a compact Linux `runku-server` binary/non-root image that composes Platform Identity with one
+initialized Safe V8 Product Environment. The repository includes distributed adapters and
+conformance harnesses, but it does not yet publish separated general-purpose roles, a
+`runku-agent` binary, a production Compose profile, or a supported Helm chart.
 
 Never invent installation commands, image names, environment variables, Admin APIs, backup
 commands, or stability guarantees. When a required production capability is absent:

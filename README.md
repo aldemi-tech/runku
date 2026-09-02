@@ -20,8 +20,10 @@ Runku is currently pre-release.
 | Safe V8, local Full Node, HTTP, WebSocket, scheduling, identity, logs | Implemented and test-covered |
 | PostgreSQL, S3-compatible artifacts, NATS execution queue | Implemented as adapters with conformance gates |
 | Remote Workspace protocols and services | Implemented as libraries and integration gates |
-| General-purpose `runku-server` and `runku-agent` distribution | Not published yet |
-| Official production images, Compose profile, or Kubernetes package | Not published yet |
+| Platform operator bootstrap, sessions, scoped invitations, browser OIDC, and remote lifecycle/logs | Implemented in source with a full PostgreSQL + browser + Product lifecycle campaign |
+| Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
+| General-purpose distributed roles and `runku-agent` package | Not published yet |
+| Distributed production Compose or Kubernetes package | Not published yet |
 | Certified backup/restore, rolling upgrade, and multi-node support window | Not published yet |
 
 You can use the source checkout for local development and technical evaluation. Do not represent
@@ -39,6 +41,8 @@ deployment.
 | Learn schema and Functions | [`@runku/server`](packages/server/README.md) |
 | Call Runku from an application | [`@runku/client`](packages/client/README.md) |
 | Add authentication | [Application identity](docs/auth/application-identity.md) |
+| Bootstrap operator access | [Platform operator identity](docs/auth/platform-identity.md) |
+| Operate a Product through `runku login` | [Authenticated remote lifecycle](docs/operations/remote-lifecycle.md) |
 | Use Realtime and transactional data | [Data and Realtime](docs/data/data-and-realtime.md) |
 | Publish, promote, or roll back code | [Releases and Workspaces](docs/development/releases-and-workspaces.md) |
 | Evaluate self-hosting | [Self-hosting overview](docs/self-hosting/overview.md) |

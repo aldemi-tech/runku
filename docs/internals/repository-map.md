@@ -57,6 +57,8 @@ Gateway tests are the preferred vertical evidence that multiple layers compose c
 | `runku-identity` | Application/functional identity policy, keys, guest/JWT validation |
 | `runku-identity-provider` | OIDC/JWKS provider integration and bounded cache behavior |
 | `runku-identity-repository` | Durable clients/keyrings and adapter conformance |
+| `runku-platform-identity` | Operator bootstrap, scoped grants, invitations, sessions, PostgreSQL schema/audit |
+| `runku-management-service` | Versioned authenticated Management HTTP boundary and OIDC adapter |
 | `runku-observability` | Operational event schema, storage, query, retention |
 | `runku-otel` | OTLP mapping, batching, retry, durable checkpoint |
 
@@ -69,6 +71,7 @@ authoritative application state.
 |---|---|
 | `runku-local` | Local layout, stores, publish/lifecycle, daemon composition, doctor/logs/keys |
 | `runku-cli` | Strict parser, stable help/errors/exits, command orchestration |
+| `runku-server` | Source composition for Platform Identity plus one optional authenticated Product Environment; not yet the distributed package |
 | `packages/server` | Declarative TypeScript SDK consumed statically by the builder |
 | `packages/client` | Public HTTP/Realtime client and generated-registry typed view |
 | `protocol/` | Compatibility fixtures; existing vectors are immutable contracts |

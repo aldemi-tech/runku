@@ -263,16 +263,19 @@ impl JwtVerifierSnapshot {
         }
         let mut keys = BTreeMap::new();
         for jwk in jwks.keys {
+            if jwk_disposition(
+                jwk.common.public_key_use.as_ref(),
+                jwk.common.key_operations.as_deref(),
+            )? == JwkDisposition::IgnoreEncryption
+            {
+                continue;
+            }
             let kid = jwk
                 .common
                 .key_id
                 .as_deref()
                 .ok_or(IdentityError::InvalidInput)?;
             validate_kid(kid)?;
-            validate_jwk_usage(
-                jwk.common.public_key_use.as_ref(),
-                jwk.common.key_operations.as_deref(),
-            )?;
             let key_algorithm = jwk
                 .common
                 .key_algorithm
@@ -301,6 +304,9 @@ impl JwtVerifierSnapshot {
             {
                 return Err(IdentityError::InvalidInput);
             }
+        }
+        if keys.is_empty() {
+            return Err(IdentityError::InvalidInput);
         }
         Ok(Self {
             config,
@@ -630,12 +636,21 @@ fn validate_kid(value: &str) -> Result<(), IdentityError> {
     Ok(())
 }
 
-fn validate_jwk_usage(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JwkDisposition {
+    Verification,
+    IgnoreEncryption,
+}
+
+fn jwk_disposition(
     public_use: Option<&PublicKeyUse>,
     operations: Option<&[KeyOperations]>,
-) -> Result<(), IdentityError> {
+) -> Result<JwkDisposition, IdentityError> {
     match (public_use, operations) {
-        (Some(PublicKeyUse::Signature), None) | (None, Some([KeyOperations::Verify])) => Ok(()),
+        (Some(PublicKeyUse::Signature), None) | (None, Some([KeyOperations::Verify])) => {
+            Ok(JwkDisposition::Verification)
+        }
+        (Some(PublicKeyUse::Encryption), None) => Ok(JwkDisposition::IgnoreEncryption),
         _ => Err(IdentityError::InvalidInput),
     }
 }
@@ -769,8 +784,8 @@ fn parse_external_scopes(value: &Value) -> Result<Vec<&str>, IdentityError> {
 mod tests {
     use std::{collections::BTreeMap, error::Error};
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::PublicKeyUse};
-    use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, rand_core::OsRng};
     use serde_json::{Value, json};
 
     use super::*;
@@ -785,9 +800,10 @@ mod tests {
     }
 
     fn signing_fixture() -> Result<SigningFixture, Box<dyn Error>> {
-        let private = RsaPrivateKey::new(&mut OsRng, 2_048)?;
-        let der = private.to_pkcs1_der()?;
-        let encoding = EncodingKey::from_rsa_der(der.as_bytes());
+        let der = STANDARD.decode(
+            include_str!("../../../tests/fixtures/identity/rsa-private.pkcs1.der.b64").trim(),
+        )?;
+        let encoding = EncodingKey::from_rsa_der(&der);
         let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&encoding, Algorithm::RS256)?;
         jwk.common.key_id = Some("primary-2026-08".to_owned());
         jwk.common.public_key_use = Some(PublicKeyUse::Signature);
@@ -1077,6 +1093,20 @@ mod tests {
             )
             .err(),
             Some(IdentityError::InvalidInput)
+        );
+        let mut encryption = key.clone();
+        encryption["kid"] = json!("encryption-key");
+        encryption["use"] = json!("enc");
+        encryption["alg"] = json!("RSA-OAEP");
+        let signature_and_encryption =
+            serde_json::to_vec(&json!({"keys": [key.clone(), encryption]}))?;
+        assert!(
+            JwtVerifierSnapshot::from_jwks_json(
+                valid_config.clone(),
+                &signature_and_encryption,
+                TimestampMicros::new(NOW_MICROS)
+            )
+            .is_ok()
         );
         let mut private = key.clone();
         private["d"] = json!("private-material");

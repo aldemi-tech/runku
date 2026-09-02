@@ -6,13 +6,19 @@ Projects, Environments, code lifecycle, identity, configuration, data, recovery,
 ## Current support boundary
 
 The source tree implements the local CLI/product process, gateway, runtimes, data/release/identity
-repositories, Realtime, scheduling, remote development protocols, PostgreSQL/S3/NATS adapters, and
-Full Node isolation adapters with extensive component/vertical gates.
+repositories, Realtime, scheduling, remote development protocols, PostgreSQL/S3/NATS adapters, Full
+Node isolation adapters, and a PostgreSQL-backed Platform Identity Management API slice with
+first-owner invitation bootstrap, sessions, scoped grants, and optional OIDC.
 
-It does not yet publish general-purpose `runku-server`/`runku-agent` binaries, official server
-images, a production Compose profile, a supported Kubernetes package, complete remote
-administration, or a certified backup/upgrade window. `deployments/` contains contracts and bounded
-conformance assets, not installation packages.
+The compact `runku-server` distribution composes PostgreSQL-backed Platform Identity and can attach
+one initialized Product Environment through `RUNKU_PRODUCT_ROOT`. In that profile, authenticated
+operators use the real Workspace/Release/Channel lifecycle, Product Gateway/runtime/background
+process, historical logs, and one-connection log streaming. Tagged releases publish Linux GNU
+ARM64/x86_64 server archives plus a matching multi-platform, non-root Safe V8 OCI image. The
+project does not yet publish distributed role/Agent binaries, a production Compose profile, a
+supported Kubernetes package, multi-Environment orchestration, or a certified backup/upgrade
+window. See
+[Authenticated remote lifecycle](../operations/remote-lifecycle.md) for the exact compact profile.
 
 ## Product topology
 
@@ -25,12 +31,16 @@ Applications ──HTTP/WS──► Ingress/TLS ─► API/Gateway ────�
                                                     │
                                                     └── outbox/schedules/Cron
 
-Operator/CI ─────────────► Management ─► Projects, Environments, Releases,
-                                        Channels, Workspaces, identity/config/audit
+Operator/CI ─► Authentication ─► Management ─► Projects, Environments, Releases,
+                 login/refresh              Channels, Workspaces, identity/config/audit
 
 Optional Full Node: API/Background ─► execution queue ─► Full Node Agents
                               artifacts/OCI registry ◄──────────┘
 ```
+
+Authentication and Management may share one origin, which is the normal compact installation, or
+use separate canonical HTTPS origins. `runku login` discovers the Management origin from the
+authentication service and stores both without following redirects.
 
 The VMM used by the shared-untrusted Full Node Agent is an implementation detail, not the product
 topology. Safe V8, Gateway, data, Realtime, management, and ordinary workers do not require KVM.
@@ -45,7 +55,9 @@ topology. Safe V8, Gateway, data, Realtime, management, and ordinary workers do 
 | `all` | Single-instance composition with identical semantics | Dedicated profile |
 | `agent` | Full Node queued execution and isolated worker lifecycle | Depends on selected trust profile |
 
-These role names describe the required package; the binaries/configuration are not published yet.
+These role names describe the future distributed package. The compact `runku-server` publishes an
+`all`-style, single-Environment composition; separated role/Agent binaries and configuration are
+not published yet.
 
 ## Storage and dependency profiles
 
@@ -102,6 +114,7 @@ make release-repository-check
 make realtime-check
 make scheduling-check
 make remote-execution-infra-check
+make platform-lifecycle-keycloak-check
 ```
 
 Read each Makefile target before running it; several start Docker dependencies. These gates prove

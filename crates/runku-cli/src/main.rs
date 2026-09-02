@@ -9,12 +9,17 @@ use std::{
     time::SystemTime,
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
 use runku_build::{BuildError, BuildMetadata, build_project, source_fingerprint};
 use runku_cli::{
-    CliCommand, DEFAULT_LOCAL_LISTENER, DEFAULT_LOCAL_WORKSPACE, HELP, TokenEnvironmentName,
-    WORKSPACE_FREEZE_HELP, parse_args,
+    CliCommand, DEFAULT_LOCAL_LISTENER, DEFAULT_LOCAL_WORKSPACE, HELP, LOGIN_HELP, MANAGEMENT_HELP,
+    TokenEnvironmentName, WORKSPACE_FREEZE_HELP, parse_args,
 };
-use runku_core::{ApplicationClientId, CredentialId, OperationId, WorkspaceId, WorkspaceRef};
+use runku_core::{
+    ApplicationClientId, CredentialId, OperationId, OperatorId, OperatorSessionId, WorkspaceId,
+    WorkspaceRef,
+};
 use runku_development::DevelopmentActor;
 use runku_development_access::{DevelopmentCredentialStatus, DevelopmentLifecycleResult};
 use runku_development_client::{
@@ -35,16 +40,21 @@ use runku_local::{
 };
 use runku_observability::{LogQuery, SequencedOperationalEvent};
 use runku_otel::{OtlpExporterMode, OtlpExporterTelemetrySnapshot};
+use runku_platform_identity::{AccessToken, DeviceName, RefreshToken};
 use runku_protocol::{
     DevelopmentCreateWorkspaceRequestV1, DevelopmentFreezeOutcomeV1, DevelopmentFreezeRequestV1,
     DevelopmentPublishRequestV1, DevelopmentStateRequestV1, WireValueV1,
     derive_development_freeze_request_operation_id_v1, derive_development_revision_id_v1,
+    encode_development_publish_request_v1,
 };
 use runku_releases::{
     ARTIFACT_MAX_BYTES, FunctionType, MANIFEST_MAX_BYTES, Sha256Digest, decode_release_manifest,
 };
 use runku_value::TimestampMicros;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use zeroize::{Zeroize, Zeroizing};
 
 const EXIT_INTERNAL: u8 = 1;
 const EXIT_USAGE: u8 = 2;
@@ -55,6 +65,7 @@ const EXIT_CORRUPT: u8 = 6;
 const EXIT_AUTH: u8 = 7;
 const EXIT_POLICY: u8 = 8;
 const EXIT_UNCERTAIN: u8 = 9;
+const DEFAULT_AUTHENTICATION_SERVER: &str = "https://api.runku.app";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -72,7 +83,7 @@ async fn main() -> ExitCode {
             exit: EXIT_USAGE,
         });
         eprintln!();
-        eprintln!("{HELP}{WORKSPACE_FREEZE_HELP}");
+        eprintln!("{HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
         ExitCode::from(EXIT_USAGE)
     }
 }
@@ -362,6 +373,52 @@ fn explain_failure(failure: CliFailure) -> FailureExplanation {
         value if value.starts_with("DEVELOPMENT_") => FailureExplanation {
             message: "The Remote Workspace operation could not be completed safely.",
             hint: "Check endpoint, token environment, remote state, and policy; reconcile uncertain results before retrying.",
+        },
+        "REMOTE_PUBLISH_EXPECTED_HEAD_REQUIRED" => FailureExplanation {
+            message: "Remote publication requires an explicit Workspace HEAD precondition.",
+            hint: "Read and reconcile the remote Workspace, then pass --expected-head empty for its first publication or the exact drv_* revision you observed.",
+        },
+        "PLATFORM_LOGIN_REQUIRED" | "PLATFORM_SESSION_FILE_INVALID" => FailureExplanation {
+            message: "No usable Runku operator session is available for this server operation.",
+            hint: "Run runku login for the intended server and device. Do not substitute an rk_pub, rk_sec, or rk_dev credential.",
+        },
+        "PLATFORM_ACCESS_DENIED" => FailureExplanation {
+            message: "The authenticated operator lacks the required capability at this exact Project and Environment.",
+            hint: "Delegate only the missing capability at the intended scope, or select the correct project root; do not broaden an application key.",
+        },
+        "PLATFORM_OPERATION_CONFLICT" => FailureExplanation {
+            message: "The remote Workspace or Channel changed after the supplied precondition was observed.",
+            hint: "Run remote status, reconcile the current binding, and retry only with a deliberate updated expectation.",
+        },
+        "PLATFORM_LOG_STREAM_REVOKED" => FailureExplanation {
+            message: "The remote log stream stopped because its operator authority is no longer valid.",
+            hint: "Re-authenticate or restore the intended logs:follow grant; the CLI will not reconnect with a revoked session.",
+        },
+        "PLATFORM_LOGIN_SELECTION_REQUIRED" => FailureExplanation {
+            message: "The authentication server offers more than one login method, but this process cannot ask which one to use.",
+            hint: "Choose explicitly with --browser, --code-env RUNKU_NAME, or --oidc-token-env RUNKU_NAME.",
+        },
+        "PLATFORM_LOGIN_SELECTION_INVALID" => FailureExplanation {
+            message: "The selected authentication method is not one of the options advertised by the server.",
+            hint: "Run runku login again and select a displayed number, or use an explicit authentication flag.",
+        },
+        "PLATFORM_AUTH_CONFIGURATION_UNAVAILABLE" | "PLATFORM_AUTH_CONFIGURATION_INVALID" => {
+            FailureExplanation {
+                message: "Runku could not obtain a safe, supported login configuration from the authentication server.",
+                hint: "Verify the exact authentication URL, TLS certificate, /v1/auth/config response, and advertised Management origin; redirects are never followed.",
+            }
+        }
+        "PLATFORM_INVITATION_REQUIRED" => FailureExplanation {
+            message: "This login method requires an invitation, but no protected interactive or environment input is available.",
+            hint: "Use an interactive terminal or set an uppercase RUNKU_* variable and pass its name with --code-env.",
+        },
+        value if value.starts_with("PLATFORM_OIDC_") => FailureExplanation {
+            message: "The interactive OIDC login could not be completed safely.",
+            hint: "Check the configured native client, provider availability, loopback callback policy, and browser result, then retry to generate fresh state and PKCE material.",
+        },
+        value if value.starts_with("PLATFORM_") => FailureExplanation {
+            message: "The authenticated Management API operation could not be completed safely.",
+            hint: "Check the stored operator session, exact project root, server health, and current state before retrying.",
         },
         _ => fallback_explanation(failure.exit),
     }
@@ -705,6 +762,64 @@ struct OtlpTelemetryWire {
     failures: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginRequestWire<'a> {
+    code: &'a str,
+    device_name: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OidcLoginRequestWire<'a> {
+    device_name: &'a str,
+    invitation_code: Option<&'a str>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LoginResponseWire {
+    access_token: String,
+    refresh_token: String,
+    operator_id: String,
+    session_id: String,
+    authorization_revision: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSessionWire<'a> {
+    version: u8,
+    authentication_server: &'a str,
+    server: &'a str,
+    access_token: &'a str,
+    refresh_token: &'a str,
+    operator_id: &'a str,
+    session_id: &'a str,
+    authorization_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredSession {
+    version: u8,
+    #[serde(default)]
+    authentication_server: Option<String>,
+    server: String,
+    access_token: String,
+    refresh_token: String,
+    operator_id: String,
+    session_id: String,
+    authorization_revision: u64,
+}
+
+impl Drop for StoredSession {
+    fn drop(&mut self) {
+        self.access_token.zeroize();
+        self.refresh_token.zeroize();
+    }
+}
+
 impl From<OtlpExporterTelemetrySnapshot> for OtlpTelemetryWire {
     fn from(value: OtlpExporterTelemetrySnapshot) -> Self {
         Self {
@@ -723,12 +838,30 @@ impl From<OtlpExporterTelemetrySnapshot> for OtlpTelemetryWire {
 async fn execute(command: CliCommand) -> Result<(), CliFailure> {
     match command {
         CliCommand::Help => {
-            print!("{HELP}{WORKSPACE_FREEZE_HELP}");
+            print!("{HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
             Ok(())
         }
         CliCommand::Version => {
             println!("runku {}", env!("CARGO_PKG_VERSION"));
             Ok(())
+        }
+        CliCommand::Login {
+            endpoint,
+            device_name,
+            code_environment,
+            oidc_token_environment,
+            browser,
+            no_open,
+        } => {
+            remote_login(
+                endpoint.as_ref(),
+                device_name.as_ref(),
+                code_environment.as_ref(),
+                oidc_token_environment.as_ref(),
+                browser,
+                no_open,
+            )
+            .await
         }
         CliCommand::Init {
             root,
@@ -745,6 +878,7 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             Ok(())
         }
         CliCommand::Publish {
+            remote,
             root,
             manifest,
             artifact,
@@ -752,6 +886,16 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             actor,
             expected_head,
         } => {
+            if remote {
+                return remote_publish(
+                    &root,
+                    &manifest,
+                    &artifact,
+                    workspace.as_ref(),
+                    expected_head,
+                )
+                .await;
+            }
             let state = load_local(&root).await.map_err(map_state)?.0;
             let workspace = workspace.unwrap_or(state.workspace_ref);
             let manifest = read_bounded(&manifest, MANIFEST_MAX_BYTES).await?;
@@ -776,10 +920,14 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             metadata,
         } => execute_build(root, config, metadata).await,
         CliCommand::Release {
+            remote,
             root,
             release_id,
             against,
         } => {
+            if remote {
+                return remote_release(&root, release_id, against.as_ref()).await;
+            }
             let manager = LocalReleaseManager::open(&root)
                 .await
                 .map_err(map_release)?;
@@ -790,11 +938,15 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             emit_release_outcome(&result)
         }
         CliCommand::Promote {
+            remote,
             root,
             channel,
             release_id,
             expected,
         } => {
+            if remote {
+                return remote_promote(&root, &channel, release_id, expected).await;
+            }
             let manager = LocalReleaseManager::open(&root)
                 .await
                 .map_err(map_release)?;
@@ -813,11 +965,15 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             emit_release_outcome(&result)
         }
         CliCommand::Rollback {
+            remote,
             root,
             channel,
             expected,
             target,
         } => {
+            if remote {
+                return remote_rollback(&root, &channel, expected, target).await;
+            }
             let manager = LocalReleaseManager::open(&root)
                 .await
                 .map_err(map_release)?;
@@ -827,7 +983,10 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
                 .map_err(map_release)?;
             emit_release_outcome(&result)
         }
-        CliCommand::Status { root } => {
+        CliCommand::Status { remote, root } => {
+            if remote {
+                return remote_status(&root).await;
+            }
             let manager = LocalReleaseManager::open(&root)
                 .await
                 .map_err(map_release)?;
@@ -849,6 +1008,7 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             Ok(())
         }
         CliCommand::Logs {
+            remote,
             root,
             after,
             limit,
@@ -862,6 +1022,26 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             release_id,
             follow,
         } => {
+            if remote {
+                return remote_logs(
+                    &root,
+                    &LogQuery {
+                        scope: load_local(&root).await.map_err(map_state)?.0.scope(),
+                        after,
+                        limit,
+                        stream,
+                        minimum_level,
+                        function_id,
+                        request_id,
+                        invocation_id,
+                        client_id,
+                        credential_id,
+                        release_id,
+                    },
+                    follow,
+                )
+                .await;
+            }
             let manager = LocalLogManager::open(&root).await.map_err(map_logs)?;
             let scope = manager.scope();
             let result = emit_logs(
@@ -2719,6 +2899,1658 @@ fn map_development_access(error: LocalDevelopmentAccessError) -> CliFailure {
     }
 }
 
+#[allow(clippy::too_many_lines)]
+struct ManagementClient {
+    http: reqwest::Client,
+    endpoint: DevelopmentEndpoint,
+    authentication_endpoint: DevelopmentEndpoint,
+    session: StoredSession,
+}
+
+impl ManagementClient {
+    fn load() -> Result<Self, CliFailure> {
+        let path = session_path()?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| CliFailure {
+            code: "PLATFORM_LOGIN_REQUIRED",
+            exit: EXIT_AUTH,
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 32 * 1024 {
+            return Err(CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            });
+        }
+        let bytes = std::fs::read(&path).map_err(|_| CliFailure {
+            code: "PLATFORM_SESSION_FILE_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+        let session: StoredSession = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+            code: "PLATFORM_SESSION_FILE_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+        let endpoint = session
+            .server
+            .parse::<DevelopmentEndpoint>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            })?;
+        let authentication_server = session
+            .authentication_server
+            .as_deref()
+            .unwrap_or(session.server.as_str());
+        let authentication_endpoint = authentication_server
+            .parse::<DevelopmentEndpoint>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            })?;
+        let access = session
+            .access_token
+            .parse::<AccessToken>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            })?;
+        let refresh = session
+            .refresh_token
+            .parse::<RefreshToken>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            })?;
+        let session_id = session
+            .session_id
+            .parse::<OperatorSessionId>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            })?;
+        session
+            .operator_id
+            .parse::<OperatorId>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            })?;
+        if !matches!(session.version, 1 | 2)
+            || session.version == 1 && session.authentication_server.is_some()
+            || session.version == 2 && session.authentication_server.is_none()
+            || session.authorization_revision == 0
+            || access.id() != session_id
+            || refresh.id() != session_id
+            || endpoint.as_str() != session.server
+        {
+            return Err(CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            });
+        }
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .https_only(!endpoint.as_str().starts_with("http://"))
+            .build()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_CLIENT_INVALID",
+                exit: EXIT_INTERNAL,
+            })?;
+        Ok(Self {
+            http,
+            endpoint,
+            authentication_endpoint,
+            session,
+        })
+    }
+
+    async fn request(
+        &mut self,
+        method: reqwest::Method,
+        url: reqwest::Url,
+        body: Option<Vec<u8>>,
+        content_type: Option<&'static str>,
+    ) -> Result<reqwest::Response, CliFailure> {
+        let mut response = self
+            .send(method.clone(), url.clone(), body.clone(), content_type)
+            .await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            self.refresh().await?;
+            response = self.send(method, url, body, content_type).await?;
+        }
+        if !response.status().is_success() {
+            return Err(map_management_status(response.status()));
+        }
+        Ok(response)
+    }
+
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        url: reqwest::Url,
+        body: Option<Vec<u8>>,
+        content_type: Option<&'static str>,
+    ) -> Result<reqwest::Response, CliFailure> {
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(&self.session.access_token);
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        if let Some(content_type) = content_type {
+            request = request.header(reqwest::header::CONTENT_TYPE, content_type);
+        }
+        request.send().await.map_err(|_| CliFailure {
+            code: "PLATFORM_REQUEST_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        })
+    }
+
+    async fn refresh(&mut self) -> Result<(), CliFailure> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/auth/refresh",
+                self.authentication_endpoint.as_str()
+            ))
+            .json(&serde_json::json!({"refreshToken": self.session.refresh_token}))
+            .send()
+            .await
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_REFRESH_UNAVAILABLE",
+                exit: EXIT_UNAVAILABLE,
+            })?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(CliFailure {
+                code: "PLATFORM_LOGIN_REQUIRED",
+                exit: EXIT_AUTH,
+            });
+        }
+        let bytes = bounded_response(response, 16 * 1024).await?;
+        let result: LoginResponseWire = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+            code: "PLATFORM_SESSION_REFRESH_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+        let access_token = Zeroizing::new(result.access_token);
+        let refresh_token = Zeroizing::new(result.refresh_token);
+        let access = access_token
+            .parse::<AccessToken>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_REFRESH_INVALID",
+                exit: EXIT_CORRUPT,
+            })?;
+        let refresh = refresh_token
+            .parse::<RefreshToken>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_REFRESH_INVALID",
+                exit: EXIT_CORRUPT,
+            })?;
+        let parsed_session = result
+            .session_id
+            .parse::<OperatorSessionId>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_REFRESH_INVALID",
+                exit: EXIT_CORRUPT,
+            })?;
+        result
+            .operator_id
+            .parse::<OperatorId>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_REFRESH_INVALID",
+                exit: EXIT_CORRUPT,
+            })?;
+        if result.operator_id != self.session.operator_id
+            || result.session_id != self.session.session_id
+            || access.id() != parsed_session
+            || refresh.id() != parsed_session
+            || result.authorization_revision < self.session.authorization_revision
+        {
+            return Err(CliFailure {
+                code: "PLATFORM_SESSION_REFRESH_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+        self.session.access_token.zeroize();
+        self.session.refresh_token.zeroize();
+        self.session.access_token = access_token.to_string();
+        self.session.refresh_token = refresh_token.to_string();
+        self.session.authorization_revision = result.authorization_revision;
+        self.session.version = 2;
+        self.session.authentication_server = Some(self.authentication_endpoint.to_string());
+        persist_owned_session(&self.session)
+    }
+
+    fn url(&self, path: &str) -> Result<reqwest::Url, CliFailure> {
+        reqwest::Url::parse(&format!("{}{}", self.endpoint.as_str(), path)).map_err(|_| {
+            CliFailure {
+                code: "PLATFORM_REQUEST_INVALID",
+                exit: EXIT_INTERNAL,
+            }
+        })
+    }
+}
+
+#[allow(clippy::option_option)]
+async fn remote_publish(
+    root: &Path,
+    manifest_path: &Path,
+    artifact_path: &Path,
+    workspace: Option<&WorkspaceRef>,
+    expected_head: Option<Option<runku_core::DevRevisionId>>,
+) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    let expected_head = expected_head.ok_or(CliFailure {
+        code: "REMOTE_PUBLISH_EXPECTED_HEAD_REQUIRED",
+        exit: EXIT_USAGE,
+    })?;
+    let manifest_bytes = read_bounded(manifest_path, MANIFEST_MAX_BYTES).await?;
+    let artifact_bytes = read_bounded(artifact_path, ARTIFACT_MAX_BYTES).await?;
+    let manifest = decode_release_manifest(&manifest_bytes).map_err(|_| CliFailure {
+        code: "LOCAL_PACKAGE_FILE_INVALID",
+        exit: EXIT_INVALID,
+    })?;
+    let request = DevelopmentPublishRequestV1 {
+        operation_id: OperationId::generate(),
+        project_id: state.project_id,
+        workspace_ref: workspace
+            .cloned()
+            .unwrap_or_else(|| state.workspace_ref.clone()),
+        expected_head,
+        manifest,
+        manifest_bytes,
+        artifact_bytes,
+    };
+    let body = encode_development_publish_request_v1(&request).map_err(|_| CliFailure {
+        code: "LOCAL_PACKAGE_FILE_INVALID",
+        exit: EXIT_INVALID,
+    })?;
+    let mut client = ManagementClient::load()?;
+    let path = product_path(state.scope(), "/workspace/publish");
+    let url = client.url(&path)?;
+    let response = client
+        .request(
+            reqwest::Method::POST,
+            url,
+            Some(body),
+            Some("application/vnd.runku.management-publish-v1"),
+        )
+        .await?;
+    emit_management_response(response).await
+}
+
+async fn remote_release(
+    root: &Path,
+    release: runku_core::ReleaseId,
+    against: Option<&runku_core::ChannelName>,
+) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    let mut client = ManagementClient::load()?;
+    let path = product_path(state.scope(), &format!("/releases/{release}"));
+    let body = serde_json::to_vec(&serde_json::json!({
+        "against": against.map(ToString::to_string)
+    }))
+    .map_err(|_| CliFailure {
+        code: "PLATFORM_REQUEST_INVALID",
+        exit: EXIT_INTERNAL,
+    })?;
+    let url = client.url(&path)?;
+    let response = client
+        .request(
+            reqwest::Method::POST,
+            url,
+            Some(body),
+            Some("application/json"),
+        )
+        .await?;
+    emit_management_response(response).await
+}
+
+#[allow(clippy::option_option)]
+async fn remote_promote(
+    root: &Path,
+    channel: &runku_core::ChannelName,
+    release: runku_core::ReleaseId,
+    expected: Option<Option<runku_core::ReleaseId>>,
+) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    let mut client = ManagementClient::load()?;
+    let path = product_path(state.scope(), &format!("/channels/{channel}"));
+    let expected =
+        expected.map(|value| value.map_or_else(|| "empty".to_owned(), |id| id.to_string()));
+    let body = serde_json::to_vec(&serde_json::json!({
+        "releaseId": release.to_string(), "expected": expected
+    }))
+    .map_err(|_| CliFailure {
+        code: "PLATFORM_REQUEST_INVALID",
+        exit: EXIT_INTERNAL,
+    })?;
+    let url = client.url(&path)?;
+    let response = client
+        .request(
+            reqwest::Method::PUT,
+            url,
+            Some(body),
+            Some("application/json"),
+        )
+        .await?;
+    emit_management_response(response).await
+}
+
+async fn remote_rollback(
+    root: &Path,
+    channel: &runku_core::ChannelName,
+    expected: runku_core::ReleaseId,
+    target: runku_core::ReleaseId,
+) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    let mut client = ManagementClient::load()?;
+    let path = product_path(state.scope(), &format!("/channels/{channel}/rollback"));
+    let body = serde_json::to_vec(&serde_json::json!({
+        "expected": expected.to_string(), "target": target.to_string()
+    }))
+    .map_err(|_| CliFailure {
+        code: "PLATFORM_REQUEST_INVALID",
+        exit: EXIT_INTERNAL,
+    })?;
+    let url = client.url(&path)?;
+    let response = client
+        .request(
+            reqwest::Method::POST,
+            url,
+            Some(body),
+            Some("application/json"),
+        )
+        .await?;
+    emit_management_response(response).await
+}
+
+async fn remote_status(root: &Path) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    let mut client = ManagementClient::load()?;
+    let url = client.url(&product_path(state.scope(), "/status"))?;
+    let response = client
+        .request(reqwest::Method::GET, url, None, None)
+        .await?;
+    emit_management_response(response).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn remote_logs(root: &Path, query: &LogQuery, follow: bool) -> Result<(), CliFailure> {
+    let state = load_local(root).await.map_err(map_state)?.0;
+    if query.scope != state.scope() {
+        return Err(CliFailure {
+            code: "PLATFORM_REQUEST_INVALID",
+            exit: EXIT_INVALID,
+        });
+    }
+    let mut client = ManagementClient::load()?;
+    let suffix = if follow { "/logs/follow" } else { "/logs" };
+    let mut url = client.url(&product_path(state.scope(), suffix))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("after", &query.after.to_string());
+        pairs.append_pair("limit", &query.limit.to_string());
+        if let Some(value) = query.stream {
+            pairs.append_pair("stream", value.as_str());
+        }
+        if let Some(value) = query.minimum_level {
+            pairs.append_pair("level", value.as_str());
+        }
+        if let Some(value) = query.function_id {
+            pairs.append_pair("functionId", &value.to_string());
+        }
+        if let Some(value) = query.request_id {
+            pairs.append_pair("requestId", &value.to_string());
+        }
+        if let Some(value) = query.invocation_id {
+            pairs.append_pair("invocationId", &value.to_string());
+        }
+        if let Some(value) = query.client_id {
+            pairs.append_pair("clientId", &value.to_string());
+        }
+        if let Some(value) = query.credential_id {
+            pairs.append_pair("credentialId", &value.to_string());
+        }
+        if let Some(value) = query.release_id {
+            pairs.append_pair("releaseId", &value.to_string());
+        }
+    }
+    let mut response = client
+        .request(reqwest::Method::GET, url, None, None)
+        .await?;
+    if !follow {
+        let bytes = bounded_response(response, 2 * 1024 * 1024).await?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+            code: "PLATFORM_RESPONSE_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+        let records = value
+            .get("records")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(CliFailure {
+                code: "PLATFORM_RESPONSE_INVALID",
+                exit: EXIT_CORRUPT,
+            })?;
+        for record in records {
+            emit_json(record)?;
+        }
+        return Ok(());
+    }
+    let mut pending = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| CliFailure {
+        code: "PLATFORM_LOG_STREAM_UNAVAILABLE",
+        exit: EXIT_UNAVAILABLE,
+    })? {
+        if pending.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+            return Err(CliFailure {
+                code: "PLATFORM_RESPONSE_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+        pending.extend_from_slice(&chunk);
+        while let Some(index) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = pending.drain(..=index).collect::<Vec<_>>();
+            if line.len() <= 1 {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_slice(&line[..line.len() - 1])
+                .map_err(|_| CliFailure {
+                    code: "PLATFORM_RESPONSE_INVALID",
+                    exit: EXIT_CORRUPT,
+                })?;
+            if let Some(code) = value
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str)
+            {
+                return Err(if code == "PLATFORM_UNAUTHENTICATED" {
+                    CliFailure {
+                        code: "PLATFORM_LOG_STREAM_REVOKED",
+                        exit: EXIT_AUTH,
+                    }
+                } else {
+                    CliFailure {
+                        code: "PLATFORM_LOG_STREAM_UNAVAILABLE",
+                        exit: EXIT_UNAVAILABLE,
+                    }
+                });
+            }
+            emit_json(&value)?;
+        }
+    }
+    Ok(())
+}
+
+fn product_path(scope: runku_core::EnvironmentScope, suffix: &str) -> String {
+    format!(
+        "/v1/projects/{}/environments/{}{}",
+        scope.project_id(),
+        scope.environment_id(),
+        suffix
+    )
+}
+
+async fn emit_management_response(response: reqwest::Response) -> Result<(), CliFailure> {
+    let bytes = bounded_response(response, 2 * 1024 * 1024).await?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+        code: "PLATFORM_RESPONSE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    emit_json(&value)
+}
+
+async fn bounded_response(
+    mut response: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>, CliFailure> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| CliFailure {
+        code: "PLATFORM_RESPONSE_INVALID",
+        exit: EXIT_UNAVAILABLE,
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > maximum {
+            return Err(CliFailure {
+                code: "PLATFORM_RESPONSE_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn persist_owned_session(session: &StoredSession) -> Result<(), CliFailure> {
+    let path = session_path()?;
+    let stored = StoredSessionWire {
+        version: 2,
+        authentication_server: session
+            .authentication_server
+            .as_deref()
+            .unwrap_or(session.server.as_str()),
+        server: &session.server,
+        access_token: &session.access_token,
+        refresh_token: &session.refresh_token,
+        operator_id: &session.operator_id,
+        session_id: &session.session_id,
+        authorization_revision: session.authorization_revision,
+    };
+    let encoded = serde_json::to_vec(&stored).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_WRITE_FAILED",
+        exit: EXIT_INTERNAL,
+    })?;
+    write_session_file(&path, &encoded)
+}
+
+fn map_management_status(status: reqwest::StatusCode) -> CliFailure {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => CliFailure {
+            code: "PLATFORM_LOGIN_REQUIRED",
+            exit: EXIT_AUTH,
+        },
+        reqwest::StatusCode::FORBIDDEN => CliFailure {
+            code: "PLATFORM_ACCESS_DENIED",
+            exit: EXIT_POLICY,
+        },
+        reqwest::StatusCode::CONFLICT => CliFailure {
+            code: "PLATFORM_OPERATION_CONFLICT",
+            exit: EXIT_CONFLICT,
+        },
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND => CliFailure {
+            code: "PLATFORM_REQUEST_INVALID",
+            exit: EXIT_INVALID,
+        },
+        _ if status.is_server_error() => CliFailure {
+            code: "PLATFORM_REQUEST_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        },
+        _ => CliFailure {
+            code: "PLATFORM_RESPONSE_INVALID",
+            exit: EXIT_CORRUPT,
+        },
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OidcClientConfigurationWire {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    client_id: String,
+    scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthenticationConfigurationWire {
+    version: u8,
+    methods: Vec<String>,
+    management_endpoint: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InteractiveLoginMethod {
+    Browser,
+    Invitation,
+    OidcToken,
+}
+
+struct BrowserAuthorization {
+    token: Zeroizing<String>,
+    callback: tokio::net::TcpStream,
+}
+
+#[derive(Deserialize)]
+struct OidcTokenResponseWire {
+    access_token: String,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn browser_oidc_token(
+    client: &reqwest::Client,
+    endpoint: &DevelopmentEndpoint,
+    no_open: bool,
+) -> Result<BrowserAuthorization, CliFailure> {
+    let response = client
+        .get(format!("{}/v1/auth/oidc/config", endpoint.as_str()))
+        .send()
+        .await
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CONFIGURATION_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        })?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_NOT_CONFIGURED",
+            exit: EXIT_AUTH,
+        });
+    }
+    let bytes = bounded_response(response, 16 * 1024).await?;
+    let config: OidcClientConfigurationWire =
+        serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    validate_oidc_client_configuration(&config)?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        })?;
+    let callback = format!(
+        "http://127.0.0.1:{}/callback",
+        listener
+            .local_addr()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_OIDC_CALLBACK_UNAVAILABLE",
+                exit: EXIT_UNAVAILABLE,
+            })?
+            .port()
+    );
+    let state = random_url_secret()?;
+    let verifier = Zeroizing::new(random_url_secret()?);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let mut authorization =
+        reqwest::Url::parse(&config.authorization_endpoint).map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    authorization
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &config.client_id)
+        .append_pair("redirect_uri", &callback)
+        .append_pair("scope", &config.scopes.join(" "))
+        .append_pair("state", &state)
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256");
+    eprintln!("authorization URL: {authorization}");
+    if !no_open {
+        open_system_browser(authorization.as_str()).await?;
+    }
+
+    let (mut socket, peer) =
+        tokio::time::timeout(std::time::Duration::from_secs(300), listener.accept())
+            .await
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_OIDC_CALLBACK_TIMEOUT",
+                exit: EXIT_AUTH,
+            })?
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_OIDC_CALLBACK_UNAVAILABLE",
+                exit: EXIT_UNAVAILABLE,
+            })?;
+    if !peer.ip().is_loopback() {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        });
+    }
+    let mut request = Vec::new();
+    loop {
+        let mut chunk = [0_u8; 1024];
+        let count = socket.read(&mut chunk).await.map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+        if count == 0 || request.len().saturating_add(count) > 16 * 1024 {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_CALLBACK_INVALID",
+                exit: EXIT_AUTH,
+            });
+        }
+        request.extend_from_slice(&chunk[..count]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let expected_host = callback
+        .strip_prefix("http://")
+        .and_then(|value| value.strip_suffix("/callback"))
+        .ok_or(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+    let code = match parse_oidc_callback_request(&request, expected_host, &state, &config.issuer) {
+        Ok(code) => code,
+        Err(error) => {
+            let _ = write_browser_result(&mut socket, false).await;
+            return Err(error);
+        }
+    };
+    let Ok(response) = client
+        .post(&config.token_endpoint)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", callback.as_str()),
+            ("client_id", config.client_id.as_str()),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .await
+    else {
+        let _ = write_browser_result(&mut socket, false).await;
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_TOKEN_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        });
+    };
+    if response.status() != reqwest::StatusCode::OK {
+        let _ = write_browser_result(&mut socket, false).await;
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_TOKEN_REJECTED",
+            exit: EXIT_AUTH,
+        });
+    }
+    let bytes = match bounded_response(response, 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = write_browser_result(&mut socket, false).await;
+            return Err(error);
+        }
+    };
+    let Ok(token) = serde_json::from_slice::<OidcTokenResponseWire>(&bytes) else {
+        let _ = write_browser_result(&mut socket, false).await;
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_TOKEN_INVALID",
+            exit: EXIT_AUTH,
+        });
+    };
+    if token.access_token.is_empty() || token.access_token.len() > 16 * 1024 {
+        let _ = write_browser_result(&mut socket, false).await;
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_TOKEN_INVALID",
+            exit: EXIT_AUTH,
+        });
+    }
+    Ok(BrowserAuthorization {
+        token: Zeroizing::new(token.access_token),
+        callback: socket,
+    })
+}
+
+fn parse_oidc_callback_request(
+    request: &[u8],
+    expected_host: &str,
+    expected_state: &str,
+    expected_issuer: &str,
+) -> Result<String, CliFailure> {
+    let end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .filter(|end| *end == request.len())
+        .ok_or(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+    let request = std::str::from_utf8(&request[..end]).map_err(|_| CliFailure {
+        code: "PLATFORM_OIDC_CALLBACK_INVALID",
+        exit: EXIT_AUTH,
+    })?;
+    let mut lines = request.split("\r\n");
+    let target = lines
+        .next()
+        .and_then(|line| line.strip_prefix("GET "))
+        .and_then(|line| line.strip_suffix(" HTTP/1.1"))
+        .ok_or(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+    let mut host = None;
+    for line in lines.take_while(|line| !line.is_empty()) {
+        let (name, value) = line.split_once(':').ok_or(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+        if name.eq_ignore_ascii_case("host") && host.replace(value.trim()).is_some() {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_CALLBACK_INVALID",
+                exit: EXIT_AUTH,
+            });
+        }
+    }
+    if host != Some(expected_host) {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        });
+    }
+    let callback_url =
+        reqwest::Url::parse(&format!("http://{expected_host}{target}")).map_err(|_| {
+            CliFailure {
+                code: "PLATFORM_OIDC_CALLBACK_INVALID",
+                exit: EXIT_AUTH,
+            }
+        })?;
+    if callback_url.path() != "/callback" || callback_url.fragment().is_some() {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        });
+    }
+    let mut received_state = None;
+    let mut code = None;
+    let mut issuer = None;
+    let mut provider_error = None;
+    for (key, value) in callback_url.query_pairs() {
+        let slot = match key.as_ref() {
+            "state" => &mut received_state,
+            "code" => &mut code,
+            "iss" => &mut issuer,
+            "error" => &mut provider_error,
+            _ => continue,
+        };
+        if slot.replace(value.into_owned()).is_some() {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_CALLBACK_INVALID",
+                exit: EXIT_AUTH,
+            });
+        }
+    }
+    if received_state.as_deref() != Some(expected_state)
+        || provider_error.is_some()
+        || code.is_none()
+        || issuer
+            .as_deref()
+            .is_some_and(|value| value != expected_issuer)
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_REJECTED",
+            exit: EXIT_AUTH,
+        });
+    }
+    let code = code.unwrap_or_default();
+    if code.is_empty()
+        || code.len() > 4_096
+        || code.trim() != code
+        || code.chars().any(char::is_control)
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_INVALID",
+            exit: EXIT_AUTH,
+        });
+    }
+    Ok(code)
+}
+
+async fn write_browser_result(
+    socket: &mut tokio::net::TcpStream,
+    success: bool,
+) -> Result<(), CliFailure> {
+    let (status, title, message) = if success {
+        (
+            "200 OK",
+            "Runku login complete",
+            "Runku login complete. Runku verified the identity and created the session. You may close this window.",
+        )
+    } else {
+        (
+            "400 Bad Request",
+            "Runku login rejected",
+            "Runku did not create a session. Return to the terminal for a safe error message.",
+        )
+    };
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><meta name=referrer content=no-referrer><title>{title}</title><p>{message}</p>"
+    );
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, max-age=0\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CALLBACK_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        })
+}
+
+fn validate_oidc_client_configuration(
+    config: &OidcClientConfigurationWire,
+) -> Result<(), CliFailure> {
+    if config.client_id.is_empty()
+        || config.client_id.len() > 256
+        || config.scopes.is_empty()
+        || config.scopes.len() > 16
+        || !config.scopes.iter().any(|scope| scope == "openid")
+        || config.scopes.iter().any(|scope| {
+            scope.is_empty()
+                || scope.len() > 128
+                || scope.chars().any(char::is_whitespace)
+                || scope.chars().any(char::is_control)
+        })
+        || config.scopes.iter().collect::<BTreeSet<_>>().len() != config.scopes.len()
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        });
+    }
+    let issuer = reqwest::Url::parse(&config.issuer).map_err(|_| CliFailure {
+        code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    if issuer.scheme() != "https"
+        || issuer.host_str().is_none()
+        || !issuer.username().is_empty()
+        || issuer.password().is_some()
+        || issuer.query().is_some()
+        || issuer.fragment().is_some()
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        });
+    }
+    for raw in [&config.authorization_endpoint, &config.token_endpoint] {
+        let url = reqwest::Url::parse(raw).map_err(|_| CliFailure {
+            code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+        let loopback = url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if url.username() != ""
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
+        {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_CONFIGURATION_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn random_url_secret() -> Result<String, CliFailure> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| CliFailure {
+        code: "PLATFORM_OIDC_ENTROPY_UNAVAILABLE",
+        exit: EXIT_INTERNAL,
+    })?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+async fn open_system_browser(url: &str) -> Result<(), CliFailure> {
+    let status = if cfg!(target_os = "macos") {
+        tokio::process::Command::new("open").arg(url).status().await
+    } else if cfg!(target_os = "windows") {
+        tokio::process::Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(url)
+            .status()
+            .await
+    } else {
+        tokio::process::Command::new("xdg-open")
+            .arg(url)
+            .status()
+            .await
+    }
+    .map_err(|_| CliFailure {
+        code: "PLATFORM_OIDC_BROWSER_UNAVAILABLE",
+        exit: EXIT_UNAVAILABLE,
+    })?;
+    if !status.success() {
+        return Err(CliFailure {
+            code: "PLATFORM_OIDC_BROWSER_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        });
+    }
+    Ok(())
+}
+
+async fn remote_login(
+    explicit_endpoint: Option<&DevelopmentEndpoint>,
+    explicit_device_name: Option<&DeviceName>,
+    code_environment: Option<&TokenEnvironmentName>,
+    oidc_token_environment: Option<&TokenEnvironmentName>,
+    force_browser: bool,
+    no_open: bool,
+) -> Result<(), CliFailure> {
+    let authentication_endpoint = resolve_authentication_endpoint(explicit_endpoint)?;
+    let device_name = resolve_device_name(explicit_device_name)?;
+    let client = login_http_client(&authentication_endpoint)?;
+    let (configuration, management_endpoint) =
+        discover_authentication(&client, &authentication_endpoint).await?;
+    eprintln!("authentication server: {authentication_endpoint}");
+    eprintln!("management server: {management_endpoint}");
+    eprintln!("device: {device_name}");
+
+    let method = select_login_method(
+        &configuration,
+        code_environment.is_some(),
+        oidc_token_environment.is_some(),
+        force_browser,
+    )?;
+    let mut code = invitation_from_environment(code_environment)?;
+    if method == InteractiveLoginMethod::Invitation && code.is_none() {
+        code = Some(prompt_invitation_code()?);
+    }
+    let explicit_oidc_token = oidc_token_from_environment(oidc_token_environment)?;
+    let mut browser_authorization = if method == InteractiveLoginMethod::Browser {
+        Some(browser_oidc_token(&client, &authentication_endpoint, no_open).await?)
+    } else {
+        None
+    };
+    let oidc_token = browser_authorization
+        .as_ref()
+        .map(|authorization| authorization.token.as_str())
+        .or(explicit_oidc_token.as_deref().map(String::as_str));
+    let result = complete_remote_login(
+        &client,
+        &authentication_endpoint,
+        &management_endpoint,
+        &device_name,
+        code.as_deref().map(String::as_str),
+        oidc_token,
+    )
+    .await;
+    if let Some(authorization) = &mut browser_authorization {
+        let _ = write_browser_result(&mut authorization.callback, result.is_ok()).await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn complete_remote_login(
+    client: &reqwest::Client,
+    authentication_endpoint: &DevelopmentEndpoint,
+    management_endpoint: &DevelopmentEndpoint,
+    device_name: &DeviceName,
+    code: Option<&str>,
+    oidc_token: Option<&str>,
+) -> Result<(), CliFailure> {
+    let mut response = if let Some(oidc_token) = oidc_token {
+        client
+            .post(format!("{}/v1/auth/oidc", authentication_endpoint.as_str()))
+            .bearer_auth(oidc_token)
+            .json(&OidcLoginRequestWire {
+                device_name: device_name.as_str(),
+                invitation_code: code,
+            })
+            .send()
+            .await
+    } else {
+        let code = code.ok_or(CliFailure {
+            code: "PLATFORM_INVITATION_REQUIRED",
+            exit: EXIT_AUTH,
+        })?;
+        client
+            .post(format!(
+                "{}/v1/auth/exchange",
+                authentication_endpoint.as_str()
+            ))
+            .json(&LoginRequestWire {
+                code,
+                device_name: device_name.as_str(),
+            })
+            .send()
+            .await
+    }
+    .map_err(|_| CliFailure {
+        code: "PLATFORM_LOGIN_UNAVAILABLE",
+        exit: EXIT_UNAVAILABLE,
+    })?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(CliFailure {
+            code: if matches!(
+                response.status(),
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) {
+                "PLATFORM_LOGIN_REJECTED"
+            } else {
+                "PLATFORM_LOGIN_UNAVAILABLE"
+            },
+            exit: if response.status().is_server_error() {
+                EXIT_UNAVAILABLE
+            } else {
+                EXIT_AUTH
+            },
+        });
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| CliFailure {
+        code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+        exit: EXIT_UNAVAILABLE,
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > 16 * 1024 {
+            return Err(CliFailure {
+                code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let result: LoginResponseWire = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+        code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    let LoginResponseWire {
+        access_token,
+        refresh_token,
+        operator_id,
+        session_id,
+        authorization_revision,
+    } = result;
+    let access_token = Zeroizing::new(access_token);
+    let refresh_token = Zeroizing::new(refresh_token);
+    let access = access_token
+        .parse::<AccessToken>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    let refresh = refresh_token
+        .parse::<RefreshToken>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    let parsed_operator = operator_id.parse::<OperatorId>().map_err(|_| CliFailure {
+        code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    let parsed_session = session_id
+        .parse::<OperatorSessionId>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    if access.id() != parsed_session
+        || refresh.id() != parsed_session
+        || authorization_revision == 0
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_LOGIN_RESPONSE_INVALID",
+            exit: EXIT_CORRUPT,
+        });
+    }
+    let path = session_path()?;
+    let stored = StoredSessionWire {
+        version: 2,
+        authentication_server: authentication_endpoint.as_str(),
+        server: management_endpoint.as_str(),
+        access_token: &access_token,
+        refresh_token: &refresh_token,
+        operator_id: &operator_id,
+        session_id: &session_id,
+        authorization_revision,
+    };
+    let encoded = serde_json::to_vec(&stored).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_WRITE_FAILED",
+        exit: EXIT_INTERNAL,
+    })?;
+    write_session_file(&path, &encoded)?;
+    println!(
+        "{{\"authenticationServer\":\"{authentication_endpoint}\",\"managementServer\":\"{management_endpoint}\",\"operatorId\":\"{parsed_operator}\",\"sessionId\":\"{parsed_session}\"}}"
+    );
+    Ok(())
+}
+
+fn login_http_client(endpoint: &DevelopmentEndpoint) -> Result<reqwest::Client, CliFailure> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .https_only(!endpoint.as_str().starts_with("http://"))
+        .build()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_LOGIN_CLIENT_INVALID",
+            exit: EXIT_INTERNAL,
+        })
+}
+
+async fn discover_authentication(
+    client: &reqwest::Client,
+    authentication_endpoint: &DevelopmentEndpoint,
+) -> Result<(AuthenticationConfigurationWire, DevelopmentEndpoint), CliFailure> {
+    let response = client
+        .get(format!(
+            "{}/v1/auth/config",
+            authentication_endpoint.as_str()
+        ))
+        .send()
+        .await
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_AUTH_CONFIGURATION_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        })?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(CliFailure {
+            code: "PLATFORM_AUTH_CONFIGURATION_INVALID",
+            exit: if response.status().is_server_error() {
+                EXIT_UNAVAILABLE
+            } else {
+                EXIT_AUTH
+            },
+        });
+    }
+    let bytes = bounded_response(response, 16 * 1024).await?;
+    let configuration: AuthenticationConfigurationWire =
+        serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+            code: "PLATFORM_AUTH_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    let unique = configuration.methods.iter().collect::<BTreeSet<_>>();
+    if configuration.version != 1
+        || configuration.methods.is_empty()
+        || configuration.methods.len() > 4
+        || unique.len() != configuration.methods.len()
+        || configuration.methods.iter().any(|method| {
+            !matches!(
+                method.as_str(),
+                "oidcBrowser" | "invitationCode" | "oidcToken"
+            )
+        })
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_AUTH_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        });
+    }
+    let management_endpoint = configuration
+        .management_endpoint
+        .as_deref()
+        .unwrap_or(authentication_endpoint.as_str())
+        .parse::<DevelopmentEndpoint>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_AUTH_CONFIGURATION_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    Ok((configuration, management_endpoint))
+}
+
+fn select_login_method(
+    configuration: &AuthenticationConfigurationWire,
+    has_invitation_environment: bool,
+    has_oidc_token_environment: bool,
+    force_browser: bool,
+) -> Result<InteractiveLoginMethod, CliFailure> {
+    let browser_available = configuration
+        .methods
+        .iter()
+        .any(|method| method == "oidcBrowser");
+    let invitation_available = configuration
+        .methods
+        .iter()
+        .any(|method| method == "invitationCode");
+    let oidc_token_available = configuration
+        .methods
+        .iter()
+        .any(|method| method == "oidcToken");
+    if has_oidc_token_environment {
+        if !oidc_token_available {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_NOT_CONFIGURED",
+                exit: EXIT_AUTH,
+            });
+        }
+        return Ok(InteractiveLoginMethod::OidcToken);
+    }
+    if force_browser {
+        if !browser_available {
+            return Err(CliFailure {
+                code: "PLATFORM_OIDC_NOT_CONFIGURED",
+                exit: EXIT_AUTH,
+            });
+        }
+        return Ok(InteractiveLoginMethod::Browser);
+    }
+    if has_invitation_environment {
+        if !invitation_available {
+            return Err(CliFailure {
+                code: "PLATFORM_INVITATION_NOT_CONFIGURED",
+                exit: EXIT_AUTH,
+            });
+        }
+        return Ok(InteractiveLoginMethod::Invitation);
+    }
+    match (browser_available, invitation_available) {
+        (true, true) => prompt_login_method(),
+        (true, false) => Ok(InteractiveLoginMethod::Browser),
+        (false, true) => Ok(InteractiveLoginMethod::Invitation),
+        (false, false) => Err(CliFailure {
+            code: "PLATFORM_LOGIN_METHOD_UNAVAILABLE",
+            exit: EXIT_AUTH,
+        }),
+    }
+}
+
+fn prompt_login_method() -> Result<InteractiveLoginMethod, CliFailure> {
+    if !std::io::stdin().is_terminal() {
+        return Err(CliFailure {
+            code: "PLATFORM_LOGIN_SELECTION_REQUIRED",
+            exit: EXIT_AUTH,
+        });
+    }
+    eprintln!("Authentication methods:");
+    eprintln!("  1. Sign in with the configured identity provider (recommended)");
+    eprintln!("  2. Use a Runku invitation code");
+    let answer = prompt_line("Select a method [1]: ")?;
+    match answer.trim() {
+        "" | "1" => Ok(InteractiveLoginMethod::Browser),
+        "2" => Ok(InteractiveLoginMethod::Invitation),
+        _ => Err(CliFailure {
+            code: "PLATFORM_LOGIN_SELECTION_INVALID",
+            exit: EXIT_INVALID,
+        }),
+    }
+}
+
+fn invitation_from_environment(
+    environment: Option<&TokenEnvironmentName>,
+) -> Result<Option<Zeroizing<String>>, CliFailure> {
+    environment
+        .map(|environment| {
+            std::env::var(environment.as_str())
+                .ok()
+                .filter(|value| {
+                    value.starts_with("rk_inv_v1_")
+                        && value.len() <= 256
+                        && value.trim() == value.as_str()
+                        && !value.chars().any(char::is_control)
+                })
+                .map(Zeroizing::new)
+                .ok_or(CliFailure {
+                    code: "PLATFORM_INVITATION_ENV_INVALID",
+                    exit: EXIT_AUTH,
+                })
+        })
+        .transpose()
+}
+
+fn prompt_invitation_code() -> Result<Zeroizing<String>, CliFailure> {
+    if !std::io::stdin().is_terminal() {
+        return Err(CliFailure {
+            code: "PLATFORM_INVITATION_REQUIRED",
+            exit: EXIT_AUTH,
+        });
+    }
+    let code = Zeroizing::new(
+        rpassword::prompt_password("Invitation code: ").map_err(|_| CliFailure {
+            code: "PLATFORM_INVITATION_READ_FAILED",
+            exit: EXIT_UNAVAILABLE,
+        })?,
+    );
+    if !code.starts_with("rk_inv_v1_")
+        || code.len() > 256
+        || code.trim() != code.as_str()
+        || code.chars().any(char::is_control)
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_INVITATION_INVALID",
+            exit: EXIT_AUTH,
+        });
+    }
+    Ok(code)
+}
+
+fn oidc_token_from_environment(
+    environment: Option<&TokenEnvironmentName>,
+) -> Result<Option<Zeroizing<String>>, CliFailure> {
+    environment
+        .map(|environment| {
+            std::env::var(environment.as_str())
+                .ok()
+                .filter(|value| {
+                    !value.is_empty() && value.len() <= 16 * 1024 && value.trim() == value.as_str()
+                })
+                .map(Zeroizing::new)
+                .ok_or(CliFailure {
+                    code: "PLATFORM_OIDC_TOKEN_ENV_INVALID",
+                    exit: EXIT_AUTH,
+                })
+        })
+        .transpose()
+}
+
+fn resolve_device_name(explicit: Option<&DeviceName>) -> Result<DeviceName, CliFailure> {
+    if let Some(device) = explicit {
+        return Ok(device.clone());
+    }
+    for variable in ["COMPUTERNAME", "HOSTNAME"] {
+        if let Ok(value) = std::env::var(variable)
+            && let Ok(device) = value.parse::<DeviceName>()
+        {
+            return Ok(device);
+        }
+    }
+    "runku-cli".parse::<DeviceName>().map_err(|_| CliFailure {
+        code: "PLATFORM_DEVICE_INVALID",
+        exit: EXIT_INTERNAL,
+    })
+}
+
+fn resolve_authentication_endpoint(
+    explicit: Option<&DevelopmentEndpoint>,
+) -> Result<DevelopmentEndpoint, CliFailure> {
+    if let Some(endpoint) = explicit {
+        return Ok(endpoint.clone());
+    }
+    if let Some(saved) = saved_authentication_endpoint()? {
+        if !std::io::stdin().is_terminal() {
+            return Ok(saved);
+        }
+        let answer = prompt_line(&format!(
+            "Connect to the saved authentication server {saved}? [Y/n] "
+        ))?;
+        if matches!(answer.trim(), "" | "y" | "Y" | "yes" | "YES") {
+            return Ok(saved);
+        }
+        let value = prompt_line(&format!(
+            "Authentication server [{DEFAULT_AUTHENTICATION_SERVER}]: "
+        ))?;
+        let selected = if value.trim().is_empty() {
+            DEFAULT_AUTHENTICATION_SERVER
+        } else {
+            value.trim()
+        };
+        return selected
+            .parse::<DevelopmentEndpoint>()
+            .map_err(|_| CliFailure {
+                code: "PLATFORM_AUTH_SERVER_INVALID",
+                exit: EXIT_INVALID,
+            });
+    }
+    DEFAULT_AUTHENTICATION_SERVER
+        .parse::<DevelopmentEndpoint>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_AUTH_SERVER_INVALID",
+            exit: EXIT_INTERNAL,
+        })
+}
+
+fn saved_authentication_endpoint() -> Result<Option<DevelopmentEndpoint>, CliFailure> {
+    let path = session_path()?;
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(CliFailure {
+                code: "PLATFORM_SESSION_FILE_INVALID",
+                exit: EXIT_AUTH,
+            });
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 32 * 1024 {
+        return Err(CliFailure {
+            code: "PLATFORM_SESSION_FILE_INVALID",
+            exit: EXIT_AUTH,
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_FILE_INVALID",
+        exit: EXIT_AUTH,
+    })?;
+    let session: StoredSession = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_FILE_INVALID",
+        exit: EXIT_AUTH,
+    })?;
+    let endpoint = session
+        .authentication_server
+        .as_deref()
+        .unwrap_or(session.server.as_str())
+        .parse::<DevelopmentEndpoint>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_SESSION_FILE_INVALID",
+            exit: EXIT_AUTH,
+        })?;
+    Ok(Some(endpoint))
+}
+
+fn prompt_line(prompt: &str) -> Result<String, CliFailure> {
+    eprint!("{prompt}");
+    std::io::stderr().flush().map_err(|_| CliFailure {
+        code: "PLATFORM_LOGIN_PROMPT_UNAVAILABLE",
+        exit: EXIT_UNAVAILABLE,
+    })?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_LOGIN_PROMPT_UNAVAILABLE",
+            exit: EXIT_UNAVAILABLE,
+        })?;
+    Ok(answer)
+}
+
+fn session_path() -> Result<PathBuf, CliFailure> {
+    if let Ok(directory) = std::env::var("RUNKU_CONFIG_HOME") {
+        let directory = PathBuf::from(directory);
+        if directory.is_absolute() && directory != Path::new("/") {
+            return Ok(directory.join("credentials-v1.json"));
+        }
+        return Err(CliFailure {
+            code: "PLATFORM_SESSION_PATH_INVALID",
+            exit: EXIT_INVALID,
+        });
+    }
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|path| path.join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|path| path.join(".config"))
+            })
+    }
+    .ok_or(CliFailure {
+        code: "PLATFORM_SESSION_PATH_INVALID",
+        exit: EXIT_INVALID,
+    })?;
+    Ok(base.join("runku/credentials-v1.json"))
+}
+
+fn write_session_file(path: &Path, bytes: &[u8]) -> Result<(), CliFailure> {
+    let parent = path.parent().ok_or(CliFailure {
+        code: "PLATFORM_SESSION_PATH_INVALID",
+        exit: EXIT_INVALID,
+    })?;
+    #[cfg(unix)]
+    let parent_existed = parent.exists();
+    std::fs::create_dir_all(parent).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_WRITE_FAILED",
+        exit: EXIT_UNAVAILABLE,
+    })?;
+    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_PATH_INVALID",
+        exit: EXIT_INVALID,
+    })?;
+    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+        return Err(CliFailure {
+            code: "PLATFORM_SESSION_PATH_INVALID",
+            exit: EXIT_INVALID,
+        });
+    }
+    #[cfg(unix)]
+    if !parent_existed {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(|_| {
+            CliFailure {
+                code: "PLATFORM_SESSION_WRITE_FAILED",
+                exit: EXIT_UNAVAILABLE,
+            }
+        })?;
+    }
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
+        return Err(CliFailure {
+            code: "PLATFORM_SESSION_PATH_INVALID",
+            exit: EXIT_INVALID,
+        });
+    }
+    let temporary = path.with_extension("json.new");
+    match std::fs::symlink_metadata(&temporary) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_file(&temporary).map_err(|_| CliFailure {
+                code: "PLATFORM_SESSION_WRITE_FAILED",
+                exit: EXIT_UNAVAILABLE,
+            })?;
+        }
+        Ok(_) => {
+            return Err(CliFailure {
+                code: "PLATFORM_SESSION_PATH_INVALID",
+                exit: EXIT_INVALID,
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(CliFailure {
+                code: "PLATFORM_SESSION_WRITE_FAILED",
+                exit: EXIT_UNAVAILABLE,
+            });
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_WRITE_FAILED",
+        exit: EXIT_UNAVAILABLE,
+    })?;
+    file.write_all(bytes)
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all())
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_SESSION_WRITE_FAILED",
+            exit: EXIT_UNAVAILABLE,
+        })?;
+    if std::fs::rename(&temporary, path).is_ok() {
+        return Ok(());
+    }
+    if path.is_file() {
+        std::fs::remove_file(path).map_err(|_| CliFailure {
+            code: "PLATFORM_SESSION_WRITE_FAILED",
+            exit: EXIT_UNAVAILABLE,
+        })?;
+    }
+    std::fs::rename(temporary, path).map_err(|_| CliFailure {
+        code: "PLATFORM_SESSION_WRITE_FAILED",
+        exit: EXIT_UNAVAILABLE,
+    })
+}
+
 fn map_build(error: BuildError) -> CliFailure {
     let exit = match error {
         BuildError::Conflict => EXIT_CONFLICT,
@@ -2776,7 +4608,11 @@ fn map_release(error: LocalReleaseError) -> CliFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliFailure, EXIT_CONFLICT, EXIT_INVALID, explain_failure};
+    use super::{
+        AuthenticationConfigurationWire, CliFailure, EXIT_CONFLICT, EXIT_INVALID,
+        InteractiveLoginMethod, OidcClientConfigurationWire, explain_failure,
+        parse_oidc_callback_request, select_login_method, validate_oidc_client_configuration,
+    };
 
     #[test]
     fn known_failures_have_specific_actionable_explanations() {
@@ -2807,5 +4643,102 @@ mod tests {
         assert!(!explanation.message.contains("FUTURE_CONFLICT_CODE"));
         assert!(!explanation.message.contains('\n'));
         assert!(!explanation.hint.contains('\n'));
+    }
+
+    #[test]
+    fn oidc_callback_binds_host_state_issuer_and_single_parameters() {
+        let valid = b"GET /callback?code=abc%26client_id%3Devil&state=state-1&iss=https%3A%2F%2Fidentity.example.com HTTP/1.1\r\nHost: 127.0.0.1:4321\r\nConnection: close\r\n\r\n";
+        let code = parse_oidc_callback_request(
+            valid,
+            "127.0.0.1:4321",
+            "state-1",
+            "https://identity.example.com",
+        );
+        assert!(matches!(code.as_deref(), Ok("abc&client_id=evil")));
+
+        for request in [
+            b"GET /callback?code=abc&state=wrong HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc&state=state-1&iss=https%3A%2F%2Fevil.example HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc&code=other&state=state-1 HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc&state=state-1&state=other HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc&state=state-1&error=access_denied HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc&state=state-1 HTTP/1.1\r\nHost: 127.0.0.1:9999\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc&state=state-1 HTTP/1.1\r\nHost: 127.0.0.1:4321\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"POST /callback?code=abc&state=state-1 HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc%0d%0aInjected%3Ayes&state=state-1 HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\n".as_slice(),
+            b"GET /callback?code=abc&state=state-1 HTTP/1.1\r\nHost: 127.0.0.1:4321\r\n\r\nbody".as_slice(),
+        ] {
+            assert!(
+                parse_oidc_callback_request(
+                    request,
+                    "127.0.0.1:4321",
+                    "state-1",
+                    "https://identity.example.com",
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn login_selection_requires_an_advertised_explicit_method() {
+        let configuration = AuthenticationConfigurationWire {
+            version: 1,
+            methods: vec![
+                "oidcBrowser".to_owned(),
+                "invitationCode".to_owned(),
+                "oidcToken".to_owned(),
+            ],
+            management_endpoint: None,
+        };
+        assert_eq!(
+            select_login_method(&configuration, false, false, true).ok(),
+            Some(InteractiveLoginMethod::Browser)
+        );
+        assert_eq!(
+            select_login_method(&configuration, true, false, false).ok(),
+            Some(InteractiveLoginMethod::Invitation)
+        );
+        assert_eq!(
+            select_login_method(&configuration, false, true, false).ok(),
+            Some(InteractiveLoginMethod::OidcToken)
+        );
+        let invitation_only = AuthenticationConfigurationWire {
+            version: 1,
+            methods: vec!["invitationCode".to_owned()],
+            management_endpoint: None,
+        };
+        assert!(select_login_method(&invitation_only, false, false, true).is_err());
+        assert!(select_login_method(&invitation_only, false, true, false).is_err());
+    }
+
+    #[test]
+    fn native_oidc_configuration_rejects_injected_or_ambiguous_values() {
+        let valid = || OidcClientConfigurationWire {
+            issuer: "https://identity.example.com/tenant".to_owned(),
+            authorization_endpoint: "https://identity.example.com/authorize".to_owned(),
+            token_endpoint: "https://identity.example.com/token".to_owned(),
+            client_id: "runku-cli".to_owned(),
+            scopes: vec!["openid".to_owned(), "profile".to_owned()],
+        };
+        assert!(validate_oidc_client_configuration(&valid()).is_ok());
+
+        let mut injected_endpoint = valid();
+        injected_endpoint.authorization_endpoint =
+            "https://identity.example.com/authorize?redirect=https://evil.example".to_owned();
+        assert!(validate_oidc_client_configuration(&injected_endpoint).is_err());
+
+        let mut embedded_credentials = valid();
+        embedded_credentials.token_endpoint =
+            "https://attacker:secret@identity.example.com/token".to_owned();
+        assert!(validate_oidc_client_configuration(&embedded_credentials).is_err());
+
+        let mut insecure_issuer = valid();
+        insecure_issuer.issuer = "http://identity.example.com/tenant".to_owned();
+        assert!(validate_oidc_client_configuration(&insecure_issuer).is_err());
+
+        let mut duplicate_scope = valid();
+        duplicate_scope.scopes.push("openid".to_owned());
+        assert!(validate_oidc_client_configuration(&duplicate_scope).is_err());
     }
 }

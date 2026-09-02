@@ -37,6 +37,72 @@ interpolated into generic failure explanations.
 | 8 | Policy denied | Correct target, Environment protection, scope, or operation |
 | 9 | Outcome uncertain | Reconcile by operation ID/current state before any retry |
 
+## Platform operator login
+
+### `runku login`
+
+```sh
+runku login
+
+RUNKU_INVITATION_CODE='rk_inv_v1_...' runku login \
+  --url https://api.example.com \
+  --code-env RUNKU_INVITATION_CODE
+
+RUNKU_OIDC_TOKEN='eyJ...' runku login \
+  --url https://api.example.com \
+  --device operator-laptop \
+  --oidc-token-env RUNKU_OIDC_TOKEN
+
+RUNKU_INVITATION_CODE='rk_inv_v1_...' runku login \
+  --url https://api.example.com \
+  --device operator-laptop \
+  --browser \
+  --code-env RUNKU_INVITATION_CODE
+```
+
+With no flags, `login` uses `https://api.runku.app`. If a prior profile exists, an interactive
+terminal first asks whether to reuse its authentication server. The CLI calls `/v1/auth/config`,
+shows the separate authentication and Management origins, and offers the methods actually
+advertised by that server. Browser OIDC is the recommended default when both OIDC and an invitation
+are available. Invitation input is hidden; automation should continue to use `--code-env`.
+
+`--url` overrides the authentication origin, not necessarily the Management origin. Discovery may
+return one canonical `managementEndpoint`; otherwise the queried origin serves both roles. New
+profiles store both origins: refresh/login requests return to the authentication server, while
+lifecycle and log requests go only to the Management server. Both must be exact HTTPS origins or
+literal-loopback HTTP origins. Redirects, URL credentials, paths, queries, fragments, ambient proxy
+configuration, and remote plaintext HTTP are rejected.
+
+`login` exchanges one server-issued, single-use bootstrap/operator invitation or a configured
+external OIDC token for an independently revocable device session. First OIDC enrollment supplies
+an invitation plus browser/external authentication; a linked identity omits the invitation.
+`--device` overrides the bounded audit label derived from the local computer name. `--code-env`
+must name an uppercase `RUNKU_*` variable; the code is never accepted as an argument.
+
+The response is bounded to 16 KiB and must contain valid `rk_at_v1_*` and `rk_rt_v1_*` credentials.
+One current profile is stored in the platform user configuration directory as described in
+[Platform operator identity](../auth/platform-identity.md#enroll-the-initial-owner). On Unix the
+file is created with mode `0600`; on Windows it inherits the profile directory ACL. The current
+source implementation uses this protected file fallback, not a native OS keychain.
+
+Success prints only operator, authentication server, Management server, and session IDs as JSON.
+The invitation is consumed
+atomically; do not repeat it after a successful response. Exit `7` means the code was invalid,
+expired, consumed, or rejected. Exit `5` means the endpoint/transport was unavailable and the
+caller must determine whether the server committed before trying to enroll new material.
+
+When selected interactively, browser OIDC needs no `--browser` flag. `--browser` forces that method;
+`--no-open` is its controlled/headless companion. Authorization Code + PKCE uses fresh state and
+verifier values, an ephemeral loopback callback, exact Host/state checks, optional authorization
+response issuer binding, a fixed token endpoint, and no redirects. The callback page reports
+success only after the external token has passed Runku verification and the Runku session has been
+persisted. `--oidc-token-env` remains available for an approved helper or workload identity.
+Neither flow stores the external IdP token.
+
+This command authenticates a platform operator. It does not create or use `rk_pub_*`, `rk_sec_*`,
+or `rk_dev_*` credentials. See the complete
+[operator identity runbook](../auth/platform-identity.md).
+
 ## Initialization and local serving
 
 ### `runku dev`
@@ -93,7 +159,8 @@ runku status [--root PATH]
 ```
 
 Returns one coherent Release/Channel snapshot. Use before promotion, rollback, compatibility
-investigation, or retrying a conflict.
+investigation, or retrying a conflict. `--remote` reads it through the current operator session and
+requires `releases:read` at the root's exact Environment.
 
 ## Build and lifecycle
 
@@ -120,6 +187,11 @@ runku publish [--root PATH] \
   [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]
 ```
 
+Add `--remote` to use the current `runku login` session. Remote publication requires
+`--expected-head empty|drv_*`; it never infers a mutable server HEAD. `--root` supplies the exact
+Project/Environment context and package metadata, while the stored session supplies the server and
+operator authority.
+
 Validates and persists the artifact before updating a Workspace pointer. `--expected-head` turns
 the update into an operator-visible compare-and-set. A stale expectation returns conflict; re-read
 state before deciding whether to publish a newer package or retry exact bytes.
@@ -129,6 +201,9 @@ state before deciding whether to publish a newer package or retry exact bytes.
 ```sh
 runku release [--root PATH] --release rel_* [--against CHANNEL]
 ```
+
+Add `--remote` to validate through the Management API with `releases:publish` at the root's exact
+Environment.
 
 Validates a published candidate and makes it explicitly servable if lifecycle and compatibility
 checks pass. `--against` selects a Channel compatibility baseline.
@@ -140,6 +215,8 @@ runku promote [--root PATH] \
   --channel CHANNEL --release rel_* [--expected empty|rel_*]
 ```
 
+Add `--remote` to use the operator session and `channels:promote`. Keep `--expected` in automation.
+
 Moves or creates a Channel after compatibility validation. Use `--expected` in automation to avoid
 overwriting a concurrent operator decision.
 
@@ -149,6 +226,8 @@ overwriting a concurrent operator decision.
 runku rollback [--root PATH] \
   --channel CHANNEL --expected rel_current --to rel_previous
 ```
+
+Add `--remote` to perform the same exact-current CAS through the Management API.
 
 Moves a Channel back only if it still points to the observed Release. Rollback changes routing, not
 data. It cannot reverse a schema/data migration and does not change already-pinned scheduled work or
@@ -242,7 +321,11 @@ runku logs [--root PATH] [--after logc_N] [--limit 1..1000] \
 ```
 
 `--after` is an exclusive durable cursor. Store the last processed cursor before continuing.
-Filters are exact and can be combined. `--follow` polls until interrupted.
+Filters are exact and can be combined. Local `--follow` polls the local repository until
+interrupted. `--remote` uses the stored operator session; snapshot mode requires `logs:read`.
+`--remote --follow` opens one NDJSON streaming response and requires `logs:follow`. The server
+rechecks current session/grants during the stream, so revocation terminates it rather than waiting
+for the original access-token lifetime.
 
 ### Retention
 

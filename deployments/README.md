@@ -1,8 +1,9 @@
 # Runku deployment profiles
 
 This directory describes how the Runku product maps to standalone, Docker, and Kubernetes
-environments. It also contains bounded conformance assets. It does not currently contain a
-production installer: server/Agent binaries and official images are not published yet.
+environments. It also contains the compact server image definition and bounded conformance assets.
+Tagged releases publish the compact server binary/image; distributed roles, Agent, Compose, and
+Kubernetes installation packages remain separate readiness gates.
 
 ## Product roles
 

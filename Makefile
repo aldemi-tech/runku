@@ -1,4 +1,4 @@
-.PHONY: toolchain toolchain-check check ci-check ci-rust-check ci-packages-check fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check cli-package-check release-package-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check mutation-engine-benchmark schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
+.PHONY: toolchain toolchain-check check ci-check ci-rust-check ci-packages-check security-audit fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check cli-package-check release-package-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check mutation-engine-benchmark schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check platform-identity-check platform-identity-keycloak-check platform-lifecycle-keycloak-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
 
 RUST_TOOLCHAIN_CHANNEL := $(shell sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
 
@@ -29,6 +29,12 @@ ci-packages-check: js-install
 	pnpm check:packages
 	pnpm check:release
 
+# Explicit networked advisory gate. Kept outside ci-check so the fast compile/package gate does not
+# clone RustSec or depend on a separately installed tool.
+security-audit:
+	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit is required: cargo install cargo-audit --locked"; exit 1; }
+	cargo audit
+
 fmt:
 	cargo fmt --all
 
@@ -57,7 +63,7 @@ install-cli-check:
 	@install_root=$$(mktemp -d); \
 	trap 'rm -rf "$$install_root"' EXIT; \
 	$(MAKE) --no-print-directory install-cli CARGO_INSTALL_ROOT="$$install_root"; \
-	"$$install_root/bin/runku" --version | rg -x 'runku 0\.1\.0'; \
+	"$$install_root/bin/runku" --version | rg -x 'runku 0\.2\.0'; \
 	"$$install_root/bin/runku" --help | rg -F 'runku dev [--root PATH]'
 
 cli-package-check: js-install
@@ -187,6 +193,17 @@ jwt-identity-check:
 
 identity-provider-check:
 	cargo test -p runku-identity-provider --all-features --locked -- --test-threads=1
+
+platform-identity-check:
+	cargo test -p runku-identity -p runku-identity-provider -p runku-platform-identity -p runku-management-service -p runku-cli --all-features --locked -- --test-threads=1
+	cargo clippy -p runku-identity -p runku-identity-provider -p runku-platform-identity -p runku-management-service -p runku-server -p runku-cli --all-targets --all-features -- -D warnings
+
+platform-identity-keycloak-check:
+	./scripts/platform-identity-keycloak-evidence.sh
+
+# Deliberately separate from ci-check: this is the browser/Docker/product-lifecycle acceptance gate.
+platform-lifecycle-keycloak-check: js-install
+	./scripts/platform-lifecycle-keycloak-evidence.sh
 
 protocol-check:
 	cargo test -p runku-protocol --all-features --locked -- --test-threads=1

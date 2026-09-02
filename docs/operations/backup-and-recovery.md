@@ -15,6 +15,8 @@ Release routing, credentials, schedules, and artifact references.
 | Application Clients/keys | `.runku/identity.sqlite3` + pepper | Identity repository + key protection | Authoritative and sensitive |
 | Cron activation/cursors | `.runku/cron.sqlite3` | PostgreSQL | Authoritative for exact scheduling behavior |
 | Operational logs/export checkpoints | `.runku/observability.sqlite3` | Operational store | Operational evidence; retention policy applies |
+| Platform operators/grants/sessions/invitations/audit | not part of local application state | PostgreSQL Platform Identity schema | Authoritative and sensitive |
+| Platform credential/OIDC peppers | not part of local application state | Secret provider + coordinated recovery manifest | Authoritative cryptographic material |
 | Artifacts | `.runku/artifacts/` and build store | S3-compatible object storage | Authoritative immutable content by digest |
 | Process locks/caches/scratch | local ephemeral paths | Pod/host ephemeral storage | Reconstructible; never restore as authority |
 
@@ -70,6 +72,17 @@ The future packaged profile must coordinate PostgreSQL and object storage. A bac
 include format version, installation/Project/Environment identities, database recovery position or
 snapshot identity, artifact roots, object checksums, configuration revision, creation time, tool
 version, encryption metadata, and verification result.
+
+When Platform Identity is enabled, the same recovery point also records the Platform Identity schema
+version/checksum, both pepper secret versions, OIDC configuration revision, and whether a pending
+bootstrap file exists. Restoring identity tables without their matching peppers leaves operators
+unable to authenticate; restoring an older identity snapshot may resurrect later-revoked sessions
+or invitations and therefore requires explicit credential reconciliation.
+
+A lost bootstrap file is recoverable only while the database has no operator. The offline
+`runku-server recover-bootstrap` operation revokes any pending bootstrap and writes a replacement;
+it does not repair a missing pepper, an inconsistent partial restore, or lost owner access after
+enrollment. Preserve the original database and audit evidence before using it.
 
 Required operations are plan/dry-run, create, list, verify offline, restore into an empty
 installation, and report compatibility. A restore must preserve IDs and keyrings only when the

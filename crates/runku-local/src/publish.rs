@@ -228,9 +228,6 @@ async fn publish(
     let binding = snapshot
         .workspace_binding(workspace_ref)
         .ok_or(LocalPublishError::Conflict)?;
-    if binding.head_revision != expected_head {
-        return Err(LocalPublishError::Conflict);
-    }
     if binding.head_revision == Some(revision_id) {
         let existing = snapshot
             .resolve_revision(revision_id)
@@ -245,6 +242,9 @@ async fn publish(
             previous_head: expected_head,
             replayed: true,
         });
+    }
+    if binding.head_revision != expected_head {
+        return Err(LocalPublishError::Conflict);
     }
 
     let command = DevelopmentCommand::PublishRevision {

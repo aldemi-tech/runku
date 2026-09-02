@@ -12,10 +12,10 @@ importers:
     dependencies:
       '@runku/client':
         specifier: 0.1.0
-        version: link:../../packages/client
+        version: 0.1.0
       '@runku/server':
         specifier: 0.1.0
-        version: link:../../packages/server
+        version: 0.1.0
       better-auth:
         specifier: 1.7.2
         version: 1.7.2(better-sqlite3@12.11.1)(next@16.3.3(@babel/core@7.29.7)(@playwright/test@1.62.1)(@types/node@24.10.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -71,10 +71,10 @@ importers:
     devDependencies:
       '@runku/client':
         specifier: 0.1.0
-        version: link:../../packages/client
+        version: 0.1.0
       '@runku/server':
         specifier: 0.1.0
-        version: link:../../packages/server
+        version: 0.1.0
       '@types/node':
         specifier: 24.10.1
         version: 24.10.1
@@ -88,22 +88,22 @@ importers:
   packages/cli:
     optionalDependencies:
       '@runku/cli-darwin-arm64':
-        specifier: 0.1.0
+        specifier: 0.2.0
         version: link:../cli-darwin-arm64
       '@runku/cli-darwin-x64':
-        specifier: 0.1.0
+        specifier: 0.2.0
         version: link:../cli-darwin-x64
       '@runku/cli-linux-arm64-gnu':
-        specifier: 0.1.0
+        specifier: 0.2.0
         version: link:../cli-linux-arm64-gnu
       '@runku/cli-linux-x64-gnu':
-        specifier: 0.1.0
+        specifier: 0.2.0
         version: link:../cli-linux-x64-gnu
       '@runku/cli-win32-arm64-msvc':
-        specifier: 0.1.0
+        specifier: 0.2.0
         version: link:../cli-win32-arm64-msvc
       '@runku/cli-win32-x64-msvc':
-        specifier: 0.1.0
+        specifier: 0.2.0
         version: link:../cli-win32-x64-msvc
 
   packages/cli-darwin-arm64: {}
@@ -771,6 +771,14 @@ packages:
 
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
+
+  '@runku/client@0.1.0':
+    resolution: {integrity: sha512-rGUZXRD7k+9AZ8z3Ni1LKIj5DMaT9+i8iwjGwZMt2T/B18by9B6TKplAeqfg1l9GbZktR7q267IK2IFKLgvJag==}
+    engines: {node: '>=20'}
+
+  '@runku/server@0.1.0':
+    resolution: {integrity: sha512-odXDIY7gO/QI3Xsm0bKdNBPRtG2GDHpDkGVF3OsjLhqm2Lc/wjHyk7vtnxHdM8B6fMzDY8YmMfcIiWq0xgB2Ig==}
+    engines: {node: '>=20'}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -3082,6 +3090,10 @@ snapshots:
       playwright: 1.62.1
 
   '@rtsao/scc@1.1.0': {}
+
+  '@runku/client@0.1.0': {}
+
+  '@runku/server@0.1.0': {}
 
   '@standard-schema/spec@1.1.0': {}
 

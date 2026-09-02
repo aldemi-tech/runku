@@ -17,10 +17,11 @@ use runku_development_client::DevelopmentEndpoint;
 use runku_gateway::CorsOrigin;
 use runku_identity::{ApplicationClientName, ApplicationScope, ClientKind, CredentialLabel};
 use runku_observability::{LogCursor, LogLevel, LogStream};
+use runku_platform_identity::DeviceName;
 use runku_value::TimestampMicros;
 
 /// Stable base command-line help.
-pub const HELP: &str = "runku 0.1.0\n\nUSAGE:\n  runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT]\n  runku build [--root PATH] [--release-id rel_* --build-id bld_* --created-at-micros I64]\n  runku publish [--root PATH] --manifest FILE --artifact FILE [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]\n  runku release [--root PATH] --release rel_* [--against CHANNEL]\n  runku promote [--root PATH] --channel CHANNEL --release rel_* [--expected empty|rel_*]\n  runku rollback [--root PATH] --channel CHANNEL --expected rel_* --to rel_*\n  runku status [--root PATH]\n  runku dev [--root PATH] [--origin http(s)://HOST[:PORT]]... [--prebuilt] [--auth-config RELATIVE] [--application-env RELATIVE] [--public-env-prefix PREFIX] [--prepare] [--replace-remote-credentials]\n  runku doctor [--root PATH]\n  runku logs [--root PATH] [--after logc_N] [--limit 1..1000] [--stream platform|function] [--level debug|info|warn|error] [--function fnc_*] [--request req_*] [--invocation inv_*] [--client app_*] [--credential crd_*] [--release rel_*] [--follow]\n  runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  runku logs export-otlp [--root PATH] --config RELATIVE [--once]\n  runku client create [--root PATH] --name NAME --kind public|confidential --scope SCOPE... [--client-id app_*]\n  runku client list [--root PATH]\n  runku key create [--root PATH] --client app_* --label LABEL --scope SCOPE... [--key-id crd_*] [--expires-at-micros I64]\n  runku key list [--root PATH] --client app_*\n  runku key reveal [--root PATH] --client app_* --key crd_*\n  runku key rotate [--root PATH] --client app_* --key crd_* --label LABEL [--new-key-id crd_*] [--expires-at-micros I64]\n  runku key revoke [--root PATH] --key crd_*\n  runku key delete [--root PATH] --key crd_*\n  runku workspace key create [--root PATH] --actor ACTOR --label LABEL [--key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key list [--root PATH]\n  runku workspace key rotate [--root PATH] --key dvk_* --label LABEL [--new-key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key revoke [--root PATH] --key dvk_*\n  runku workspace key delete [--root PATH] --key dvk_*\n  runku workspace sync [--root PATH] --url ORIGIN --workspace REF --token-env RUNKU_NAME [--expected-head empty|drv_*] [--create]\n  runku --help\n  runku --version\n\nPROJECT ROOT:\n  --root PATH  Project directory; defaults to the current working directory.\n\nLOCAL DEVELOPMENT:\n  init defaults to workspace local and listener 127.0.0.1:3210.\n  dev initializes missing local state, reconciles local Application Credentials, builds, publishes, and watches runku/.\n  public dotenv aliases are detected for known frontend tools; the SDK itself is framework-agnostic.\n  RUNKU_SECRET_KEY always remains server-only and is never copied to a public alias.\n  --prebuilt serves an already-published package without reading application sources.\n";
+pub const HELP: &str = "runku 0.2.0\n\nUSAGE:\n  runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT]\n  runku build [--root PATH] [--release-id rel_* --build-id bld_* --created-at-micros I64]\n  runku publish [--root PATH] --manifest FILE --artifact FILE [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]\n  runku release [--root PATH] --release rel_* [--against CHANNEL]\n  runku promote [--root PATH] --channel CHANNEL --release rel_* [--expected empty|rel_*]\n  runku rollback [--root PATH] --channel CHANNEL --expected rel_* --to rel_*\n  runku status [--root PATH]\n  runku dev [--root PATH] [--origin http(s)://HOST[:PORT]]... [--prebuilt] [--auth-config RELATIVE] [--application-env RELATIVE] [--public-env-prefix PREFIX] [--prepare] [--replace-remote-credentials]\n  runku doctor [--root PATH]\n  runku logs [--root PATH] [--after logc_N] [--limit 1..1000] [--stream platform|function] [--level debug|info|warn|error] [--function fnc_*] [--request req_*] [--invocation inv_*] [--client app_*] [--credential crd_*] [--release rel_*] [--follow]\n  runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  runku logs export-otlp [--root PATH] --config RELATIVE [--once]\n  runku client create [--root PATH] --name NAME --kind public|confidential --scope SCOPE... [--client-id app_*]\n  runku client list [--root PATH]\n  runku key create [--root PATH] --client app_* --label LABEL --scope SCOPE... [--key-id crd_*] [--expires-at-micros I64]\n  runku key list [--root PATH] --client app_*\n  runku key reveal [--root PATH] --client app_* --key crd_*\n  runku key rotate [--root PATH] --client app_* --key crd_* --label LABEL [--new-key-id crd_*] [--expires-at-micros I64]\n  runku key revoke [--root PATH] --key crd_*\n  runku key delete [--root PATH] --key crd_*\n  runku workspace key create [--root PATH] --actor ACTOR --label LABEL [--key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key list [--root PATH]\n  runku workspace key rotate [--root PATH] --key dvk_* --label LABEL [--new-key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key revoke [--root PATH] --key dvk_*\n  runku workspace key delete [--root PATH] --key dvk_*\n  runku workspace sync [--root PATH] --url ORIGIN --workspace REF --token-env RUNKU_NAME [--expected-head empty|drv_*] [--create]\n  runku --help\n  runku --version\n\nPROJECT ROOT:\n  --root PATH  Project directory; defaults to the current working directory.\n\nLOCAL DEVELOPMENT:\n  init defaults to workspace local and listener 127.0.0.1:3210.\n  dev initializes missing local state, reconciles local Application Credentials, builds, publishes, and watches runku/.\n  public dotenv aliases are detected for known frontend tools; the SDK itself is framework-agnostic.\n  RUNKU_SECRET_KEY always remains server-only and is never copied to a public alias.\n  --prebuilt serves an already-published package without reading application sources.\n";
 
 /// Default Workspace created by zero-configuration local development.
 pub const DEFAULT_LOCAL_WORKSPACE: &str = "local";
@@ -31,6 +32,12 @@ pub const DEFAULT_LOCAL_LISTENER: &str = "127.0.0.1:3210";
 /// Stable Remote Release freeze help appended by the executable.
 pub const WORKSPACE_FREEZE_HELP: &str = "\nREMOTE RELEASE:\n  runku workspace freeze --url ORIGIN --release rel_* --token-env RUNKU_NAME [--against rel_*]\n";
 
+/// Platform login help appended by the executable.
+pub const LOGIN_HELP: &str = "\nREMOTE LOGIN:\n  runku login\n  runku login [--url ORIGIN] [--device NAME] [--browser] [--code-env RUNKU_NAME] [--no-open]\n  runku login [--url ORIGIN] [--device NAME] --oidc-token-env RUNKU_NAME [--code-env RUNKU_NAME]\n\n  Without --url, login offers the saved authentication server or uses https://api.runku.app.\n  Without an authentication flag, login discovers and offers the server-supported methods.\n";
+
+/// Authenticated Management API lifecycle help appended by the executable.
+pub const MANAGEMENT_HELP: &str = "\nREMOTE MANAGEMENT:\n  Add --remote to publish, release, promote, rollback, status, or logs.\n  These commands use the current runku login session and the Project/Environment in --root.\n  Remote publish requires --expected-head empty|drv_*; logs --remote --follow uses one streaming connection.\n";
+
 /// Strict parsed CLI command; the project root defaults to the current directory and Production is never implicit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliCommand {
@@ -38,6 +45,21 @@ pub enum CliCommand {
     Help,
     /// Print package version.
     Version,
+    /// Enroll one CLI device through a Runku authentication server.
+    Login {
+        /// Optional canonical HTTPS or literal-loopback HTTP authentication origin.
+        endpoint: Option<DevelopmentEndpoint>,
+        /// Optional human-readable device name; absent derives a safe local default.
+        device_name: Option<DeviceName>,
+        /// Optional allowlisted environment variable containing a one-time invitation code.
+        code_environment: Option<TokenEnvironmentName>,
+        /// Optional allowlisted environment variable containing a verified external-provider token.
+        oidc_token_environment: Option<TokenEnvironmentName>,
+        /// Complete an OIDC Authorization Code with PKCE flow in the system browser.
+        browser: bool,
+        /// Print the authorization URL instead of opening the system browser.
+        no_open: bool,
+    },
     /// Initialize one local project root.
     Init {
         /// Existing project directory.
@@ -58,6 +80,8 @@ pub enum CliCommand {
     },
     /// Publish one already-built canonical package.
     Publish {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
         /// Initialized project root.
         root: PathBuf,
         /// Canonical Release Manifest bytes file.
@@ -73,6 +97,8 @@ pub enum CliCommand {
     },
     /// Validate one published candidate and make it explicitly servable.
     Release {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
         /// Initialized project root.
         root: PathBuf,
         /// Published immutable candidate.
@@ -82,6 +108,8 @@ pub enum CliCommand {
     },
     /// Move one Channel to a compatible servable Release.
     Promote {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
         /// Initialized project root.
         root: PathBuf,
         /// Channel to create or move.
@@ -93,6 +121,8 @@ pub enum CliCommand {
     },
     /// Move one Channel back with an exact current-Release precondition.
     Rollback {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
         /// Initialized project root.
         root: PathBuf,
         /// Channel to move.
@@ -104,6 +134,8 @@ pub enum CliCommand {
     },
     /// Print one coherent read-only Release/Channel snapshot.
     Status {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
         /// Initialized project root.
         root: PathBuf,
     },
@@ -133,6 +165,8 @@ pub enum CliCommand {
     },
     /// Query or follow one exact local Operational Logs stream.
     Logs {
+        /// Use the Management API and the current `runku login` session.
+        remote: bool,
         /// Initialized project root.
         root: PathBuf,
         /// Exclusive durable cursor.
@@ -395,6 +429,7 @@ where
     }
     match command {
         "init" => parse_init(remaining),
+        "login" => parse_login(remaining),
         "build" => parse_build(remaining),
         "publish" => parse_publish(remaining),
         "release" => parse_release(remaining),
@@ -411,9 +446,36 @@ where
     }
 }
 
-fn parse_release(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+fn parse_login(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let mut args = args;
+    let browser = take_switch(&mut args, "--browser")?;
+    let no_open = take_switch(&mut args, "--no-open")?;
+    if no_open && !browser {
+        return Err(CliUsageError);
+    }
+    let mut flags = Flags::new(args)?;
+    let code_environment = parse_optional(&mut flags, "--code-env")?;
+    let oidc_token_environment = parse_optional(&mut flags, "--oidc-token-env")?;
+    if browser && oidc_token_environment.is_some() {
+        return Err(CliUsageError);
+    }
+    let command = CliCommand::Login {
+        endpoint: parse_optional(&mut flags, "--url")?,
+        device_name: parse_optional(&mut flags, "--device")?,
+        code_environment,
+        oidc_token_environment,
+        browser,
+        no_open,
+    };
+    flags.finish()?;
+    Ok(command)
+}
+
+fn parse_release(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let remote = take_switch(&mut args, "--remote")?;
     let mut flags = Flags::new(args)?;
     let command = CliCommand::Release {
+        remote,
         root: flags.project_root()?,
         release_id: parse_required(&mut flags, "--release")?,
         against: parse_optional(&mut flags, "--against")?,
@@ -422,7 +484,8 @@ fn parse_release(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
     Ok(command)
 }
 
-fn parse_promote(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+fn parse_promote(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let remote = take_switch(&mut args, "--remote")?;
     let mut flags = Flags::new(args)?;
     let expected = flags
         .optional_string("--expected")?
@@ -438,6 +501,7 @@ fn parse_promote(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
         })
         .transpose()?;
     let command = CliCommand::Promote {
+        remote,
         root: flags.project_root()?,
         channel: parse_required(&mut flags, "--channel")?,
         release_id: parse_required(&mut flags, "--release")?,
@@ -447,9 +511,11 @@ fn parse_promote(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
     Ok(command)
 }
 
-fn parse_rollback(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+fn parse_rollback(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let remote = take_switch(&mut args, "--remote")?;
     let mut flags = Flags::new(args)?;
     let command = CliCommand::Rollback {
+        remote,
         root: flags.project_root()?,
         channel: parse_required(&mut flags, "--channel")?,
         expected: parse_required(&mut flags, "--expected")?,
@@ -459,9 +525,11 @@ fn parse_rollback(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
     Ok(command)
 }
 
-fn parse_status(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+fn parse_status(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let remote = take_switch(&mut args, "--remote")?;
     let mut flags = Flags::new(args)?;
     let command = CliCommand::Status {
+        remote,
         root: flags.project_root()?,
     };
     flags.finish()?;
@@ -532,6 +600,8 @@ fn parse_init(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
 }
 
 fn parse_publish(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let mut args = args;
+    let remote = take_switch(&mut args, "--remote")?;
     let mut flags = Flags::new(args)?;
     let root = flags.project_root()?;
     let manifest = flags.required_path("--manifest")?;
@@ -557,6 +627,7 @@ fn parse_publish(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
         .transpose()?;
     flags.finish()?;
     Ok(CliCommand::Publish {
+        remote,
         root,
         manifest,
         artifact,
@@ -663,6 +734,7 @@ fn parse_logs(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
         });
     }
     let follow = take_switch(&mut args, "--follow")?;
+    let remote = take_switch(&mut args, "--remote")?;
     let mut flags = Flags::new(args)?;
     let root = flags.project_root()?;
     let after = parse_optional(&mut flags, "--after")?.unwrap_or(LogCursor::START);
@@ -691,6 +763,7 @@ fn parse_logs(mut args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
         })
         .transpose()?;
     let command = CliCommand::Logs {
+        remote,
         root,
         after,
         limit,
@@ -1100,6 +1173,28 @@ mod tests {
             })
         ));
         assert!(matches!(
+            parse_args(args(&[
+                "login",
+                "--url",
+                "https://runku.example.com",
+                "--device",
+                "manuel-laptop",
+                "--browser",
+                "--no-open",
+            ])),
+            Ok(CliCommand::Login {
+                browser: true,
+                no_open: true,
+                code_environment: None,
+                oidc_token_environment: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_args(args(&["status", "--root", "/tmp/project", "--remote"])),
+            Ok(CliCommand::Status { remote: true, .. })
+        ));
+        assert!(matches!(
             parse_args(args(&["doctor"])),
             Ok(CliCommand::Doctor { root }) if root == current
         ));
@@ -1117,8 +1212,76 @@ mod tests {
         ));
         assert!(matches!(
             parse_args(args(&["status", "--root", "/tmp/project"])),
-            Ok(CliCommand::Status { root }) if root.as_path() == Path::new("/tmp/project")
+            Ok(CliCommand::Status { root, remote: false }) if root.as_path() == Path::new("/tmp/project")
         ));
+    }
+
+    #[test]
+    fn parses_remote_login_without_accepting_code_as_an_argument() {
+        assert!(matches!(
+            parse_args(args(&[
+                "login",
+                "--url",
+                "https://runku.example.com",
+                "--device",
+                "manuel-laptop",
+                "--code-env",
+                "RUNKU_INVITATION_CODE",
+            ])),
+            Ok(CliCommand::Login { .. })
+        ));
+        assert!(matches!(
+            parse_args(args(&[
+                "login",
+                "--url",
+                "https://runku.example.com",
+                "--device",
+                "manuel-laptop",
+                "--oidc-token-env",
+                "RUNKU_OIDC_TOKEN",
+            ])),
+            Ok(CliCommand::Login {
+                code_environment: None,
+                oidc_token_environment: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_args(args(&[
+                "login",
+                "--url",
+                "https://runku.example.com",
+                "--device",
+                "manuel-laptop",
+            ])),
+            Ok(CliCommand::Login {
+                endpoint: Some(_),
+                device_name: Some(_),
+                browser: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_args(args(&["login"])),
+            Ok(CliCommand::Login {
+                endpoint: None,
+                device_name: None,
+                browser: false,
+                ..
+            })
+        ));
+        assert!(
+            parse_args(args(&[
+                "login",
+                "--url",
+                "https://runku.example.com",
+                "--device",
+                "manuel-laptop",
+                "--code",
+                "secret",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]

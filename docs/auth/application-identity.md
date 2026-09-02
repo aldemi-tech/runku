@@ -3,6 +3,11 @@
 Runku separates application identity from end-user identity. OAuth/OIDC identifies a functional
 user; Application Keys identify the software context invoking Runku.
 
+These credentials do not administer the installation. Human operator bootstrap, scoped grants,
+Management API sessions, and optional workforce OIDC are documented separately in
+[Platform operator identity](platform-identity.md). An `rk_sec_*` key remains an application/server
+credential and is never accepted as operator authority.
+
 ## Application Keys
 
 - `rk_pub_*` identifies browser, mobile, desktop, or other distributable clients. It is not a secret

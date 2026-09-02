@@ -1,8 +1,8 @@
 # Standalone deployment profile
 
 Standalone means a dedicated machine or VM running a complete Runku instance or one product role.
-The supported server package and service-unit templates are not published yet; this document fixes
-the required trust and host contract.
+Tagged releases publish the compact Linux server archive; service-unit templates and separated
+distributed-role packages are not published yet. This document fixes the trust and host contract.
 
 ## Product topology
 
