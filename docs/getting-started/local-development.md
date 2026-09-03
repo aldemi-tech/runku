@@ -51,25 +51,25 @@ the table, and download `SHA256SUMS`. Verify before extraction:
 ```sh
 # Linux example
 sha256sum --check SHA256SUMS --ignore-missing
-tar -xzf runku-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 runku-v0.4.0-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
+tar -xzf runku-v0.4.1-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 runku-v0.4.1-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```sh
 # macOS example (verify the named file with the SHA256SUMS value)
-shasum -a 256 runku-v0.4.0-aarch64-apple-darwin.tar.gz
-tar -xzf runku-v0.4.0-aarch64-apple-darwin.tar.gz
+shasum -a 256 runku-v0.4.1-aarch64-apple-darwin.tar.gz
+tar -xzf runku-v0.4.1-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 0755 runku-v0.4.0-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
+install -m 0755 runku-v0.4.1-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```powershell
 # Windows x86_64 example
-Get-FileHash .\runku-v0.4.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-Expand-Archive .\runku-v0.4.0-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
-& .\runku-cli\runku-v0.4.0-x86_64-pc-windows-msvc\runku.exe --version
+Get-FileHash .\runku-v0.4.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Expand-Archive .\runku-v0.4.1-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
+& .\runku-cli\runku-v0.4.1-x86_64-pc-windows-msvc\runku.exe --version
 ```
 
 Compare the printed Windows/macOS hash with the exact filename entry in `SHA256SUMS`. Move the
@@ -122,6 +122,19 @@ contract, not a normal developer setting: repeat the exact authorized IDs after 
 response, and treat `LOCAL_STATE_CONFLICT` as evidence to reconcile instead of replacing `.runku/`.
 Omitting both flags retains generated local IDs.
 
+For a developer attaching source to an existing remote Environment, authenticate and verify scope
+instead of using provisioner initialization directly:
+
+```sh
+runku login
+runku link --project-id prj_... --environment-id env_...
+```
+
+`link` asks the current Management origin to authorize an exact status read before initializing
+the directory. It then pins that origin in `.runku/management-link-v1.json`; later `--remote`
+commands reject a different login origin for the same root. IDs alone remain non-secret and grant
+no access. A denied link creates no local state.
+
 ## What starts
 
 The local process opens only a local-development Environment and composes:
@@ -145,6 +158,7 @@ The `.runku/` directory contains private authoritative state, including:
 | Path | Purpose |
 |---|---|
 | `local-state-v1.json` | Project/Environment/Workspace identity and loopback listener |
+| `management-link-v1.json` | Optional non-secret exact Management origin binding created by authenticated `runku link` |
 | `identity-pepper-v1.key` | Private key-verification pepper; never log or copy publicly |
 | `data.sqlite3` | Documents, indexes, outbox, scheduled invocations |
 | `releases.sqlite3` | Release candidates, lifecycle, Channels |

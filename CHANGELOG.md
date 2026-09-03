@@ -2,6 +2,30 @@
 
 All notable changes are documented in this file.
 
+## 0.4.1 - 2026-09-03
+
+### Added
+
+- `runku link` for attaching a local source root to an existing Product scope only after the
+  current operator session completes an authenticated exact-scope Management status request.
+- A non-secret `management-link-v1.json` descriptor that pins the accepted Management origin for
+  all later remote lifecycle and log commands from that root.
+
+### Security
+
+- A rejected, unauthenticated, or malformed link response leaves an uninitialized directory
+  unchanged. Existing local identity, scope, Workspace, listener, and origin conflicts fail without
+  replacement.
+- Project and Environment IDs remain public identifiers rather than credentials; remote operations
+  continue to require live Platform Identity sessions and current exact-scope capabilities.
+
+### Compatibility and rollback
+
+- Product protocols, persisted Product state, server behavior, SDKs, and storage formats are
+  unchanged from 0.4.0. Existing roots without a link descriptor retain their behavior.
+- Version 0.4.0 ignores the new separate descriptor, so downgrading the CLI removes local
+  Management-origin pin enforcement even though server authorization remains active.
+
 ## 0.4.0 - 2026-09-03
 
 ### Added

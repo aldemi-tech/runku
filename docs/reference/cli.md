@@ -155,6 +155,31 @@ provisioner must still derive them from its authorized durable control record ra
 unverified request input. Ordinary local development omits both flags and continues to generate a
 fresh scope.
 
+### `runku link`
+
+```sh
+runku login
+runku link [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT] \
+  --project-id prj_* --environment-id env_*
+```
+
+Use `link` for a customer- or operator-controlled directory that will issue remote lifecycle
+commands. It loads the current `runku login` profile and performs an authenticated `status` request
+against the exact Project/Environment before creating any local Runku state. Authentication,
+current grants, and the selected installation's configured Product scope must all succeed. A
+rejected request leaves an uninitialized directory unchanged.
+
+On success, Runku initializes the exact scope and writes the non-secret
+`.runku/management-link-v1.json` descriptor. The descriptor pins the canonical Management origin
+for later `--remote` commands, preventing a subsequent login profile from silently redirecting the
+linked root to another installation. It contains no access/refresh token or Application key.
+
+Identical repetition is safe. A different Project, Environment, Workspace, listener, or Management
+origin returns `PLATFORM_LINK_CONFLICT` without replacing state. Revoking the operator session or
+grant still blocks subsequent requests; the descriptor records where the root was linked, not a
+durable authorization grant. Direct `init --project-id/--environment-id` remains the trusted
+provisioner primitive and does not prove remote ownership.
+
 ### `runku doctor`
 
 ```sh

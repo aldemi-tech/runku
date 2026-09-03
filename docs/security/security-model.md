@@ -131,6 +131,14 @@ the configured asymmetric algorithm, signature, exact issuer/audience/discrimina
 origin policy, and subject namespace. A successful provider callback alone is never presented as a
 successful Runku login.
 
+Remote project linking treats Project and Environment IDs as public identifiers, never as proof of
+ownership. `runku link` must obtain an authorized exact-scope Management status response before it
+creates local state, then pins that canonical Management origin in a non-secret local descriptor.
+Later remote commands refuse origin substitution for linked roots. Copying identifiers or locally
+minting Application credentials cannot create a remote operator grant or match credential digests
+stored by another Environment. A copied project directory remains sensitive because it can contain
+source, local data, and other credentials; the link descriptor itself contains none.
+
 Initial-owner recovery is deliberately local and pre-enrollment only. It requires administrative
 access to PostgreSQL, the installation pepper, configuration, and protected state directory;
 atomically revokes prior pending material and writes a security-audit event. It is never available

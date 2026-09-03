@@ -71,6 +71,21 @@ Project/Environment from `--root`. It rejects a malformed/symlinked session file
 the rotating refresh token after a `401`, safely replaces the file, and never falls back to an
 Application or Development key.
 
+When the local source directory does not itself contain the server's provisioned Product state,
+bind it only after login has proved access to the intended remote scope:
+
+```sh
+runku link --root /workspace/application \
+  --project-id prj_... --environment-id env_...
+```
+
+The command calls authenticated `status` first. Only a successful exact-scope response permits
+local initialization and creation of the non-secret Management-origin descriptor. A `401`, `403`,
+invalid response, or transport failure leaves a previously uninitialized directory unchanged.
+Once present, the descriptor makes every later `--remote` command reject a different Management
+origin. This prevents login-profile substitution; server-side authorization is still reloaded on
+every operation and the descriptor is never treated as a credential.
+
 ## Publish and promote the first Release
 
 Build locally and capture paths/IDs from JSON instead of guessing output names:

@@ -1,6 +1,6 @@
 [package]
 name = "runku-cli"
-version = "0.4.0"
+version = "0.4.1"
 description = "Strict local Product Base command-line interface for Runku"
 edition.workspace = true
 rust-version.workspace = true

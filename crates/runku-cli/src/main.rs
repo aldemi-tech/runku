@@ -13,12 +13,12 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use runku_build::{BuildError, BuildMetadata, build_project, source_fingerprint};
 use runku_cli::{
-    CliCommand, DEFAULT_LOCAL_LISTENER, DEFAULT_LOCAL_WORKSPACE, HELP, LOG_ARCHIVE_HELP,
+    CliCommand, DEFAULT_LOCAL_LISTENER, DEFAULT_LOCAL_WORKSPACE, HELP, LINK_HELP, LOG_ARCHIVE_HELP,
     LOGIN_HELP, MANAGEMENT_HELP, TokenEnvironmentName, WORKSPACE_FREEZE_HELP, parse_args,
 };
 use runku_core::{
-    ApplicationClientId, CredentialId, EnvironmentId, OperationId, OperatorId, OperatorSessionId,
-    WorkspaceId, WorkspaceRef,
+    ApplicationClientId, CredentialId, EnvironmentId, EnvironmentScope, OperationId, OperatorId,
+    OperatorSessionId, WorkspaceId, WorkspaceRef,
 };
 use runku_development::DevelopmentActor;
 use runku_development_access::{DevelopmentCredentialStatus, DevelopmentLifecycleResult};
@@ -66,6 +66,8 @@ const EXIT_AUTH: u8 = 7;
 const EXIT_POLICY: u8 = 8;
 const EXIT_UNCERTAIN: u8 = 9;
 const DEFAULT_AUTHENTICATION_SERVER: &str = "https://api.runku.app";
+const MANAGEMENT_LINK_FILE: &str = "management-link-v1.json";
+const MANAGEMENT_LINK_MAX_BYTES: u64 = 8 * 1024;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -83,7 +85,9 @@ async fn main() -> ExitCode {
             exit: EXIT_USAGE,
         });
         eprintln!();
-        eprintln!("{HELP}{LOG_ARCHIVE_HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
+        eprintln!(
+            "{HELP}{LOG_ARCHIVE_HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{LINK_HELP}{WORKSPACE_FREEZE_HELP}"
+        );
         ExitCode::from(EXIT_USAGE)
     }
 }
@@ -137,6 +141,14 @@ fn explain_failure(failure: CliFailure) -> FailureExplanation {
         "LOCAL_STATE_CONFLICT" => FailureExplanation {
             message: "The project is already initialized with different local settings.",
             hint: "Reuse the original workspace and listener values, or initialize a different directory. Runku will not overwrite existing local identity or data.",
+        },
+        "PLATFORM_LINK_CONFLICT" => FailureExplanation {
+            message: "The project root is already bound to a different Product scope or Management origin.",
+            hint: "Use the original server and scope or select a different empty project directory. Runku will not replace an existing remote binding.",
+        },
+        "PLATFORM_LINK_STATE_INVALID" | "PLATFORM_LINK_WRITE_FAILED" => FailureExplanation {
+            message: "The authenticated Product link could not be validated or persisted safely.",
+            hint: "Preserve the project directory, verify its private .runku state and permissions, then repeat the same runku link command after resolving the filesystem issue.",
         },
         "LOCAL_PROCESS_ALREADY_RUNNING" => FailureExplanation {
             message: "Another Runku development process already owns this project.",
@@ -813,6 +825,16 @@ struct StoredSession {
     authorization_revision: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagementLinkWire {
+    version: u8,
+    management_origin: String,
+    project_id: String,
+    environment_id: String,
+    linked_at_micros: String,
+}
+
 impl Drop for StoredSession {
     fn drop(&mut self) {
         self.access_token.zeroize();
@@ -838,7 +860,9 @@ impl From<OtlpExporterTelemetrySnapshot> for OtlpTelemetryWire {
 async fn execute(command: CliCommand) -> Result<(), CliFailure> {
     match command {
         CliCommand::Help => {
-            print!("{HELP}{LOG_ARCHIVE_HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{WORKSPACE_FREEZE_HELP}");
+            print!(
+                "{HELP}{LOG_ARCHIVE_HELP}{LOGIN_HELP}{MANAGEMENT_HELP}{LINK_HELP}{WORKSPACE_FREEZE_HELP}"
+            );
             Ok(())
         }
         CliCommand::Version => {
@@ -878,6 +902,12 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             );
             Ok(())
         }
+        CliCommand::Link {
+            root,
+            workspace,
+            listen,
+            scope,
+        } => remote_link(&root, workspace, listen, scope).await,
         CliCommand::Publish {
             remote,
             root,
@@ -3028,6 +3058,12 @@ impl ManagementClient {
         })
     }
 
+    fn load_for(root: &Path, scope: EnvironmentScope) -> Result<Self, CliFailure> {
+        let client = Self::load()?;
+        validate_management_link(root, scope, &client.endpoint)?;
+        Ok(client)
+    }
+
     async fn request(
         &mut self,
         method: reqwest::Method,
@@ -3189,7 +3225,7 @@ async fn remote_publish(
         code: "LOCAL_PACKAGE_FILE_INVALID",
         exit: EXIT_INVALID,
     })?;
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let path = product_path(state.scope(), "/workspace/publish");
     let url = client.url(&path)?;
     let response = client
@@ -3209,7 +3245,7 @@ async fn remote_release(
     against: Option<&runku_core::ChannelName>,
 ) -> Result<(), CliFailure> {
     let state = load_local(root).await.map_err(map_state)?.0;
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let path = product_path(state.scope(), &format!("/releases/{release}"));
     let body = serde_json::to_vec(&serde_json::json!({
         "against": against.map(ToString::to_string)
@@ -3238,7 +3274,7 @@ async fn remote_promote(
     expected: Option<Option<runku_core::ReleaseId>>,
 ) -> Result<(), CliFailure> {
     let state = load_local(root).await.map_err(map_state)?.0;
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let path = product_path(state.scope(), &format!("/channels/{channel}"));
     let expected =
         expected.map(|value| value.map_or_else(|| "empty".to_owned(), |id| id.to_string()));
@@ -3268,7 +3304,7 @@ async fn remote_rollback(
     target: runku_core::ReleaseId,
 ) -> Result<(), CliFailure> {
     let state = load_local(root).await.map_err(map_state)?.0;
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let path = product_path(state.scope(), &format!("/channels/{channel}/rollback"));
     let body = serde_json::to_vec(&serde_json::json!({
         "expected": expected.to_string(), "target": target.to_string()
@@ -3291,12 +3327,238 @@ async fn remote_rollback(
 
 async fn remote_status(root: &Path) -> Result<(), CliFailure> {
     let state = load_local(root).await.map_err(map_state)?.0;
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let url = client.url(&product_path(state.scope(), "/status"))?;
     let response = client
         .request(reqwest::Method::GET, url, None, None)
         .await?;
     emit_management_response(response).await
+}
+
+async fn remote_link(
+    root: &Path,
+    workspace: WorkspaceRef,
+    listen: std::net::SocketAddr,
+    scope: EnvironmentScope,
+) -> Result<(), CliFailure> {
+    preflight_link_state(root, &workspace, listen, scope).await?;
+    let mut client = ManagementClient::load()?;
+    validate_management_link(root, scope, &client.endpoint)?;
+    let url = client.url(&product_path(scope, "/status"))?;
+    let response = client
+        .request(reqwest::Method::GET, url, None, None)
+        .await?;
+    let bytes = bounded_response(response, 2 * 1024 * 1024).await?;
+    validate_link_status(&bytes)?;
+
+    let (state, paths) = initialize_local_with_scope(root, workspace, listen, Some(scope), now()?)
+        .await
+        .map_err(map_state)?;
+    let replayed =
+        persist_management_link(&paths.state, scope, &client.endpoint, state.created_at)?;
+    println!(
+        "{{\"environmentId\":\"{}\",\"managementOrigin\":\"{}\",\"projectId\":\"{}\",\"replayed\":{},\"status\":\"linked\",\"workspaceId\":\"{}\"}}",
+        state.environment_id,
+        client.endpoint.as_str(),
+        state.project_id,
+        replayed,
+        state.workspace_id,
+    );
+    Ok(())
+}
+
+async fn preflight_link_state(
+    root: &Path,
+    workspace: &WorkspaceRef,
+    listen: std::net::SocketAddr,
+    scope: EnvironmentScope,
+) -> Result<(), CliFailure> {
+    let state_path = root
+        .join(runku_local::LOCAL_STATE_DIRECTORY)
+        .join("local-state-v1.json");
+    match std::fs::symlink_metadata(state_path) {
+        Ok(_) => {
+            let state = load_local(root).await.map_err(map_state)?.0;
+            if state.scope() != scope
+                || state.workspace_ref != *workspace
+                || state.listen_address != listen
+            {
+                return Err(CliFailure {
+                    code: "PLATFORM_LINK_CONFLICT",
+                    exit: EXIT_CONFLICT,
+                });
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(CliFailure {
+                code: "PLATFORM_LINK_STATE_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_link_status(bytes: &[u8]) -> Result<(), CliFailure> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| CliFailure {
+        code: "PLATFORM_RESPONSE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    let valid = value
+        .get("servingRevision")
+        .and_then(serde_json::Value::as_u64)
+        .is_some()
+        && value
+            .get("releases")
+            .and_then(serde_json::Value::as_array)
+            .is_some()
+        && value
+            .get("channels")
+            .and_then(serde_json::Value::as_array)
+            .is_some();
+    if !valid {
+        return Err(CliFailure {
+            code: "PLATFORM_RESPONSE_INVALID",
+            exit: EXIT_CORRUPT,
+        });
+    }
+    Ok(())
+}
+
+fn validate_management_link(
+    root: &Path,
+    scope: EnvironmentScope,
+    endpoint: &DevelopmentEndpoint,
+) -> Result<bool, CliFailure> {
+    let path = root
+        .join(runku_local::LOCAL_STATE_DIRECTORY)
+        .join(MANAGEMENT_LINK_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => {
+            return Err(CliFailure {
+                code: "PLATFORM_LINK_STATE_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MANAGEMENT_LINK_MAX_BYTES
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_LINK_STATE_INVALID",
+            exit: EXIT_CORRUPT,
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|_| CliFailure {
+        code: "PLATFORM_LINK_STATE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    let link: ManagementLinkWire = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+        code: "PLATFORM_LINK_STATE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    let project = link.project_id.parse().map_err(|_| CliFailure {
+        code: "PLATFORM_LINK_STATE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    let environment = link.environment_id.parse().map_err(|_| CliFailure {
+        code: "PLATFORM_LINK_STATE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    let origin = link
+        .management_origin
+        .parse::<DevelopmentEndpoint>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_LINK_STATE_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    let linked_at = link
+        .linked_at_micros
+        .parse::<i64>()
+        .map_err(|_| CliFailure {
+            code: "PLATFORM_LINK_STATE_INVALID",
+            exit: EXIT_CORRUPT,
+        })?;
+    if link.version != 1
+        || linked_at < 0
+        || linked_at.to_string() != link.linked_at_micros
+        || EnvironmentScope::new(project, environment) != scope
+        || origin.as_str() != endpoint.as_str()
+    {
+        return Err(CliFailure {
+            code: "PLATFORM_LINK_CONFLICT",
+            exit: EXIT_CONFLICT,
+        });
+    }
+    Ok(true)
+}
+
+fn persist_management_link(
+    state_directory: &Path,
+    scope: EnvironmentScope,
+    endpoint: &DevelopmentEndpoint,
+    linked_at: TimestampMicros,
+) -> Result<bool, CliFailure> {
+    let root = state_directory.parent().ok_or(CliFailure {
+        code: "PLATFORM_LINK_STATE_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    if validate_management_link(root, scope, endpoint)? {
+        return Ok(true);
+    }
+    let link = ManagementLinkWire {
+        version: 1,
+        management_origin: endpoint.to_string(),
+        project_id: scope.project_id().to_string(),
+        environment_id: scope.environment_id().to_string(),
+        linked_at_micros: linked_at.get().to_string(),
+    };
+    let bytes = serde_json::to_vec(&link).map_err(|_| CliFailure {
+        code: "PLATFORM_LINK_WRITE_FAILED",
+        exit: EXIT_INTERNAL,
+    })?;
+    let target = state_directory.join(MANAGEMENT_LINK_FILE);
+    let temporary =
+        state_directory.join(format!(".management-link-{}.tmp", OperationId::generate()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).map_err(|_| CliFailure {
+        code: "PLATFORM_LINK_WRITE_FAILED",
+        exit: EXIT_UNAVAILABLE,
+    })?;
+    let write = file
+        .write_all(&bytes)
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if write.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(CliFailure {
+            code: "PLATFORM_LINK_WRITE_FAILED",
+            exit: EXIT_UNAVAILABLE,
+        });
+    }
+    let linked = std::fs::hard_link(&temporary, &target);
+    let _ = std::fs::remove_file(&temporary);
+    match linked {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            validate_management_link(root, scope, endpoint).map(|_| true)
+        }
+        Err(_) => Err(CliFailure {
+            code: "PLATFORM_LINK_WRITE_FAILED",
+            exit: EXIT_UNAVAILABLE,
+        }),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3308,7 +3570,7 @@ async fn remote_logs(root: &Path, query: &LogQuery, follow: bool) -> Result<(), 
             exit: EXIT_INVALID,
         });
     }
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let suffix = if follow { "/logs/follow" } else { "/logs" };
     let mut url = client.url(&product_path(state.scope(), suffix))?;
     {
@@ -3417,7 +3679,7 @@ fn product_path(scope: runku_core::EnvironmentScope, suffix: &str) -> String {
 
 async fn remote_log_archive_status(root: &Path) -> Result<(), CliFailure> {
     let state = load_local(root).await.map_err(map_state)?.0;
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let url = client.url(&product_path(state.scope(), "/logs/archive-status"))?;
     let response = client
         .request(reqwest::Method::GET, url, None, None)
@@ -3433,7 +3695,7 @@ async fn remote_log_prune(
     environment: Option<EnvironmentId>,
 ) -> Result<(), CliFailure> {
     let state = load_local(root).await.map_err(map_state)?.0;
-    let mut client = ManagementClient::load()?;
+    let mut client = ManagementClient::load_for(root, state.scope())?;
     let url = client.url(&product_path(state.scope(), "/logs/prune"))?;
     let body = serde_json::to_vec(&serde_json::json!({
         "beforeMicros": before.get(),

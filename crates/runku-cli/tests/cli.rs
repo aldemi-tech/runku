@@ -322,6 +322,153 @@ async fn explicit_product_scope_is_exact_idempotent_and_conflict_safe() -> Resul
 }
 
 #[tokio::test]
+async fn remote_link_requires_authorized_status_before_creating_local_state()
+-> Result<(), Box<dyn Error>> {
+    let project_id = "prj_00000000000000000000000001";
+    let environment_id = "env_00000000000000000000000002";
+    let expected_path = format!("/v1/projects/{project_id}/environments/{environment_id}/status");
+
+    let denied_root = tempdir()?;
+    let denied_config = tempdir()?;
+    let denied_endpoint = start_management_response(
+        &expected_path,
+        "403 Forbidden",
+        r#"{"code":"CLOUD_ACCESS_DENIED"}"#,
+    )?;
+    write_test_session(denied_config.path(), &denied_endpoint)?;
+    let denied = Command::new(env!("CARGO_BIN_EXE_runku"))
+        .args([
+            "link",
+            "--root",
+            denied_root.path().to_str().ok_or("non-Unicode test path")?,
+            "--listen",
+            "127.0.0.1:0",
+            "--project-id",
+            project_id,
+            "--environment-id",
+            environment_id,
+        ])
+        .env("RUNKU_CONFIG_HOME", denied_config.path())
+        .output()?;
+    assert_eq!(denied.status.code(), Some(8));
+    failure_stderr(&denied, "PLATFORM_ACCESS_DENIED")?;
+    assert!(!denied_root.path().join(".runku").exists());
+
+    let linked_root = tempdir()?;
+    let linked_config = tempdir()?;
+    let linked_endpoint = start_management_response(
+        &expected_path,
+        "200 OK",
+        r#"{"servingRevision":0,"defaultChannel":null,"releases":[],"channels":[]}"#,
+    )?;
+    write_test_session(linked_config.path(), &linked_endpoint)?;
+    let linked = Command::new(env!("CARGO_BIN_EXE_runku"))
+        .args([
+            "link",
+            "--root",
+            linked_root.path().to_str().ok_or("non-Unicode test path")?,
+            "--listen",
+            "127.0.0.1:0",
+            "--project-id",
+            project_id,
+            "--environment-id",
+            environment_id,
+        ])
+        .env("RUNKU_CONFIG_HOME", linked_config.path())
+        .output()?;
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let output: serde_json::Value = serde_json::from_slice(&linked.stdout)?;
+    assert_eq!(output["status"], "linked");
+    assert_eq!(output["projectId"], project_id);
+    assert_eq!(output["environmentId"], environment_id);
+    assert_eq!(output["managementOrigin"], linked_endpoint);
+    let state = load_local(linked_root.path()).await?.0;
+    assert_eq!(state.project_id.to_string(), project_id);
+    assert_eq!(state.environment_id.to_string(), environment_id);
+    let descriptor =
+        std::fs::read_to_string(linked_root.path().join(".runku/management-link-v1.json"))?;
+    assert!(!descriptor.contains("rk_at_v1_") && !descriptor.contains("rk_rt_v1_"));
+
+    write_test_session(linked_config.path(), "http://127.0.0.1:9")?;
+    let substituted = Command::new(env!("CARGO_BIN_EXE_runku"))
+        .args([
+            "status",
+            "--remote",
+            "--root",
+            linked_root.path().to_str().ok_or("non-Unicode test path")?,
+        ])
+        .env("RUNKU_CONFIG_HOME", linked_config.path())
+        .output()?;
+    assert_eq!(substituted.status.code(), Some(4));
+    failure_stderr(&substituted, "PLATFORM_LINK_CONFLICT")?;
+    Ok(())
+}
+
+fn start_management_response(
+    expected_path: &str,
+    status: &'static str,
+    body: &'static str,
+) -> Result<String, Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let expected = expected_path.to_owned();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&request);
+        assert!(head.starts_with(&format!("GET {expected} HTTP/1.1\r\n")));
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer rk_at_v1_")
+        );
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    });
+    Ok(endpoint)
+}
+
+fn write_test_session(directory: &Path, endpoint: &str) -> Result<(), Box<dyn Error>> {
+    let session = serde_json::json!({
+        "version": 2,
+        "authenticationServer": endpoint,
+        "server": endpoint,
+        "accessToken": "rk_at_v1_00000000000000000000000001.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "refreshToken": "rk_rt_v1_00000000000000000000000001.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "operatorId": "opr_00000000000000000000000001",
+        "sessionId": "ops_00000000000000000000000001",
+        "authorizationRevision": 1,
+    });
+    std::fs::write(
+        directory.join("credentials-v1.json"),
+        serde_json::to_vec(&session)?,
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn executable_lifecycle_is_strict_idempotent_and_graceful() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let root = directory.path().to_str().ok_or("non-Unicode test path")?;

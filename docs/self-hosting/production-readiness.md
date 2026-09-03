@@ -8,7 +8,7 @@ conformance assets are evidence inputs, not substitutes for a released package.
 
 ## Compact Docker support decision
 
-Version 0.4.0 supports a forward upgrade from the 0.3.0 compact-installation floor with this exact
+Version 0.4.1 supports a forward upgrade from the 0.3.0 compact-installation floor with this exact
 boundary:
 
 | Area | Included |

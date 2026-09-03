@@ -1,6 +1,6 @@
 {
   "name": "@runku/cli-win32-x64-msvc",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Native Runku CLI for Windows x86_64",
   "license": "Apache-2.0",
   "repository": {

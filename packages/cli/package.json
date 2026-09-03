@@ -1,6 +1,6 @@
 {
   "name": "@runku/cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Cross-platform installer and launcher for the Runku CLI",
   "type": "module",
   "license": "Apache-2.0",
@@ -38,12 +38,12 @@
     "check": "npm run typecheck && npm test"
   },
   "optionalDependencies": {
-    "@runku/cli-darwin-arm64": "0.4.0",
-    "@runku/cli-darwin-x64": "0.4.0",
-    "@runku/cli-linux-arm64-gnu": "0.4.0",
-    "@runku/cli-linux-x64-gnu": "0.4.0",
-    "@runku/cli-win32-arm64-msvc": "0.4.0",
-    "@runku/cli-win32-x64-msvc": "0.4.0"
+    "@runku/cli-darwin-arm64": "0.4.1",
+    "@runku/cli-darwin-x64": "0.4.1",
+    "@runku/cli-linux-arm64-gnu": "0.4.1",
+    "@runku/cli-linux-x64-gnu": "0.4.1",
+    "@runku/cli-win32-arm64-msvc": "0.4.1",
+    "@runku/cli-win32-x64-msvc": "0.4.1"
   },
   "publishConfig": {
     "access": "public",

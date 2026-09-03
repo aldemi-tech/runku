@@ -21,7 +21,7 @@ use runku_platform_identity::DeviceName;
 use runku_value::TimestampMicros;
 
 /// Stable base command-line help.
-pub const HELP: &str = "runku 0.4.0\n\nUSAGE:\n  runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT] [--project-id prj_* --environment-id env_*]\n  runku build [--root PATH] [--release-id rel_* --build-id bld_* --created-at-micros I64]\n  runku publish [--root PATH] --manifest FILE --artifact FILE [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]\n  runku release [--root PATH] --release rel_* [--against CHANNEL]\n  runku promote [--root PATH] --channel CHANNEL --release rel_* [--expected empty|rel_*]\n  runku rollback [--root PATH] --channel CHANNEL --expected rel_* --to rel_*\n  runku status [--root PATH]\n  runku dev [--root PATH] [--origin http(s)://HOST[:PORT]]... [--prebuilt] [--auth-config RELATIVE] [--application-env RELATIVE] [--public-env-prefix PREFIX] [--prepare] [--replace-remote-credentials]\n  runku doctor [--root PATH]\n  runku logs [--root PATH] [--after logc_N] [--limit 1..1000] [--stream platform|function] [--level debug|info|warn|error] [--function fnc_*] [--request req_*] [--invocation inv_*] [--client app_*] [--credential crd_*] [--release rel_*] [--follow]\n  runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  runku logs export-otlp [--root PATH] --config RELATIVE [--once]\n  runku client create [--root PATH] --name NAME --kind public|confidential --scope SCOPE... [--client-id app_*]\n  runku client list [--root PATH]\n  runku key create [--root PATH] --client app_* --label LABEL --scope SCOPE... [--key-id crd_*] [--expires-at-micros I64]\n  runku key list [--root PATH] --client app_*\n  runku key reveal [--root PATH] --client app_* --key crd_*\n  runku key rotate [--root PATH] --client app_* --key crd_* --label LABEL [--new-key-id crd_*] [--expires-at-micros I64]\n  runku key revoke [--root PATH] --key crd_*\n  runku key delete [--root PATH] --key crd_*\n  runku workspace key create [--root PATH] --actor ACTOR --label LABEL [--key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key list [--root PATH]\n  runku workspace key rotate [--root PATH] --key dvk_* --label LABEL [--new-key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key revoke [--root PATH] --key dvk_*\n  runku workspace key delete [--root PATH] --key dvk_*\n  runku workspace sync [--root PATH] --url ORIGIN --workspace REF --token-env RUNKU_NAME [--expected-head empty|drv_*] [--create]\n  runku --help\n  runku --version\n\nPROJECT ROOT:\n  --root PATH  Project directory; defaults to the current working directory.\n\nLOCAL DEVELOPMENT:\n  init defaults to workspace local and listener 127.0.0.1:3210.\n  dev initializes missing local state, reconciles local Application Credentials, builds, publishes, and watches runku/.\n  public dotenv aliases are detected for known frontend tools; the SDK itself is framework-agnostic.\n  RUNKU_SECRET_KEY always remains server-only and is never copied to a public alias.\n  --prebuilt serves an already-published package without reading application sources.\n";
+pub const HELP: &str = "runku 0.4.1\n\nUSAGE:\n  runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT] [--project-id prj_* --environment-id env_*]\n  runku build [--root PATH] [--release-id rel_* --build-id bld_* --created-at-micros I64]\n  runku publish [--root PATH] --manifest FILE --artifact FILE [--workspace REF] [--actor LABEL] [--expected-head empty|drv_*]\n  runku release [--root PATH] --release rel_* [--against CHANNEL]\n  runku promote [--root PATH] --channel CHANNEL --release rel_* [--expected empty|rel_*]\n  runku rollback [--root PATH] --channel CHANNEL --expected rel_* --to rel_*\n  runku status [--root PATH]\n  runku dev [--root PATH] [--origin http(s)://HOST[:PORT]]... [--prebuilt] [--auth-config RELATIVE] [--application-env RELATIVE] [--public-env-prefix PREFIX] [--prepare] [--replace-remote-credentials]\n  runku doctor [--root PATH]\n  runku logs [--root PATH] [--after logc_N] [--limit 1..1000] [--stream platform|function] [--level debug|info|warn|error] [--function fnc_*] [--request req_*] [--invocation inv_*] [--client app_*] [--credential crd_*] [--release rel_*] [--follow]\n  runku logs prune [--root PATH] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  runku logs export-otlp [--root PATH] --config RELATIVE [--once]\n  runku client create [--root PATH] --name NAME --kind public|confidential --scope SCOPE... [--client-id app_*]\n  runku client list [--root PATH]\n  runku key create [--root PATH] --client app_* --label LABEL --scope SCOPE... [--key-id crd_*] [--expires-at-micros I64]\n  runku key list [--root PATH] --client app_*\n  runku key reveal [--root PATH] --client app_* --key crd_*\n  runku key rotate [--root PATH] --client app_* --key crd_* --label LABEL [--new-key-id crd_*] [--expires-at-micros I64]\n  runku key revoke [--root PATH] --key crd_*\n  runku key delete [--root PATH] --key crd_*\n  runku workspace key create [--root PATH] --actor ACTOR --label LABEL [--key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key list [--root PATH]\n  runku workspace key rotate [--root PATH] --key dvk_* --label LABEL [--new-key-id dvk_*] [--expires-at-micros I64]\n  runku workspace key revoke [--root PATH] --key dvk_*\n  runku workspace key delete [--root PATH] --key dvk_*\n  runku workspace sync [--root PATH] --url ORIGIN --workspace REF --token-env RUNKU_NAME [--expected-head empty|drv_*] [--create]\n  runku --help\n  runku --version\n\nPROJECT ROOT:\n  --root PATH  Project directory; defaults to the current working directory.\n\nLOCAL DEVELOPMENT:\n  init defaults to workspace local and listener 127.0.0.1:3210.\n  dev initializes missing local state, reconciles local Application Credentials, builds, publishes, and watches runku/.\n  public dotenv aliases are detected for known frontend tools; the SDK itself is framework-agnostic.\n  RUNKU_SECRET_KEY always remains server-only and is never copied to a public alias.\n  --prebuilt serves an already-published package without reading application sources.\n";
 
 /// Immutable archive administration help appended by the executable.
 pub const LOG_ARCHIVE_HELP: &str = "\nLOG ARCHIVE:\n  runku logs archive-status [--root PATH] [--remote]\n  runku logs prune [--root PATH] [--remote] --before-micros I64 [--maximum 1..10000] [--apply --environment env_*]\n  Archive status verifies contiguous Parquet manifests. Prune never passes the verified frontier.\n";
@@ -40,6 +40,9 @@ pub const LOGIN_HELP: &str = "\nREMOTE LOGIN:\n  runku login\n  runku login [--u
 
 /// Authenticated Management API lifecycle help appended by the executable.
 pub const MANAGEMENT_HELP: &str = "\nREMOTE MANAGEMENT:\n  Add --remote to publish, release, promote, rollback, status, or logs.\n  These commands use the current runku login session and the Project/Environment in --root.\n  Remote publish requires --expected-head empty|drv_*; logs --remote --follow uses one streaming connection.\n";
+
+/// Authenticated local-to-Management scope binding help appended by the executable.
+pub const LINK_HELP: &str = "\nREMOTE PROJECT LINK:\n  runku link [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT] --project-id prj_* --environment-id env_*\n  Link verifies the current operator against the exact Management scope before creating local state.\n";
 
 /// Strict parsed CLI command; the project root defaults to the current directory and Production is never implicit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,6 +76,17 @@ pub enum CliCommand {
         listen: SocketAddr,
         /// Optional externally allocated exact Product scope; both IDs are supplied together.
         scope: Option<EnvironmentScope>,
+    },
+    /// Verify remote authority before binding one local root to a Product scope.
+    Link {
+        /// Existing project directory.
+        root: PathBuf,
+        /// Durable default Workspace.
+        workspace: WorkspaceRef,
+        /// Explicit loopback listener persisted in local state.
+        listen: SocketAddr,
+        /// Exact remotely authorized Product scope.
+        scope: EnvironmentScope,
     },
     /// Compile strict TypeScript/JavaScript sources into one immutable canonical package.
     Build {
@@ -443,6 +457,7 @@ where
     }
     match command {
         "init" => parse_init(remaining),
+        "link" => parse_link(remaining),
         "login" => parse_login(remaining),
         "build" => parse_build(remaining),
         "publish" => parse_publish(remaining),
@@ -616,6 +631,35 @@ fn parse_init(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
     };
     flags.finish()?;
     Ok(CliCommand::Init {
+        root,
+        workspace,
+        listen,
+        scope,
+    })
+}
+
+fn parse_link(args: Vec<OsString>) -> Result<CliCommand, CliUsageError> {
+    let mut flags = Flags::new(args)?;
+    let root = flags.project_root()?;
+    let workspace = flags
+        .optional_string("--workspace")?
+        .unwrap_or_else(|| DEFAULT_LOCAL_WORKSPACE.to_owned())
+        .parse()
+        .map_err(|_| CliUsageError)?;
+    let listen = flags
+        .optional_string("--listen")?
+        .unwrap_or_else(|| DEFAULT_LOCAL_LISTENER.to_owned())
+        .parse::<SocketAddr>()
+        .map_err(|_| CliUsageError)?;
+    if !listen.ip().is_loopback() {
+        return Err(CliUsageError);
+    }
+    let scope = EnvironmentScope::new(
+        parse_required(&mut flags, "--project-id")?,
+        parse_required(&mut flags, "--environment-id")?,
+    );
+    flags.finish()?;
+    Ok(CliCommand::Link {
         root,
         workspace,
         listen,
@@ -1240,6 +1284,16 @@ mod tests {
             Ok(CliCommand::Status { remote: true, .. })
         ));
         assert!(matches!(
+            parse_args(args(&[
+                "link",
+                "--project-id",
+                "prj_00000000000000000000000001",
+                "--environment-id",
+                "env_00000000000000000000000002",
+            ])),
+            Ok(CliCommand::Link { root, .. }) if root == current
+        ));
+        assert!(matches!(
             parse_args(args(&["doctor"])),
             Ok(CliCommand::Doctor { root }) if root == current
         ));
@@ -1385,6 +1439,22 @@ mod tests {
             ]))
             .is_err()
         );
+        assert!(matches!(
+            parse_args(args(&[
+                "link",
+                "--root",
+                "/tmp/project",
+                "--workspace",
+                "team/default",
+                "--listen",
+                "127.0.0.1:3210",
+                "--project-id",
+                "prj_00000000000000000000000001",
+                "--environment-id",
+                "env_00000000000000000000000002",
+            ])),
+            Ok(CliCommand::Link { .. })
+        ));
         assert!(matches!(
             parse_args(args(&[
                 "publish",
@@ -1840,6 +1910,16 @@ mod tests {
                 "/tmp/x",
                 "--workspace",
                 "default",
+                "--listen",
+                "0.0.0.0:3210",
+            ]),
+            args(&["link", "--project-id", "prj_00000000000000000000000001"]),
+            args(&[
+                "link",
+                "--project-id",
+                "prj_00000000000000000000000001",
+                "--environment-id",
+                "env_00000000000000000000000002",
                 "--listen",
                 "0.0.0.0:3210",
             ]),
