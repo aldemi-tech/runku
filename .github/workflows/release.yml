@@ -133,6 +133,7 @@ jobs:
             duckdb_archive: libduckdb-windows-amd64.zip
             duckdb_sha256: 8375eb1fcf2212e8a0817950354815d4dde9dd383c2d9fa7b8975b71e278c1bd
     runs-on: ${{ matrix.runner }}
+    name: cli-binaries (${{ matrix.target }})
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,7 +147,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Verify native Rust host
         shell: pwsh
         run: |
@@ -231,6 +234,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
+    name: server-binaries (${{ matrix.target }})
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -240,7 +244,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-server-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: release-server-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-server-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Verify native Rust host
         run: |
           host_triple="$(rustc -vV | sed -n 's/^host: //p')"
