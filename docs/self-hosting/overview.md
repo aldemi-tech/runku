@@ -26,6 +26,12 @@ mounted secret files, probes, bounded resources, a TLS-proxy boundary, offline b
 empty-install restore, upgrade preflight, guarded removal, and optional browser/HA-log overlays. See
 [Authenticated remote lifecycle](../operations/remote-lifecycle.md) for the exact compact profile.
 
+Provider automation may initialize a new persistent Product root with an exact previously allocated
+scope through `runku init --project-id prj_* --environment-id env_*`. Both IDs are required
+together. Repeating the same command is idempotent; a different scope conflicts without replacing
+Product state. This lets an external fleet controller reconcile durable identity without editing
+private state files or linking engine crates.
+
 ## Product topology
 
 ```text

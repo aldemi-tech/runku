@@ -283,6 +283,45 @@ fn dev_refuses_a_symlinked_application_environment() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
+async fn explicit_product_scope_is_exact_idempotent_and_conflict_safe() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempdir()?;
+    let root = directory.path().to_str().ok_or("non-Unicode test path")?;
+    let project_id = "prj_00000000000000000000000001";
+    let environment_id = "env_00000000000000000000000002";
+    let init = |environment_id: &str| {
+        run(&[
+            "init",
+            "--root",
+            root,
+            "--listen",
+            "127.0.0.1:0",
+            "--project-id",
+            project_id,
+            "--environment-id",
+            environment_id,
+        ])
+    };
+
+    let first = init(environment_id)?;
+    assert!(first.status.success());
+    let replay = init(environment_id)?;
+    assert!(replay.status.success());
+    assert_eq!(replay.stdout, first.stdout);
+    let initialized: serde_json::Value = serde_json::from_slice(&first.stdout)?;
+    assert_eq!(initialized["projectId"], project_id);
+    assert_eq!(initialized["environmentId"], environment_id);
+
+    let conflict = init("env_00000000000000000000000003")?;
+    assert_eq!(conflict.status.code(), Some(4));
+    failure_stderr(&conflict, "LOCAL_STATE_CONFLICT")?;
+    let durable = load_local(directory.path()).await?.0;
+    assert_eq!(durable.project_id.to_string(), project_id);
+    assert_eq!(durable.environment_id.to_string(), environment_id);
+    Ok(())
+}
+
+#[tokio::test]
 async fn executable_lifecycle_is_strict_idempotent_and_graceful() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let root = directory.path().to_str().ok_or("non-Unicode test path")?;

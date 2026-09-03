@@ -243,14 +243,36 @@ pub async fn initialize_local(
     listen_address: SocketAddr,
     now: TimestampMicros,
 ) -> Result<(LocalProjectState, LocalPaths), LocalStateError> {
+    initialize_local_with_scope(root, workspace_ref, listen_address, None, now).await
+}
+
+/// Initializes or repairs a local layout with an optional operator-selected Product scope.
+///
+/// This is the public provisioning boundary for an external operator that already owns the
+/// Project and Environment identifiers. Exact repetition with the same scope is idempotent. Once
+/// state exists, a different requested scope conflicts without replacing any durable state.
+/// Passing `None` preserves the ordinary local-development behavior of generating fresh IDs.
+///
+/// # Errors
+///
+/// Rejects invalid paths/config, a divergent requested scope, corruption, or repository failures.
+pub async fn initialize_local_with_scope(
+    root: &Path,
+    workspace_ref: WorkspaceRef,
+    listen_address: SocketAddr,
+    requested_scope: Option<EnvironmentScope>,
+    now: TimestampMicros,
+) -> Result<(LocalProjectState, LocalPaths), LocalStateError> {
     if !listen_address.ip().is_loopback() || now.get() < 0 {
         return Err(LocalStateError::InvalidState);
     }
     let paths = LocalPaths::resolve(root, true).await?;
     let _lock = acquire_lock(&paths).await?;
+    let proposed_scope = requested_scope
+        .unwrap_or_else(|| EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate()));
     let proposed = LocalProjectState {
-        project_id: ProjectId::generate(),
-        environment_id: EnvironmentId::generate(),
+        project_id: proposed_scope.project_id(),
+        environment_id: proposed_scope.environment_id(),
         workspace_id: WorkspaceId::generate(),
         workspace_ref: workspace_ref.clone(),
         listen_address,
@@ -260,7 +282,9 @@ pub async fn initialize_local(
         Ok(true) => proposed,
         Ok(false) => {
             let existing = read_state(&paths).await?;
-            if existing.workspace_ref != workspace_ref || existing.listen_address != listen_address
+            if existing.workspace_ref != workspace_ref
+                || existing.listen_address != listen_address
+                || requested_scope.is_some_and(|scope| existing.scope() != scope)
             {
                 return Err(LocalStateError::Conflict);
             }
@@ -707,7 +731,7 @@ fn map_development(error: DevelopmentError) -> LocalStateError {
 mod tests {
     use std::{net::SocketAddr, str::FromStr};
 
-    use runku_core::WorkspaceRef;
+    use runku_core::{EnvironmentId, EnvironmentScope, ProjectId, WorkspaceRef};
     use runku_development::{
         DevelopmentContext, DevelopmentRepository, DevelopmentRepositoryConfig,
         SqlDevelopmentRepository,
@@ -715,7 +739,10 @@ mod tests {
     use runku_value::TimestampMicros;
     use tempfile::tempdir;
 
-    use super::{LOCAL_STATE_DIRECTORY, LocalStateError, initialize_local, load_local, sqlite_url};
+    use super::{
+        LOCAL_STATE_DIRECTORY, LocalStateError, initialize_local, initialize_local_with_scope,
+        load_local, sqlite_url,
+    };
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -806,6 +833,57 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(".state-"))
             .count();
         assert_eq!(temporary_count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn requested_scope_is_idempotent_and_divergence_conflicts() -> TestResult {
+        let directory = tempdir()?;
+        let requested = EnvironmentScope::new(
+            ProjectId::from_str("prj_00000000000000000000000001")?,
+            EnvironmentId::from_str("env_00000000000000000000000002")?,
+        );
+        let different = EnvironmentScope::new(
+            requested.project_id(),
+            EnvironmentId::from_str("env_00000000000000000000000003")?,
+        );
+        let workspace = workspace("provisioned")?;
+        let now = TimestampMicros::new(1_800_000_000_000_010);
+
+        let created = initialize_local_with_scope(
+            directory.path(),
+            workspace.clone(),
+            address(3217),
+            Some(requested),
+            now,
+        )
+        .await?
+        .0;
+        let replayed = initialize_local_with_scope(
+            directory.path(),
+            workspace.clone(),
+            address(3217),
+            Some(requested),
+            now,
+        )
+        .await?
+        .0;
+
+        assert_eq!(created.scope(), requested);
+        assert_eq!(replayed, created);
+        assert_eq!(
+            initialize_local_with_scope(
+                directory.path(),
+                workspace,
+                address(3217),
+                Some(different),
+                now,
+            )
+            .await
+            .map(|_| ()),
+            Err(LocalStateError::Conflict)
+        );
+        assert_eq!(load_local(directory.path()).await?.0, created);
         Ok(())
     }
 

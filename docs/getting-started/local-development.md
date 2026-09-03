@@ -112,6 +112,12 @@ runku init --workspace integration --listen 127.0.0.1:3310
 Initialization is idempotent for identical settings and conflicts for divergent settings. Do not
 manually edit initialized identity/listener state.
 
+External Self-Hosted provisioning automation may bind a new root to an already allocated Product
+scope by passing `--project-id prj_* --environment-id env_*` together. This is a provisioning
+contract, not a normal developer setting: repeat the exact authorized IDs after an uncertain
+response, and treat `LOCAL_STATE_CONFLICT` as evidence to reconcile instead of replacing `.runku/`.
+Omitting both flags retains generated local IDs.
+
 ## What starts
 
 The local process opens only a local-development Environment and composes:

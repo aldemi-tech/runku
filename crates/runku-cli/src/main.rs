@@ -35,8 +35,8 @@ use runku_local::{
     LocalIdentityError, LocalIdentityManager, LocalLogError, LocalLogManager, LocalOtlpError,
     LocalOtlpExporter, LocalProcess, LocalProcessConfig, LocalProcessError, LocalPublishError,
     LocalReleaseError, LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatusReport,
-    LocalStateError, acquire_local_process_lease, doctor_local, initialize_local, load_local,
-    publish_local, publish_local_if_head,
+    LocalStateError, acquire_local_process_lease, doctor_local, initialize_local,
+    initialize_local_with_scope, load_local, publish_local, publish_local_if_head,
 };
 use runku_observability::{LogQuery, SequencedOperationalEvent};
 use runku_otel::{OtlpExporterMode, OtlpExporterTelemetrySnapshot};
@@ -867,8 +867,9 @@ async fn execute(command: CliCommand) -> Result<(), CliFailure> {
             root,
             workspace,
             listen,
+            scope,
         } => {
-            let (state, _) = initialize_local(&root, workspace, listen, now()?)
+            let (state, _) = initialize_local_with_scope(&root, workspace, listen, scope, now()?)
                 .await
                 .map_err(map_state)?;
             println!(

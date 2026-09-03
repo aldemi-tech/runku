@@ -38,6 +38,11 @@ remain separate distribution gates.
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
 | Platform Identity | Management HTTP v1, native OIDC configuration, authenticated Product lifecycle/log stream, schema v1; no mixed-version or downgrade window |
 
+The source line adds optional `runku init --project-id/--environment-id` flags as a compatible CLI
+extension. Existing invocations keep generated IDs. Provisioners that use the extension must require
+both IDs and must not expect a 0.3.0 binary to recognize them; adoption begins only with the first
+tagged release that includes this contract.
+
 ## Change rules
 
 Additive fields require old/new reader tests and safe defaults. Auth, retry, ordering, limits,

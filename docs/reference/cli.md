@@ -138,13 +138,22 @@ Environment values in the selected application dotenv; omit it to fail closed.
 ### `runku init`
 
 ```sh
-runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT]
+runku init [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT] \
+  [--project-id prj_* --environment-id env_*]
 ```
 
 Use only before first `dev` when changing defaults. Initialization is idempotent for identical
 settings and conflicts for divergent settings. The listener must be loopback; port `0` is accepted
 only when selected explicitly. The project root must be safe, existing, regular, non-symlinked, and
 must not be filesystem root or the user's home.
+
+An external Self-Hosted provisioner that already owns the Product scope may supply
+`--project-id` and `--environment-id` together. Both are required or both must be omitted. Exact
+repetition recovers safely after a lost response and returns the existing IDs; a different requested
+scope fails with `LOCAL_STATE_CONFLICT` without replacing state. IDs are not credentials, but the
+provisioner must still derive them from its authorized durable control record rather than accepting
+unverified request input. Ordinary local development omits both flags and continues to generate a
+fresh scope.
 
 ### `runku doctor`
 
