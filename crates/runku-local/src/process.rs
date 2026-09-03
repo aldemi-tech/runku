@@ -64,7 +64,7 @@ use crate::{
 };
 
 /// Validated bounded local daemon policy.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LocalProcessConfig {
     /// Exact browser origins allowed to use HTTP/Realtime; non-browser requests need no Origin.
     pub allowed_origins: BTreeSet<CorsOrigin>,
@@ -82,6 +82,11 @@ pub struct LocalProcessConfig {
     pub log_journal: Option<NatsLogJournal>,
     /// Optional externally configured object backend; absent uses the local dedicated directory.
     pub file_object_store: Option<FileObjectStore>,
+    /// Optional externally composed logical Product store; absent uses the local SQLite database.
+    ///
+    /// Networked server profiles use this boundary to inject a scope-bound PostgreSQL adapter
+    /// without changing Function or lifecycle semantics.
+    pub data_store: Option<Arc<dyn LogicalStore>>,
     /// Environment, per-file, Action-memory, concurrency, and grant limits.
     pub file_storage_limits: FileStorageLimits,
     /// Optional at-least-once sink for authoritative application-file usage events.
@@ -103,11 +108,39 @@ impl Default for LocalProcessConfig {
             log_archive: None,
             log_journal: None,
             file_object_store: None,
+            data_store: None,
             file_storage_limits: FileStorageLimits::DEFAULT,
             file_usage_sink: None,
             file_usage_interval: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(5),
         }
+    }
+}
+
+impl fmt::Debug for LocalProcessConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalProcessConfig")
+            .field("allowed_origins", &self.allowed_origins)
+            .field("auth_config", &self.auth_config)
+            .field("worker_interval", &self.worker_interval)
+            .field("catalog_refresh_interval", &self.catalog_refresh_interval)
+            .field("log_archive_interval", &self.log_archive_interval)
+            .field("log_archive", &self.log_archive)
+            .field("log_journal", &self.log_journal)
+            .field("file_object_store", &self.file_object_store)
+            .field(
+                "data_store_backend",
+                &self.data_store.as_ref().map(|store| store.backend()),
+            )
+            .field("file_storage_limits", &self.file_storage_limits)
+            .field(
+                "file_usage_sink",
+                &self.file_usage_sink.as_ref().map(|_| "configured"),
+            )
+            .field("file_usage_interval", &self.file_usage_interval)
+            .field("shutdown_grace", &self.shutdown_grace)
+            .finish()
     }
 }
 
@@ -238,6 +271,7 @@ pub struct LocalProcess {
     state: LocalProjectState,
     address: SocketAddr,
     service: Arc<ProductInvocationService>,
+    logical_store: Arc<dyn LogicalStore>,
     registry: SubscriptionRegistry,
     runtime: RuntimeSupervisor,
     ready: Arc<AtomicBool>,
@@ -406,11 +440,18 @@ impl LocalProcess {
                 .await
                 .map_err(|_| LocalProcessError::Composition)?,
         );
-        let store = Arc::new(
-            SqliteStore::open(&paths.data_database, SqliteStoreConfig::LOCAL)
-                .await
-                .map_err(|_| LocalProcessError::Composition)?,
-        );
+        let logical_store: Arc<dyn LogicalStore> = match config.data_store.clone() {
+            Some(store) => store,
+            None => Arc::new(
+                SqliteStore::open(&paths.data_database, SqliteStoreConfig::LOCAL)
+                    .await
+                    .map_err(|_| LocalProcessError::Composition)?,
+            ),
+        };
+        logical_store
+            .health()
+            .await
+            .map_err(|_| LocalProcessError::Composition)?;
         let file_objects = match config.file_object_store.clone() {
             Some(objects) => objects,
             None => FileObjectStore::filesystem(&paths.file_storage_objects)
@@ -501,7 +542,6 @@ impl LocalProcess {
             .await
             .map_err(|_| LocalProcessError::Composition)?;
 
-        let logical_store: Arc<dyn LogicalStore> = store;
         let runtime = RuntimeSupervisor::start(
             RuntimeLimits::builder(2, 128)
                 .build()
@@ -636,7 +676,7 @@ impl LocalProcess {
         let cron_boundary: Arc<dyn CronRepository> = cron;
         let materializer = CronMaterializer::new(
             cron_boundary,
-            logical_store,
+            Arc::clone(&logical_store),
             cron_context,
             WorkerId::generate(),
             CronMaterializerConfig::DEFAULT,
@@ -685,6 +725,7 @@ impl LocalProcess {
             state,
             address,
             service,
+            logical_store,
             registry,
             runtime,
             ready,
@@ -723,6 +764,15 @@ impl LocalProcess {
     #[must_use]
     pub fn service(&self) -> &Arc<ProductInvocationService> {
         &self.service
+    }
+
+    /// Performs a lightweight check against the selected authoritative Product data store.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable adapter failure when the configured store is unavailable or corrupt.
+    pub async fn data_health(&self) -> Result<(), runku_data::StoreError> {
+        self.logical_store.health().await
     }
 
     /// Process-local Realtime registry, exposed as bounded operational telemetry/state.
@@ -1130,18 +1180,22 @@ fn map_state(error: LocalStateError) -> LocalProcessError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr, path::Path, str::FromStr, time::Duration};
+    use std::{
+        collections::BTreeSet, net::SocketAddr, path::Path, str::FromStr, sync::Arc, time::Duration,
+    };
 
     use runku_build::{BuildMetadata, build_project};
     use runku_core::{
-        ApplicationClientId, BuildId, CodeTarget, CredentialId, FunctionId, ProjectId, ReleaseId,
-        WorkspaceRef,
+        ApplicationClientId, BuildId, CodeTarget, CredentialId, DocumentId, FunctionId,
+        OperationId, ProjectId, ReleaseId, TableId, WorkspaceRef,
     };
+    use runku_data::{LogicalStore, StoreError};
+    use runku_data_postgres::{PostgresStore, PostgresStoreConfig};
     use runku_development::DevelopmentActor;
     use runku_identity::{ApplicationScope, ClientKind};
     use runku_protocol::{
-        ActionCallV1, QueryCallV1, decode_error_v1, decode_success_v1, encode_action_call_v1,
-        encode_query_call_v1,
+        ActionCallV1, MutationCallV1, QueryCallV1, decode_error_v1, decode_success_v1,
+        encode_action_call_v1, encode_mutation_call_v1, encode_query_call_v1,
     };
     use runku_releases::{
         AuthPolicy, Capability, FunctionManifest, FunctionType, FunctionVisibility,
@@ -1150,6 +1204,7 @@ mod tests {
     };
     use runku_value::{CanonicalValue, TimestampMicros};
     use tempfile::tempdir;
+    use url::Url;
 
     use super::{LocalProcess, LocalProcessConfig, LocalProcessError, acquire_local_process_lease};
     use crate::{LocalIdentityManager, initialize_local, publish_local};
@@ -1197,6 +1252,93 @@ mod tests {
             artifact,
             release_id,
         })
+    }
+
+    fn mutation_package(
+        project_id: ProjectId,
+        table: TableId,
+        document: DocumentId,
+    ) -> Result<Package, Box<dyn std::error::Error>> {
+        let source = format!(
+            "export default async (ctx, value) => {{ await ctx.db.insert('{table}', '{document}', value); return value; }};"
+        );
+        let bundle = SafeEsmBundleV1::from_sources([source.as_str()])?;
+        let artifact = encode_safe_esm_bundle(&bundle)?;
+        let contract = Sha256Digest::of(b"postgres-product-process-test-contract");
+        let release_id = ReleaseId::generate();
+        let manifest = ReleaseManifestV1 {
+            release_id,
+            project_id,
+            build_id: BuildId::generate(),
+            created_at: TimestampMicros::new(1_800_000_000_000_100),
+            runtime_version: "platform-js-1".parse()?,
+            artifact: bundle.descriptor()?,
+            function_contract_hash: contract,
+            schema_contract_hash: contract,
+            index_contract_hash: contract,
+            functions: vec![FunctionManifest {
+                id: FunctionId::generate(),
+                name: "mutations.insert".parse()?,
+                function_type: FunctionType::Mutation,
+                visibility: FunctionVisibility::Public,
+                auth_policy: AuthPolicy::None,
+                runtime_class: RuntimeClass::SafeV8,
+                implementation_hash: Sha256Digest::of(source.as_bytes()),
+                arguments_contract_hash: contract,
+                result_contract_hash: contract,
+                capabilities: vec![Capability::DbRead, Capability::DbWrite],
+            }],
+            cron_definitions: vec![],
+        };
+        Ok(Package {
+            manifest: encode_release_manifest(&manifest)?,
+            artifact,
+            release_id,
+        })
+    }
+
+    async fn product_database(
+        base_url: &str,
+    ) -> Result<(String, String), Box<dyn std::error::Error>> {
+        use sqlx::{Connection as _, PgConnection};
+
+        let name = format!(
+            "runku_product_{}",
+            ulid::Ulid::generate().to_string().to_ascii_lowercase()
+        );
+        let mut admin_url = Url::parse(base_url)?;
+        admin_url.set_path("/postgres");
+        admin_url.set_query(None);
+        let mut connection = PgConnection::connect(admin_url.as_str()).await?;
+        let statement = format!("CREATE DATABASE \"{name}\"");
+        // The identifier is generated from a lowercase ULID and cannot contain SQL syntax.
+        sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
+            .execute(&mut connection)
+            .await?;
+        connection.close().await?;
+        let mut product_url = Url::parse(base_url)?;
+        product_url.set_path(&format!("/{name}"));
+        product_url.set_query(None);
+        Ok((name, product_url.to_string()))
+    }
+
+    async fn drop_product_database(
+        base_url: &str,
+        name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use sqlx::{Connection as _, PgConnection};
+
+        let mut admin_url = Url::parse(base_url)?;
+        admin_url.set_path("/postgres");
+        admin_url.set_query(None);
+        let mut connection = PgConnection::connect(admin_url.as_str()).await?;
+        let statement = format!("DROP DATABASE \"{name}\" WITH (FORCE)");
+        // The identifier is the exact value generated by `product_database` in this test.
+        sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
+            .execute(&mut connection)
+            .await?;
+        connection.close().await?;
+        Ok(())
     }
 
     fn test_config() -> LocalProcessConfig {
@@ -1319,6 +1461,174 @@ mod tests {
         assert_eq!(restarted.state(), &state);
         assert!(restarted.is_ready());
         restarted.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn process_uses_one_scope_bound_postgres_product_database() -> TestResult {
+        let Ok(base_url) = std::env::var("RUNKU_TEST_POSTGRES_URL") else {
+            return Ok(());
+        };
+        let (database_name, database_url) = product_database(&base_url).await?;
+        let result = Box::pin(async {
+            let directory = tempdir()?;
+            let workspace = WorkspaceRef::from_str("default")?;
+            let (state, _) = initialize_local(
+                directory.path(),
+                workspace.clone(),
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                TimestampMicros::new(1_800_000_000_000_000),
+            )
+            .await?;
+            let table = TableId::generate();
+            let document = DocumentId::generate();
+            let package = mutation_package(state.project_id, table, document)?;
+            publish_local(
+                directory.path(),
+                &workspace,
+                &DevelopmentActor::from_str("postgres-product-test")?,
+                &package.manifest,
+                &package.artifact,
+            )
+            .await?;
+            let identities = LocalIdentityManager::open(directory.path()).await?;
+            let scopes = BTreeSet::from(["functions:invoke".parse::<ApplicationScope>()?]);
+            let client_id = ApplicationClientId::generate();
+            identities
+                .create_client(
+                    client_id,
+                    "postgres-product-client".parse()?,
+                    ClientKind::Public,
+                    scopes.clone(),
+                    TimestampMicros::new(1_800_000_000_000_101),
+                )
+                .await?;
+            let application_key = identities
+                .create_credential(
+                    CredentialId::generate(),
+                    client_id,
+                    "postgres-product-key".parse()?,
+                    scopes,
+                    TimestampMicros::new(1_800_000_000_000_102),
+                    None,
+                )
+                .await?;
+            let store = Arc::new(
+                PostgresStore::connect_scoped(
+                    &database_url,
+                    PostgresStoreConfig::TEST,
+                    state.scope(),
+                )
+                .await?,
+            );
+            let mut config = test_config();
+            config.data_store = Some(Arc::clone(&store) as Arc<dyn LogicalStore>);
+            let process = LocalProcess::start(directory.path(), config).await?;
+            let response = reqwest::Client::new()
+                .post(format!("http://{}/v1/mutation", process.address()))
+                .header("content-type", "application/json")
+                .header("x-runku-key", application_key.key.expose())
+                .body(encode_mutation_call_v1(&MutationCallV1 {
+                    target: CodeTarget::Workspace(workspace),
+                    function: "mutations.insert".parse()?,
+                    arguments: CanonicalValue::String("stored-in-postgres".to_owned()),
+                    operation_id: OperationId::generate(),
+                })?)
+                .send()
+                .await?;
+            let status = response.status();
+            let bytes = response.bytes().await?;
+            if status != reqwest::StatusCode::OK {
+                return Err(format!("mutation failed: {:?}", decode_error_v1(&bytes)?).into());
+            }
+            assert_eq!(
+                decode_success_v1(&bytes)?.result,
+                CanonicalValue::String("stored-in-postgres".to_owned())
+            );
+            let mut snapshot = store.begin_read(state.scope()).await?;
+            assert_eq!(
+                snapshot
+                    .get_document(table, document)
+                    .await?
+                    .ok_or(StoreError::NotFound)?
+                    .value,
+                CanonicalValue::String("stored-in-postgres".to_owned())
+            );
+            snapshot.close().await?;
+            let other_scope = runku_core::EnvironmentScope::new(
+                state.project_id,
+                runku_core::EnvironmentId::generate(),
+            );
+            assert!(matches!(
+                store.begin_read(other_scope).await,
+                Err(StoreError::NotFound)
+            ));
+            process.shutdown().await;
+            store.close().await;
+
+            let reopened = PostgresStore::connect_scoped(
+                &database_url,
+                PostgresStoreConfig::TEST,
+                state.scope(),
+            )
+            .await?;
+            reopened.health().await?;
+            reopened.close().await;
+            assert!(matches!(
+                PostgresStore::connect_scoped(
+                    &database_url,
+                    PostgresStoreConfig::TEST,
+                    other_scope
+                )
+                .await,
+                Err(StoreError::Corruption)
+            ));
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await;
+        drop_product_database(&base_url, &database_name).await?;
+        result
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn empty_product_database_is_atomically_bound_to_one_scope() -> TestResult {
+        let Ok(base_url) = std::env::var("RUNKU_TEST_POSTGRES_URL") else {
+            return Ok(());
+        };
+        let (database_name, database_url) = product_database(&base_url).await?;
+        let migrated = PostgresStore::connect(&database_url, PostgresStoreConfig::TEST).await?;
+        migrated.close().await;
+        let first_scope = runku_core::EnvironmentScope::new(
+            ProjectId::generate(),
+            runku_core::EnvironmentId::generate(),
+        );
+        let second_scope = runku_core::EnvironmentScope::new(
+            ProjectId::generate(),
+            runku_core::EnvironmentId::generate(),
+        );
+        let (first, second) = tokio::join!(
+            PostgresStore::connect_scoped(&database_url, PostgresStoreConfig::TEST, first_scope),
+            PostgresStore::connect_scoped(&database_url, PostgresStoreConfig::TEST, second_scope)
+        );
+        let (winner, winner_scope, loser_scope) = match (first, second) {
+            (Ok(winner), Err(StoreError::Corruption)) => (winner, first_scope, second_scope),
+            (Err(StoreError::Corruption), Ok(winner)) => (winner, second_scope, first_scope),
+            (first, second) => {
+                return Err(format!("unexpected binding results: {first:?}, {second:?}").into());
+            }
+        };
+        winner.close().await;
+        let reopened =
+            PostgresStore::connect_scoped(&database_url, PostgresStoreConfig::TEST, winner_scope)
+                .await?;
+        reopened.close().await;
+        assert!(matches!(
+            PostgresStore::connect_scoped(&database_url, PostgresStoreConfig::TEST, loser_scope)
+                .await,
+            Err(StoreError::Corruption)
+        ));
+        drop_product_database(&base_url, &database_name).await?;
         Ok(())
     }
 

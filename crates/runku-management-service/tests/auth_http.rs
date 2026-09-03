@@ -4,7 +4,7 @@ use std::{
     str::FromStr as _,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -37,12 +37,21 @@ struct RejectingExternalIdentity;
 struct ArchiveStatusProduct {
     scope: EnvironmentScope,
     calls: AtomicUsize,
+    healthy: AtomicBool,
 }
 
 #[async_trait]
 impl ManagementProduct for ArchiveStatusProduct {
     fn scope(&self) -> EnvironmentScope {
         self.scope
+    }
+
+    async fn health(&self) -> Result<(), ManagementProductError> {
+        if self.healthy.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(ManagementProductError::Unavailable)
+        }
     }
 
     async fn publish(
@@ -126,6 +135,53 @@ impl ExternalIdentityAuthenticator for RejectingExternalIdentity {
     ) -> Result<ExternalOperatorIdentity, PlatformIdentityError> {
         Err(PlatformIdentityError::Unauthenticated)
     }
+}
+
+#[tokio::test]
+async fn readiness_requires_the_attached_product_store() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("readiness.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let identity = Arc::new(PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([41; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?);
+    let product = Arc::new(ArchiveStatusProduct {
+        scope: EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate()),
+        calls: AtomicUsize::new(0),
+        healthy: AtomicBool::new(false),
+    });
+    let router = build_management_router_with_product(
+        ManagementHttpConfig {
+            max_concurrent_requests: 8,
+            exposure: ManagementHttpExposure::LoopbackPlaintext,
+            public_management_endpoint: None,
+        },
+        identity,
+        None,
+        Some(product.clone()),
+        None,
+    )?;
+    let response = router
+        .clone()
+        .oneshot(Request::get("/health/ready").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    product.healthy.store(true, Ordering::SeqCst);
+    let response = router
+        .oneshot(Request::get("/health/ready").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    repository.close().await;
+    Ok(())
 }
 
 #[tokio::test]
@@ -249,6 +305,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
     let product = Arc::new(ArchiveStatusProduct {
         scope,
         calls: AtomicUsize::new(0),
+        healthy: AtomicBool::new(true),
     });
     let product_router = build_management_router_with_product(
         ManagementHttpConfig {

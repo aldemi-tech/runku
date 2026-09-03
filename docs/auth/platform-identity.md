@@ -104,6 +104,8 @@ Configuration is strict:
 | `RUNKU_PUBLIC_MANAGEMENT_URL` | no | canonical public HTTPS Management origin returned by login discovery; literal-loopback HTTP is local-only |
 | `RUNKU_PLATFORM_OIDC_CONFIG` | no | absolute path to a strict JSON file, at most 64 KiB |
 | `RUNKU_PRODUCT_ROOT` | no | absolute initialized Product Environment root exposed by authenticated lifecycle routes |
+| `RUNKU_PRODUCT_DATABASE_URL` | no | optional Environment-scoped Product PostgreSQL DSN; sensitive; requires Product root |
+| `RUNKU_PRODUCT_DATABASE_URL_FILE` | alternative | absolute one-line regular non-symlink file; mutually exclusive with direct Product URL |
 | `RUNKU_PRODUCT_ALLOWED_ORIGINS` | no | up to 64 exact comma-separated browser origins; requires Product root |
 | `RUNKU_PRODUCT_AUTH_CONFIG` | no | Product-root-relative JWT descriptor without parent traversal; requires Product root |
 
@@ -114,6 +116,10 @@ schemes, relative state/config paths, and a
 non-loopback plaintext listener fail before readiness. `RUNKU_MANAGEMENT_TLS_TERMINATED=true` is an
 assertion by the operator; Runku cannot verify the reverse proxy. Restrict the backend listener and
 configure exact trusted-proxy behavior at the deployment boundary.
+
+The Product database is independent of Platform Identity and has its own exact Environment binding,
+readiness, least-privilege credential, and coordinated recovery contract. See
+[Environment-scoped Product PostgreSQL](../self-hosting/product-postgresql.md).
 
 ## Enroll the initial owner
 

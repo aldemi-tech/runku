@@ -59,6 +59,11 @@ when one Product Environment is attached, capability-scoped Workspace publicatio
 Channel lifecycle, status, and Operational Log snapshot/stream operations. It does not yet compose
 every distributed management domain named above.
 
+The attached Environment independently selects SQLite or an exact-scope PostgreSQL `LogicalStore`.
+The latter persists an atomic singleton Project/Environment binding before use and is checked by
+Management readiness. It never reuses Platform Identity as Product authority and never falls back
+to SQLite after a PostgreSQL failure.
+
 ## Component boundaries
 
 | Component | Owns | Must not own |

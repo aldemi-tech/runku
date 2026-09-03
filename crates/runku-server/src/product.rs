@@ -4,6 +4,8 @@ use std::{collections::BTreeSet, path::PathBuf, str::FromStr};
 
 use async_trait::async_trait;
 use runku_core::{ChannelName, EnvironmentScope, ReleaseId};
+use runku_data::{LogicalStore, StoreError};
+use runku_data_postgres::{PostgresStore, PostgresStoreConfig};
 use runku_development::DevelopmentActor;
 use runku_file_storage::{FileObjectStore, FileStorageLimits, FileUsageSink};
 use runku_gateway::CorsOrigin;
@@ -25,6 +27,7 @@ use runku_releases::FunctionType;
 use runku_value::TimestampMicros;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 /// One configured Product Environment and its lazily started serving process.
 pub struct ProductAdapter {
@@ -34,10 +37,13 @@ pub struct ProductAdapter {
     log_journal: Option<NatsLogJournal>,
     process_config: LocalProcessConfig,
     process: Mutex<Option<LocalProcess>>,
+    data_store: Option<std::sync::Arc<PostgresStore>>,
 }
 
 /// Validated server-owned configuration for one Product adapter.
 pub struct ProductAdapterConfig {
+    /// Optional secret PostgreSQL DSN for Environment-scoped Product document state.
+    pub product_database_url: Option<Zeroizing<String>>,
     /// Optional historical Operational Log archive.
     pub log_archive: Option<LogArchive>,
     /// Optional replicated Operational Log journal.
@@ -72,6 +78,21 @@ impl ProductAdapter {
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?
             .0;
+        let data_store = match config.product_database_url.as_ref() {
+            Some(url) => Some(std::sync::Arc::new(
+                PostgresStore::connect_scoped(
+                    url.as_str(),
+                    PostgresStoreConfig::PRODUCTION,
+                    state.scope(),
+                )
+                .await
+                .map_err(map_product_database)?,
+            )),
+            None => None,
+        };
+        let data_store_boundary = data_store
+            .as_ref()
+            .map(|store| std::sync::Arc::clone(store) as std::sync::Arc<dyn LogicalStore>);
         let adapter = Self {
             root,
             scope: state.scope(),
@@ -81,12 +102,14 @@ impl ProductAdapter {
                 allowed_origins: config.allowed_origins,
                 auth_config: config.auth_config,
                 file_object_store: config.file_object_store,
+                data_store: data_store_boundary,
                 file_storage_limits: config.file_storage_limits,
                 file_usage_sink: config.file_usage_sink,
                 file_usage_interval: config.file_usage_interval,
                 ..LocalProcessConfig::default()
             },
             process: Mutex::new(None),
+            data_store,
         };
         let releases = LocalReleaseManager::open(&adapter.root)
             .await
@@ -133,10 +156,36 @@ impl ProductAdapter {
     }
 }
 
+pub async fn migrate_product_database(
+    root: &std::path::Path,
+    url: &str,
+) -> Result<(), &'static str> {
+    let state = load_local(root)
+        .await
+        .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?
+        .0;
+    let store = PostgresStore::connect_scoped(url, PostgresStoreConfig::PRODUCTION, state.scope())
+        .await
+        .map_err(map_product_database)?;
+    store.close().await;
+    Ok(())
+}
+
 #[async_trait]
 impl ManagementProduct for ProductAdapter {
     fn scope(&self) -> EnvironmentScope {
         self.scope
+    }
+
+    async fn health(&self) -> Result<(), ManagementProductError> {
+        if let Some(store) = &self.data_store {
+            return store.health().await.map_err(map_store_health);
+        }
+        let process = self.process.lock().await;
+        match process.as_ref() {
+            Some(process) => process.data_health().await.map_err(map_store_health),
+            None => Ok(()),
+        }
     }
 
     async fn publish(
@@ -487,5 +536,20 @@ fn map_logs(error: LocalLogError) -> ManagementProductError {
         }
         LocalLogError::Unavailable => ManagementProductError::Unavailable,
         LocalLogError::Corruption => ManagementProductError::Corruption,
+    }
+}
+
+fn map_product_database(error: StoreError) -> &'static str {
+    match error {
+        StoreError::Corruption => "SERVER_PRODUCT_DATABASE_SCOPE_CONFLICT",
+        StoreError::MigrationFailed => "SERVER_PRODUCT_DATABASE_MIGRATION_FAILED",
+        _ => "SERVER_PRODUCT_DATABASE_UNAVAILABLE",
+    }
+}
+
+fn map_store_health(error: StoreError) -> ManagementProductError {
+    match error {
+        StoreError::Corruption | StoreError::MigrationFailed => ManagementProductError::Corruption,
+        _ => ManagementProductError::Unavailable,
     }
 }

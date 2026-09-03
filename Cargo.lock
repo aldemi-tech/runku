@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "runku-cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -3721,6 +3721,7 @@ dependencies = [
  "runku-core",
  "runku-cron",
  "runku-data",
+ "runku-data-postgres",
  "runku-data-sqlite",
  "runku-development",
  "runku-development-access",
@@ -3742,10 +3743,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
  "ulid",
+ "url",
  "zeroize",
 ]
 
@@ -3971,13 +3974,15 @@ dependencies = [
 
 [[package]]
 name = "runku-server"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "async-nats",
  "async-trait",
  "base64 0.23.1",
  "reqwest",
  "runku-core",
+ "runku-data",
+ "runku-data-postgres",
  "runku-development",
  "runku-file-storage",
  "runku-gateway",

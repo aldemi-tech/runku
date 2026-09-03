@@ -1151,10 +1151,15 @@ async fn live() -> StatusCode {
 }
 
 async fn ready(State(state): State<HttpState>) -> Response {
-    match state.identity.health().await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => failure(error),
+    if let Err(error) = state.identity.health().await {
+        return failure(error);
     }
+    if let Some(product) = &state.product
+        && product.health().await.is_err()
+    {
+        return failure(PlatformIdentityError::Unavailable);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn fallback() -> Response {

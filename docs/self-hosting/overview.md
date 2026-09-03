@@ -11,7 +11,8 @@ Node isolation adapters, and a PostgreSQL-backed Platform Identity Management AP
 first-owner invitation bootstrap, sessions, scoped grants, and optional OIDC.
 
 The compact `runku-server` distribution composes PostgreSQL-backed Platform Identity and can attach
-one initialized Product Environment through `RUNKU_PRODUCT_ROOT`. The same process embeds hot log
+one initialized Product Environment through `RUNKU_PRODUCT_ROOT`. The Environment's transactional
+Function data store is SQLite by default or an optional exact-scope PostgreSQL database. The same process embeds hot log
 capture, filesystem or S3-compatible Parquet archival, DuckDB historical query, safe retention, and
 authenticated live streaming; a small installation does not need a separate observability service.
 In that profile, authenticated
@@ -88,7 +89,9 @@ both Product and Management listeners remain on loopback. See
 ## Storage and dependency profiles
 
 - SQLite: implemented local/standalone hot Product state and Operational Log tier.
-- PostgreSQL: authoritative production-oriented data/metadata adapter.
+- PostgreSQL: authoritative production-oriented logical Product adapter, optionally selected per
+  attached Environment with an atomic Project/Environment database binding; also used separately by
+  Platform Identity.
 - filesystem Parquet + embedded DuckDB: default standalone Operational Log history/query.
 - S3-compatible object storage: immutable distributed artifacts and optional log Parquet/manifests.
 - NATS JetStream: distributed Full Node queue when enabled and replicated Operational Log journal

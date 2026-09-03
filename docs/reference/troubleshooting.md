@@ -56,7 +56,7 @@ public issue.
 | Remote lifecycle exit 8 | Current grant lacks the capability at the root's exact Environment | Delegate only the required capability/scope; do not widen the Application key |
 | Remote publish exit 2 with expected-head requirement | No explicit remote Workspace CAS was supplied | Read/reconcile the current head, then pass `--expected-head empty|drv_*` |
 | Remote log follow exits after revocation | Session/grant was rechecked during the stream | Re-authenticate or restore the intended `logs:follow` grant; do not reconnect with a stale bearer |
-| Management readiness fails | PostgreSQL/schema unavailable | Preserve server error code; verify dependency and migration checksum |
+| Management readiness fails | Platform Identity or configured Product PostgreSQL/schema unavailable | Preserve server error code; verify both dependencies and migration checksums |
 | OIDC login returns 401 | Issuer/audience/claim/signature/JWKS/link | Check exact provider policy and whether first login included a valid invitation |
 | Browser OIDC callback times out | Browser could not complete provider flow or reach loopback callback | Verify native-client loopback redirect policy, local firewall, provider endpoints, and retry with fresh PKCE state |
 | `PLATFORM_AUTH_CONFIGURATION_*` | Authentication discovery was unavailable, malformed, contradictory, or advertised an unsafe Management origin | Verify the exact authentication URL, TLS certificate, `/v1/auth/config` v1 response, and public Management URL; do not follow a redirect manually |
@@ -164,7 +164,8 @@ or an invalid browser/HA overlay. Correct the exact input; do not copy secret va
 bypass a mount problem.
 
 `probe-live` proves the Management process answers on its configured loopback listener.
-`probe-ready` additionally performs the authoritative Platform Identity PostgreSQL check. Product
+`probe-ready` additionally performs the authoritative Platform Identity PostgreSQL check and, when
+configured, the Environment-scoped Product PostgreSQL check. Product
 port 3210 is expected to remain closed until a Channel has been promoted. After a restart with an
 existing Channel it must reopen automatically; if it does not, preserve server logs and Product
 state rather than re-promoting blindly.
@@ -174,6 +175,11 @@ backup directory only as diagnostic evidence; it is never a recovery point witho
 and successful `verify-backup`. Restore intentionally refuses non-empty PostgreSQL/Product/Platform
 destinations and a mismatched Platform pepper. Do not weaken those checks or use `pg_restore --clean`
 against an existing installation.
+
+`SERVER_PRODUCT_DATABASE_SCOPE_CONFLICT` means the database singleton binding or existing rows name
+a different Project/Environment. Never delete or edit the binding. Stop the server, preserve the
+database and Product-root identities as evidence, and attach the correct empty or coordinated
+restore. See [Environment-scoped Product PostgreSQL](../self-hosting/product-postgresql.md).
 
 ## Operational Log failures
 

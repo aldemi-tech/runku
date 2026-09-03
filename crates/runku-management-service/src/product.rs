@@ -168,6 +168,15 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
     /// Exact Environment owned by this adapter.
     fn scope(&self) -> EnvironmentScope;
 
+    /// Checks the authoritative Product dependencies required by this adapter.
+    ///
+    /// The default preserves compatibility for adapters whose construction already proves
+    /// readiness. Networked persistence adapters override it so `/health/ready` reflects a live
+    /// dependency failure rather than only Platform Identity health.
+    async fn health(&self) -> Result<(), ManagementProductError> {
+        Ok(())
+    }
+
     /// Publishes one canonical package request.
     async fn publish(
         &self,

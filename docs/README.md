@@ -66,20 +66,22 @@ Read the support boundary before designing infrastructure:
    installation, administration, HA, security, recovery, upgrades, and release artifacts.
 3. [Docker standalone installation](../deployments/docker/README.md): exact compact-profile install,
    TLS boundary, secrets, backup, restore, upgrade, and removal procedure.
-4. [Administration](operations/administration.md): daily checks, lifecycle operations, credentials,
+4. [Environment-scoped Product PostgreSQL](self-hosting/product-postgresql.md): optional
+   transactional Product database, exact scope binding, secrets, readiness, and recovery boundary.
+5. [Administration](operations/administration.md): daily checks, lifecycle operations, credentials,
    retention, capacity, maintenance windows, and incident workflow.
-5. [Authenticated remote lifecycle](operations/remote-lifecycle.md): exact server/CLI workflow,
+6. [Authenticated remote lifecycle](operations/remote-lifecycle.md): exact server/CLI workflow,
    authorization, failures, rollback, logs, and executable acceptance evidence.
-6. [Operational Log storage and administration](operations/operational-logs.md): choose standalone
+7. [Operational Log storage and administration](operations/operational-logs.md): choose standalone
    or HA; configure filesystem/S3/NATS; query, stream, retain, recover, size, and upgrade it.
-7. [Observability](operations/observability.md): signal catalog, correlation, privacy, dashboards,
+8. [Observability](operations/observability.md): signal catalog, correlation, privacy, dashboards,
    alerts, capacity indicators, and OTLP behavior.
-8. [Backup and recovery](operations/backup-and-recovery.md): local and packaged compact procedures,
+9. [Backup and recovery](operations/backup-and-recovery.md): local and packaged compact procedures,
    inventory, restore verification, disaster-recovery acceptance, and current limitations.
-9. [Security model](security/security-model.md): boundaries, threats, deployment controls, secrets,
+10. [Security model](security/security-model.md): boundaries, threats, deployment controls, secrets,
    incident response, and residual risk.
-10. [Platform operator identity](auth/platform-identity.md): configure and operate management trust.
-11. [Deployment assets](../deployments/README.md): standalone, Docker, and Kubernetes profile scope.
+11. [Platform operator identity](auth/platform-identity.md): configure and operate management trust.
+12. [Deployment assets](../deployments/README.md): standalone, Docker, and Kubernetes profile scope.
 
 ## Maintainer and AI-assistant path
 

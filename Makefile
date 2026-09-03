@@ -1,4 +1,4 @@
-.PHONY: toolchain toolchain-check check ci-check ci-rust-check ci-packages-check security-audit fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check cli-package-check release-package-check selfhost-package-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check platform-identity-check platform-identity-keycloak-check platform-lifecycle-keycloak-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check operational-logs-ha-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
+.PHONY: toolchain toolchain-check check ci-check ci-rust-check ci-packages-check security-audit fmt fmt-check lint test docs incomplete-check js-install install-cli install-cli-check cli-package-check release-package-check selfhost-package-check chat-example-check chat-example-e2e-check node-example-check storage-up storage-down storage-check product-postgres-check storage-benchmark artifact-benchmark release-repository-check release-repository-benchmark runtime-check runtime-benchmark full-node-local-check full-node-docker-check full-node-evidence-check full-node-performance-benchmark firecracker-production-check remote-execution-infra-check action-https-check action-https-benchmark query-engine-check query-engine-benchmark mutation-engine-check schema-index-check schema-index-benchmark realtime-check realtime-benchmark scheduling-check scheduling-benchmark identity-keyring-check identity-keyring-benchmark identity-gateway-check guest-identity-check jwt-identity-check identity-provider-check platform-identity-check platform-identity-keycloak-check platform-lifecycle-keycloak-check protocol-check gateway-http-check gateway-product-check sdk-typescript-check sdk-server-check development-workspace-check cron-check websocket-realtime-check local-process-check source-build-check local-key-management-check source-watch-check contracts-codegen-check release-lifecycle-check nested-function-check operational-logs-check operational-logs-ha-check otlp-export-check development-access-check remote-workspace-protocol-check remote-workspace-service-check remote-workspace-client-check remote-release-freeze-check remote-workspace-check
 
 RUST_TOOLCHAIN_CHANNEL := $(shell sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
 
@@ -63,7 +63,7 @@ install-cli-check:
 	@install_root=$$(mktemp -d); \
 	trap 'rm -rf "$$install_root"' EXIT; \
 	$(MAKE) --no-print-directory install-cli CARGO_INSTALL_ROOT="$$install_root"; \
-	"$$install_root/bin/runku" --version | rg -x 'runku 0\.4\.2'; \
+	"$$install_root/bin/runku" --version | rg -x 'runku 0\.4\.3'; \
 	"$$install_root/bin/runku" --help | rg -F 'runku dev [--root PATH]'
 
 cli-package-check: js-install
@@ -121,6 +121,10 @@ storage-down:
 
 storage-check: storage-up
 	RUNKU_TEST_POSTGRES_URL="postgres://runku:runku_local_test_only@127.0.0.1:$${RUNKU_POSTGRES_PORT:-55432}/runku_test" cargo test -p runku-data-postgres --test postgres_conformance --locked -- --test-threads=1
+
+product-postgres-check: storage-up
+	RUNKU_TEST_POSTGRES_URL="postgres://runku:runku_local_test_only@127.0.0.1:$${RUNKU_POSTGRES_PORT:-55432}/runku_test" cargo test -p runku-local product_database --locked -- --test-threads=1
+	cargo test -p runku-management-service readiness_requires_the_attached_product_store --locked -- --exact
 
 storage-benchmark: storage-check
 	docker compose -f compose.storage.yml exec -T postgres psql -X -U runku -d runku_test -f /workspace/benchmarks/storage/postgres-index-baseline.sql

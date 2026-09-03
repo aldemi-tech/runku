@@ -67,6 +67,10 @@ const V2_STATEMENTS: &[&str] = &["CREATE TABLE runku_outbox_consumers (\
         CHECK ((claimed_sequence IS NULL AND claimed_event_id IS NULL) OR (claimed_sequence IS NOT NULL AND claimed_event_id IS NOT NULL)), \
         FOREIGN KEY (project_id, environment_id) REFERENCES runku_environment_sequences(project_id, environment_id) ON DELETE CASCADE)"];
 
+const V3_STATEMENTS: &[&str] = &["CREATE TABLE runku_environment_binding (\
+        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton), \
+        project_id TEXT NOT NULL, environment_id TEXT NOT NULL, bound_at_micros BIGINT NOT NULL)"];
+
 pub(crate) async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS runku_schema_migrations (\
@@ -86,6 +90,7 @@ pub(crate) async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
         .map_err(|_| StoreError::MigrationFailed)?;
     apply_migration(&mut transaction, 1, V1_STATEMENTS, v1_checksum()).await?;
     apply_migration(&mut transaction, 2, V2_STATEMENTS, v2_checksum()).await?;
+    apply_migration(&mut transaction, 3, V3_STATEMENTS, v3_checksum()).await?;
     transaction
         .commit()
         .await
@@ -147,6 +152,10 @@ fn v1_checksum() -> [u8; 32] {
 
 fn v2_checksum() -> [u8; 32] {
     checksum(b"RUNKU_POSTGRES_SCHEMA_V2", V2_STATEMENTS)
+}
+
+fn v3_checksum() -> [u8; 32] {
+    checksum(b"RUNKU_POSTGRES_SCHEMA_V3", V3_STATEMENTS)
 }
 
 pub(crate) async fn begin_serializable(

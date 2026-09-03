@@ -8,7 +8,7 @@ conformance assets are evidence inputs, not substitutes for a released package.
 
 ## Compact Docker support decision
 
-Version 0.4.2 supports a forward upgrade from the 0.3.0 compact-installation floor with this exact
+Version 0.4.3 supports a forward upgrade from the 0.3.0 compact-installation floor with this exact
 boundary:
 
 | Area | Included |
@@ -39,6 +39,10 @@ The release package and executable evidence cover:
 The source gate is `make selfhost-package-check`; a pre-tag manual Release workflow additionally
 runs `scripts/selfhost-artifact-evidence.sh` with freshly built Linux archives and the packaged
 Compose profile. The HA dependency campaign remains `make operational-logs-ha-check`.
+
+The server binary also implements an opt-in, exact-Environment PostgreSQL logical Product store,
+covered by `make product-postgres-check`. It is not enabled by the compact Compose package and does
+not expand that package's existing backup or multi-node support boundary.
 
 ## Definition of supported
 

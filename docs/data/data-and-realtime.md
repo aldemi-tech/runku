@@ -64,6 +64,13 @@ SQLite is the local single-process adapter. PostgreSQL is the production-oriente
 concurrency/distributed claims. Both pass the same logical conformance contract; Function code does
 not access physical SQL.
 
+An attached `runku-server` Environment can select that adapter with the optional
+`RUNKU_PRODUCT_DATABASE_URL` or `_FILE` secret. The database is atomically bound to one exact
+Project/Environment and readiness checks it without falling back to SQLite. This selection covers
+the logical documents/indexes/Mutation operations/outbox/schedule contract, not every repository in
+the Product root. See [Environment-scoped Product PostgreSQL](../self-hosting/product-postgresql.md)
+for the exact storage, isolation, and recovery boundary.
+
 On corruption or cross-store inconsistency, stop writers and preserve state. Never repair
 documents, indexes, outbox, or schedules independently. Follow
 [Backup and recovery](../operations/backup-and-recovery.md).

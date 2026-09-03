@@ -23,7 +23,8 @@ It is not the distributed multi-Environment package. Use the
 [production-readiness checklist](../self-hosting/production-readiness.md) for the remaining boundary.
 
 For packaged process status use `./runku-selfhost status`. It checks container state, liveness,
-authoritative PostgreSQL readiness, and the exact server version. Back up with the package helper
+authoritative dependency readiness, including an optional Product PostgreSQL store, and the exact
+server version. Back up with the package helper
 before filesystem, image, schema, or dependency maintenance; do not copy a live bind mount.
 
 ## Daily local checks

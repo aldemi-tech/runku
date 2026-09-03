@@ -27,6 +27,11 @@ Release routing, credentials, schedules, and artifact references.
 | Application files | `.runku/file-storage-objects/` plus `.runku/file-storage.sqlite3` metadata | dedicated filesystem or S3-compatible prefix plus Product metadata | Authoritative application bytes; Runku backup excludes the byte backend |
 | Process locks/caches/scratch | local ephemeral paths | Pod/host ephemeral storage | Reconstructible; never restore as authority |
 
+When `RUNKU_PRODUCT_DATABASE_URL` is configured, PostgreSQL replaces only the first row's local
+logical store. The remaining Product-root repositories stay authoritative. Treating the Product
+database or Product root alone as a complete backup is invalid; see
+[Environment-scoped Product PostgreSQL](../self-hosting/product-postgresql.md).
+
 ## Consistent local backup
 
 The implemented safe procedure is offline:

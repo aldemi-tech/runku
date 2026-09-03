@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
-use crate::product::{ProductAdapter, ProductAdapterConfig};
+use crate::product::{ProductAdapter, ProductAdapterConfig, migrate_product_database};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3220";
 const BOOTSTRAP_RECOVERY_CONFIRMATION: &str = "replace-lost-initial-owner-code";
@@ -110,6 +110,12 @@ async fn run() -> Result<(), &'static str> {
         .map_err(|_| "SERVER_PLATFORM_DATABASE_UNAVAILABLE")?,
     );
     if command == "migrate" {
+        if let (Some(root), Some(url)) = (
+            config.product_root.as_deref(),
+            config.product_database_url.as_ref(),
+        ) {
+            migrate_product_database(root, url.as_str()).await?;
+        }
         repository.close().await;
         println!("migrations applied");
         return Ok(());
@@ -144,6 +150,7 @@ async fn run() -> Result<(), &'static str> {
             Box::pin(ProductAdapter::open(
                 root.clone(),
                 ProductAdapterConfig {
+                    product_database_url: config.product_database_url.clone(),
                     log_archive: config.log_archive.clone(),
                     log_journal: log_journal.clone(),
                     allowed_origins: config.product_allowed_origins.clone(),
@@ -206,6 +213,7 @@ struct ServerConfig {
     public_management_endpoint: Option<String>,
     oidc: Option<OidcConfig>,
     product_root: Option<PathBuf>,
+    product_database_url: Option<Zeroizing<String>>,
     product_allowed_origins: BTreeSet<CorsOrigin>,
     product_auth_config: Option<PathBuf>,
     log_archive: Option<LogArchive>,
@@ -239,9 +247,8 @@ impl ServerConfig {
     #[allow(clippy::too_many_lines)]
     fn load() -> Result<Self, &'static str> {
         let database_url = required_secret("RUNKU_DATABASE_URL")?;
-        if !(database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")) {
-            return Err("SERVER_DATABASE_URL_INVALID");
-        }
+        let platform_database_target =
+            postgres_database_target(&database_url).map_err(|()| "SERVER_DATABASE_URL_INVALID")?;
         let encoded = required_secret("RUNKU_PLATFORM_IDENTITY_PEPPER")?;
         let decoded = URL_SAFE_NO_PAD
             .decode(encoded)
@@ -293,6 +300,19 @@ impl ServerConfig {
                 }
             })
             .transpose()?;
+        let product_database_url = optional_secret("RUNKU_PRODUCT_DATABASE_URL")?
+            .map(|value| {
+                let target = postgres_database_target(&value)
+                    .map_err(|()| "SERVER_PRODUCT_DATABASE_URL_INVALID")?;
+                if target == platform_database_target {
+                    return Err("SERVER_PRODUCT_DATABASE_NOT_ISOLATED");
+                }
+                Ok(Zeroizing::new(value))
+            })
+            .transpose()?;
+        if product_database_url.is_some() && product_root.is_none() {
+            return Err("SERVER_PRODUCT_DATABASE_WITHOUT_PRODUCT_ROOT");
+        }
         let product_allowed_origins = load_product_allowed_origins()?;
         let product_auth_config = env::var_os("RUNKU_PRODUCT_AUTH_CONFIG")
             .map(PathBuf::from)
@@ -341,6 +361,7 @@ impl ServerConfig {
             public_management_endpoint,
             oidc,
             product_root,
+            product_database_url,
             product_allowed_origins,
             product_auth_config,
             log_archive,
@@ -832,6 +853,19 @@ fn validate_public_management_endpoint(value: &str) -> Result<(), &'static str> 
     Ok(())
 }
 
+fn postgres_database_target(value: &str) -> Result<String, ()> {
+    let url = url::Url::parse(value).map_err(|_| ())?;
+    if !matches!(url.scheme(), "postgres" | "postgresql") || url.fragment().is_some() {
+        return Err(());
+    }
+    Ok(format!(
+        "{}:{}{}",
+        url.host_str().unwrap_or_default().to_ascii_lowercase(),
+        url.port().unwrap_or(5432),
+        url.path()
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OidcConfig {
@@ -1256,6 +1290,19 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn postgres_database_target_ignores_credentials_but_preserves_database() {
+        assert_eq!(
+            postgres_database_target("postgres://platform:a@db.example/platform"),
+            postgres_database_target("postgresql://other:b@DB.EXAMPLE:5432/platform")
+        );
+        assert_ne!(
+            postgres_database_target("postgres://platform:a@db.example/platform"),
+            postgres_database_target("postgres://product:b@db.example/product")
+        );
+        assert!(postgres_database_target("https://db.example/product").is_err());
     }
 
     #[cfg(unix)]

@@ -14,7 +14,7 @@ domain contracts toward adapters and process composition.
 | `runku-data` | Storage-independent snapshots, commits, indexes, outbox, schedules |
 | `runku-data-conformance` | Adapter-neutral correctness suite |
 | `runku-data-sqlite` | Local implementation |
-| `runku-data-postgres` | PostgreSQL implementation and distributed-oriented behavior |
+| `runku-data-postgres` | PostgreSQL implementation, distributed-oriented behavior, and optional atomic exact-Environment database binding |
 | `runku-schema` | Schema/index catalog and maintenance rules |
 
 Pure crates must not depend on SQL, HTTP, runtime, filesystem, or deployment frameworks.
@@ -72,7 +72,7 @@ authoritative application state.
 |---|---|
 | `runku-local` | Local layout, stores, publish/lifecycle, daemon composition, doctor/logs/keys |
 | `runku-cli` | Strict parser, stable help/errors/exits, command orchestration |
-| `runku-server` | Source composition for Platform Identity plus one optional authenticated Product Environment; not yet the distributed package |
+| `runku-server` | Platform Identity plus one optional authenticated Product Environment, with SQLite default or scope-bound Product PostgreSQL logical store; not yet the distributed package |
 | `packages/server` | Declarative TypeScript SDK consumed statically by the builder |
 | `packages/client` | Public HTTP/Realtime client and generated-registry typed view |
 | `protocol/` | Compatibility fixtures; existing vectors are immutable contracts |

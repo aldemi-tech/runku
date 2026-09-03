@@ -44,9 +44,12 @@ zeroize.workspace = true
 [dev-dependencies]
 reqwest.workspace = true
 runku-build = { path = "../runku-build" }
+runku-data-postgres = { path = "../runku-data-postgres" }
 runku-protocol = { path = "../runku-protocol" }
+sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+url.workspace = true
 
 [lints]
 workspace = true

@@ -25,6 +25,8 @@ use sqlx::{
 
 use crate::migration;
 
+const ENVIRONMENT_BINDING_LOCK_ID: i64 = 7_224_856_022;
+
 /// Bounded production connection and statement configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PostgresStoreConfig {
@@ -83,6 +85,7 @@ impl PostgresStoreConfig {
 pub struct PostgresStore {
     pool: PgPool,
     telemetry: StoreTelemetry,
+    exact_scope: Option<EnvironmentScope>,
 }
 
 impl PostgresStore {
@@ -127,12 +130,90 @@ impl PostgresStore {
         Ok(Self {
             pool,
             telemetry: StoreTelemetry::default(),
+            exact_scope: None,
         })
+    }
+
+    /// Connects an Environment-dedicated database and rejects pre-existing rows from another
+    /// Project/Environment scope.
+    ///
+    /// Every subsequent scoped operation is checked before SQL execution. This is the process-side
+    /// guard for deployments that issue one database credential per Environment; database roles
+    /// and network policy remain the infrastructure isolation boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Corruption`] when the database already contains another scope, or the
+    /// same stable connection/migration errors as [`Self::connect`].
+    pub async fn connect_scoped(
+        url: &str,
+        config: PostgresStoreConfig,
+        scope: EnvironmentScope,
+    ) -> Result<Self, StoreError> {
+        let mut store = Self::connect(url, config).await?;
+        let mut transaction = store.pool.begin().await.map_err(map_sqlx_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(ENVIRONMENT_BINDING_LOCK_ID)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+        let different_scope = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM runku_environment_sequences WHERE project_id <> $1 OR environment_id <> $2)",
+        )
+        .bind(scope.project_id().to_string())
+        .bind(scope.environment_id().to_string())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+        if different_scope {
+            transaction.rollback().await.map_err(map_sqlx_error)?;
+            store.pool.close().await;
+            return Err(StoreError::Corruption);
+        }
+        sqlx::query(
+            "INSERT INTO runku_environment_binding(singleton, project_id, environment_id, bound_at_micros) \
+             VALUES (TRUE, $1, $2, $3) ON CONFLICT (singleton) DO NOTHING",
+        )
+        .bind(scope.project_id().to_string())
+        .bind(scope.environment_id().to_string())
+        .bind(now_micros()?)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+        let binding = sqlx::query(
+            "SELECT project_id, environment_id FROM runku_environment_binding WHERE singleton = TRUE",
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+        let bound_project: String = binding
+            .try_get("project_id")
+            .map_err(|_| StoreError::Corruption)?;
+        let bound_environment: String = binding
+            .try_get("environment_id")
+            .map_err(|_| StoreError::Corruption)?;
+        if bound_project != scope.project_id().to_string()
+            || bound_environment != scope.environment_id().to_string()
+        {
+            transaction.rollback().await.map_err(map_sqlx_error)?;
+            store.pool.close().await;
+            return Err(StoreError::Corruption);
+        }
+        transaction.commit().await.map_err(map_sqlx_error)?;
+        store.exact_scope = Some(scope);
+        Ok(store)
     }
 
     /// Closes the bounded connection pool and waits for checked-out connections.
     pub async fn close(&self) {
         self.pool.close().await;
+    }
+
+    fn require_scope(&self, scope: EnvironmentScope) -> Result<(), StoreError> {
+        if self.exact_scope.is_some_and(|expected| expected != scope) {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
     }
 }
 
@@ -146,6 +227,7 @@ impl LogicalStore for PostgresStore {
         &self,
         scope: EnvironmentScope,
     ) -> Result<Box<dyn ReadSnapshot>, StoreError> {
+        self.require_scope(scope)?;
         let mut transaction = self
             .pool
             .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -171,6 +253,7 @@ impl LogicalStore for PostgresStore {
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<CommitResult, StoreError> {
+        self.require_scope(batch.scope())?;
         let started = Instant::now();
         let digest = batch.digest()?;
         let mut transaction = migration::begin_serializable(&self.pool).await?;
@@ -208,6 +291,7 @@ impl LogicalStore for PostgresStore {
         lease_until: TimestampMicros,
         limit: u32,
     ) -> Result<ClaimedOutboxBatch, StoreError> {
+        self.require_scope(scope)?;
         if limit == 0 || limit > 1_000 || lease_until <= now {
             return Err(StoreError::LimitExceeded);
         }
@@ -322,6 +406,7 @@ impl LogicalStore for PostgresStore {
         lease_generation: u64,
         through: OutboxCursor,
     ) -> Result<(), StoreError> {
+        self.require_scope(scope)?;
         if lease_generation == 0 || through.commit_sequence == 0 {
             return Err(StoreError::OutboxLeaseLost);
         }
@@ -360,6 +445,7 @@ impl LogicalStore for PostgresStore {
         lease_until: TimestampMicros,
         limit: u32,
     ) -> Result<Vec<ClaimedScheduledInvocation>, StoreError> {
+        self.require_scope(scope)?;
         if limit == 0 || limit > 100 || lease_until <= now {
             return Err(StoreError::LimitExceeded);
         }
@@ -401,6 +487,7 @@ impl LogicalStore for PostgresStore {
         lease_generation: u64,
         completion: &ScheduleCompletion,
     ) -> Result<(), StoreError> {
+        self.require_scope(scope)?;
         validate_completion(completion)?;
         let generation = positive_i64(lease_generation)?;
         let now = now_micros()?;
@@ -427,6 +514,7 @@ impl LogicalStore for PostgresStore {
         scope: EnvironmentScope,
         id: ScheduledInvocationId,
     ) -> Result<ScheduleCancelResult, StoreError> {
+        self.require_scope(scope)?;
         let mut transaction = migration::begin_serializable(&self.pool).await?;
         let project = scope.project_id().to_string();
         let environment = scope.environment_id().to_string();
@@ -1144,8 +1232,10 @@ fn map_commit_error(error: sqlx::Error) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_commit_error, map_sqlx_error};
-    use runku_data::StoreError;
+    use super::{PostgresStore, map_commit_error, map_sqlx_error};
+    use runku_core::{EnvironmentId, ProjectId};
+    use runku_data::{EnvironmentScope, StoreError, StoreTelemetry};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     #[test]
     fn unavailable_commit_outcome_is_classified_as_uncertain() {
@@ -1163,5 +1253,18 @@ mod tests {
             map_commit_error(sqlx::Error::PoolTimedOut),
             StoreError::Busy
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_store_rejects_another_environment_before_sql() {
+        let exact = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+        let other = EnvironmentScope::new(exact.project_id(), EnvironmentId::generate());
+        let store = PostgresStore {
+            pool: PgPoolOptions::new().connect_lazy_with(PgConnectOptions::new()),
+            telemetry: StoreTelemetry::default(),
+            exact_scope: Some(exact),
+        };
+        assert_eq!(store.require_scope(exact), Ok(()));
+        assert_eq!(store.require_scope(other), Err(StoreError::NotFound));
     }
 }

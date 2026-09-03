@@ -2,6 +2,45 @@
 
 All notable changes are documented in this file.
 
+## 0.4.3 - 2026-09-03
+
+### Added
+
+- An optional `RUNKU_PRODUCT_DATABASE_URL`/`_FILE` server profile that uses PostgreSQL for one
+  attached Environment's documents, indexes, idempotent Mutation results, transactional outbox,
+  and scheduled invocations while preserving the public Product contract.
+- An atomic singleton database binding to the Product root's exact Project/Environment scope,
+  including concurrent-first-attach and cross-scope rejection tests.
+
+### Changed
+
+- `runku-server migrate` now migrates both Platform Identity and the configured Product database;
+  Management readiness checks the Product database when selected and never falls back to SQLite.
+- The local process composition accepts an injected logical store, keeping SQLite as its default and
+  using the same runtime/gateway/background behavior with the PostgreSQL adapter.
+
+### Security
+
+- Product database secrets use the existing bounded, one-line, non-symlinked secret-file contract
+  and are redacted from adapter configuration diagnostics.
+- A Product database containing or bound to another scope fails closed with
+  `SERVER_PRODUCT_DATABASE_SCOPE_CONFLICT`. Operators must still issue a separate least-privilege
+  database credential per Environment and enforce database/network isolation.
+- Configuration rejects a Product URL that resolves to the same PostgreSQL host/port/database target
+  as Platform Identity, even when the credentials or URL scheme spelling differ.
+
+### Compatibility and rollback
+
+- SQLite remains the default, so existing 0.4.2 installations are unchanged until the Product
+  database setting is supplied. Public HTTP, SDK, Release, artifact, and Function semantics are
+  unchanged.
+- The Product PostgreSQL schema adds checksum-protected migration v3 for the scope binding. After
+  using the new profile, do not downgrade that Environment to an older server as an operational
+  fallback; take a coordinated database/Product-root backup and move forward.
+- The optional database covers the transactional logical store only. Releases, Workspaces,
+  Product credentials, Cron metadata, file metadata, artifacts, and Operational Logs retain their
+  documented Product-root or object-storage repositories.
+
 ## 0.4.2 - 2026-09-03
 
 ### Fixed
