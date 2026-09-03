@@ -17,6 +17,9 @@ project="runku-selfhost-evidence-${GITHUB_RUN_ID:-$$}"
 
 cleanup() {
   status=$?
+  if [[ "$status" != 0 && -x "$package/runku-selfhost" && -f "$package/.env" ]]; then
+    RUNKU_SELFHOST_ENV="$package/.env" "$package/runku-selfhost" logs >&2 || true
+  fi
   if [[ -x "$package/runku-selfhost" && -f "$package/.env" ]]; then
     RUNKU_SELFHOST_ENV="$package/.env" RUNKU_UNINSTALL_CONFIRM="delete:$project" \
       "$package/runku-selfhost" uninstall delete-data >/dev/null 2>&1 || true

@@ -68,7 +68,7 @@ assertContains("server image workflow", releaseWorkflow, "ghcr.io/aldemi-tech/ru
 assertContains(
   "server image base",
   read("deployments/docker/server.Dockerfile"),
-  "gcr.io/distroless/cc-debian12:nonroot@sha256:",
+  "gcr.io/distroless/cc-debian13:nonroot@sha256:",
 )
 assertContains("source install smoke version", read("Makefile"), `runku ${version.replaceAll(".", "\\.")}`)
 assertContains(
