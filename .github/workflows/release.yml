@@ -415,6 +415,11 @@ jobs:
           pattern: release-*
           path: out
           merge-multiple: true
+      - name: Normalize downloadable artifact paths
+        run: |
+          mkdir -p out/release
+          find out -maxdepth 1 -type f -name 'runku-*' -exec mv {} out/release/ \;
+          test "$(find out/release -maxdepth 1 -type f -name 'runku-selfhost-*.tar.gz' | wc -l)" -eq 1
       - name: Generate release checksums
         working-directory: out/release
         run: sha256sum runku-* > SHA256SUMS
@@ -428,7 +433,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub Release $RELEASE_TAG already exists"
+            gh release upload "$RELEASE_TAG" out/release/* --clobber
           else
             gh release create "$RELEASE_TAG" out/release/* \
               --verify-tag \
@@ -466,6 +471,11 @@ jobs:
           merge-multiple: true
           github-token: ${{ github.token }}
           run-id: ${{ inputs.artifact_run_id }}
+      - name: Normalize downloadable artifact paths
+        run: |
+          mkdir -p out/release
+          find out -maxdepth 1 -type f -name 'runku-*' -exec mv {} out/release/ \;
+          test "$(find out/release -maxdepth 1 -type f -name 'runku-selfhost-*.tar.gz' | wc -l)" -eq 1
       - name: Publish or verify the complete npm release
         run: node scripts/publish-npm.mjs out
       - name: Generate release checksums
@@ -481,7 +491,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub Release $RELEASE_TAG already exists"
+            gh release upload "$RELEASE_TAG" out/release/* --clobber
           else
             gh release create "$RELEASE_TAG" out/release/* \
               --verify-tag \
