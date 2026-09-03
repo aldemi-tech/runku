@@ -6,3 +6,4 @@ package directly.
 
 Every native package is assembled from the same binary published in the corresponding GitHub
 Release archive. The package version must exactly match `@runku/cli`.
+Windows packages also keep the matching `duckdb.dll` beside `runku.exe`; both files are required.

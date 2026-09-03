@@ -73,7 +73,8 @@ Expand-Archive .\runku-v0.3.0-x86_64-pc-windows-msvc.zip -DestinationPath .\runk
 ```
 
 Compare the printed Windows/macOS hash with the exact filename entry in `SHA256SUMS`. Move the
-executable to a user-controlled directory on `PATH`; do not overwrite a system-managed binary.
+executable to a user-controlled directory on `PATH`; do not overwrite a system-managed binary. On
+Windows, keep the archive's `duckdb.dll` in the same directory as `runku.exe`.
 
 ### Source checkout
 

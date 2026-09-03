@@ -53,7 +53,7 @@ async-nats = { version = "=0.50.0", default-features = false, features = ["jetst
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 bytes = "=1.12.1"
-duckdb = { version = "=1.10505.0", default-features = false, features = ["parquet"] }
+duckdb = { version = "=1.10505.0", default-features = false }
 deno_core = "=0.410.0"
 deno_ast = { version = "=0.53.3", features = ["transpiling"] }
 swc_ecma_transforms_module = "=33.0.0"

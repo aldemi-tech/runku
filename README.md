@@ -118,6 +118,7 @@ GitHub Releases also provide `.tar.gz` archives for macOS/Linux and `.zip` archi
 Direct archives do not require Node.js to launch the CLI. Verify the selected archive with the
 release's `SHA256SUMS` before placing `runku` or `runku.exe` on `PATH`. Exact commands and the
 platform table are in [Local development](docs/getting-started/local-development.md#install-the-cli).
+The Windows archive also contains `duckdb.dll`; keep it beside `runku.exe`.
 
 To install the current source checkout instead:
 

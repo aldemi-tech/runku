@@ -25,6 +25,12 @@ Version `X.Y.Z` produces:
   `sha-COMMIT` tag and architecture assembly tags;
 - `SHA256SUMS`, GitHub artifact attestations, npm integrity, and npm provenance.
 
+Each Windows ZIP and native npm package contains both `runku.exe` and its exact `duckdb.dll`.
+The release job downloads that runtime from the DuckDB version pinned in `Cargo.lock`, verifies the
+architecture-specific SHA-256 pinned in the workflow, runs the CLI before packaging it, and fails if
+either packaged file is absent. A DuckDB dependency update must update and independently verify the
+versioned Windows archive URLs and both digests in the same review.
+
 The native target list lives in `scripts/release-platforms.mjs`. The npm launcher mapping, package
 optional dependencies, native package metadata, workflow matrix, compatibility table, and install
 guide must describe exactly the same six targets.

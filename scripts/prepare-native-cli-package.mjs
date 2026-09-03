@@ -22,6 +22,7 @@ const packageBinDirectory = join(packageDirectory, "bin")
 rmSync(packageBinDirectory, { recursive: true, force: true })
 mkdirSync(packageBinDirectory, { recursive: true })
 copyExecutable(binary, join(packageBinDirectory, platform.binaryName))
+copyRuntimeLibraries(packageBinDirectory)
 copyFileSync(join(repositoryRoot, "LICENSE"), join(packageDirectory, "LICENSE"))
 copyFileSync(
   join(repositoryRoot, "packages", "cli-native-README.md"),
@@ -33,8 +34,10 @@ const version = JSON.parse(
 ).version
 const archiveBase = `runku-v${version}-${target}`
 const archiveDirectory = join(resolve(outputArgument), "archive", archiveBase)
+rmSync(archiveDirectory, { recursive: true, force: true })
 mkdirSync(archiveDirectory, { recursive: true })
 copyExecutable(binary, join(archiveDirectory, platform.binaryName))
+copyRuntimeLibraries(archiveDirectory)
 copyFileSync(join(repositoryRoot, "LICENSE"), join(archiveDirectory, "LICENSE"))
 copyFileSync(
   join(repositoryRoot, "distribution", "CLI-README.md"),
@@ -50,6 +53,12 @@ process.stdout.write(`prepared ${platform.packageName} and ${archiveBase}\n`)
 function copyExecutable(source, destination) {
   copyFileSync(source, destination)
   if (platform.os !== "win32") chmodSync(destination, 0o755)
+}
+
+function copyRuntimeLibraries(destinationDirectory) {
+  for (const library of platform.runtimeLibraries ?? []) {
+    copyFileSync(join(binary, "..", library), join(destinationDirectory, library))
+  }
 }
 
 function writeOutput(name, value) {

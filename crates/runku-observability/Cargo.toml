@@ -13,7 +13,6 @@ async-trait.workspace = true
 async-nats.workspace = true
 base64.workspace = true
 bytes.workspace = true
-duckdb.workspace = true
 futures-util.workspace = true
 object_store.workspace = true
 runku-core = { path = "../runku-core" }
@@ -27,6 +26,12 @@ thiserror.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 url.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+duckdb = { workspace = true, features = ["parquet"] }
+
+[target.'cfg(windows)'.dependencies]
+duckdb.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

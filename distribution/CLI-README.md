@@ -5,7 +5,8 @@ the filename.
 
 1. Verify the archive against `SHA256SUMS` from the same GitHub Release.
 2. Extract the archive.
-3. Move `runku` (`runku.exe` on Windows) to a directory on `PATH`.
+3. Move `runku` to a directory on `PATH`. On Windows, keep `runku.exe` and the included
+   `duckdb.dll` together in that directory.
 4. Run `runku --version` and confirm that it matches the Release version.
 
 The executable does not update or remove `.runku/` application state automatically. Read the

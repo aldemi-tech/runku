@@ -10,6 +10,7 @@ if (platform === null) throw new Error(`${packageJson.name} is not a declared Ru
 
 for (const path of [
   join(packageDirectory, "bin", platform.binaryName),
+  ...(platform.runtimeLibraries ?? []).map((library) => join(packageDirectory, "bin", library)),
   join(packageDirectory, "LICENSE"),
   join(packageDirectory, "README.md"),
 ]) {

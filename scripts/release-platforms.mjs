@@ -44,6 +44,7 @@ export const releasePlatforms = Object.freeze([
     os: "win32",
     cpu: "arm64",
     binaryName: "runku.exe",
+    runtimeLibraries: ["duckdb.dll"],
     archiveFormat: "zip",
   }),
   Object.freeze({
@@ -53,6 +54,7 @@ export const releasePlatforms = Object.freeze([
     os: "win32",
     cpu: "x64",
     binaryName: "runku.exe",
+    runtimeLibraries: ["duckdb.dll"],
     archiveFormat: "zip",
   }),
 ])

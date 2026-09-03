@@ -126,8 +126,12 @@ jobs:
             runner: ubuntu-24.04
           - target: aarch64-pc-windows-msvc
             runner: windows-11-arm
+            duckdb_archive: libduckdb-windows-arm64.zip
+            duckdb_sha256: 006f8df62957f640a100d673432a5b6f9a7002662822a4567ed06a436ee1d801
           - target: x86_64-pc-windows-msvc
             runner: windows-2025
+            duckdb_archive: libduckdb-windows-amd64.zip
+            duckdb_sha256: 8375eb1fcf2212e8a0817950354815d4dde9dd383c2d9fa7b8975b71e278c1bd
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
@@ -151,7 +155,25 @@ jobs:
             throw "runner Rust host $hostTriple does not match ${{ matrix.target }}"
           }
       - name: Build only the CLI release binary
+        if: runner.os != 'Windows'
         run: cargo build --package runku-cli --release --locked
+      - name: Build the CLI with the verified DuckDB runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP '${{ matrix.duckdb_archive }}'
+          $runtime = Join-Path $env:RUNNER_TEMP 'duckdb-runtime'
+          Invoke-WebRequest -Uri 'https://github.com/duckdb/duckdb/releases/download/v1.5.5/${{ matrix.duckdb_archive }}' -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne '${{ matrix.duckdb_sha256 }}') {
+            throw "DuckDB archive digest mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $runtime
+          $env:DUCKDB_LIB_DIR = $runtime
+          $env:DUCKDB_INCLUDE_DIR = $runtime
+          $env:DUCKDB_STATIC = '0'
+          cargo build --package runku-cli --release --locked
+          Copy-Item (Join-Path $runtime 'duckdb.dll') target/release/duckdb.dll
       - name: Run basic binary validation
         shell: pwsh
         run: |
