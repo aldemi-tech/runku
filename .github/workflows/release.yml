@@ -149,7 +149,7 @@ jobs:
             target
           key: release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
-            release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: Verify native Rust host
         shell: pwsh
         run: |
@@ -246,7 +246,7 @@ jobs:
             target
           key: release-server-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
-            release-server-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            release-server-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: Verify native Rust host
         run: |
           host_triple="$(rustc -vV | sed -n 's/^host: //p')"
