@@ -13,6 +13,7 @@ mod https;
 mod invocation;
 mod logging;
 mod scheduling;
+mod storage;
 mod supervisor;
 mod value_bridge;
 mod worker;
@@ -33,4 +34,8 @@ pub use invocation::{
     RuntimeTelemetrySnapshot,
 };
 pub use scheduling::{ScheduleCreate, ScheduleError, ScheduleRequest, ScheduleTime};
+pub use storage::{
+    FileBytes, FileDownloadGrant, FileDownloadGrantRequest, FileMetadata, FileStorage,
+    FileStorageError, FileStoreRequest, FileUploadGrant, FileUploadGrantRequest,
+};
 pub use supervisor::RuntimeSupervisor;

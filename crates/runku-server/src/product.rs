@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, path::PathBuf, str::FromStr};
 use async_trait::async_trait;
 use runku_core::{ChannelName, EnvironmentScope, ReleaseId};
 use runku_development::DevelopmentActor;
+use runku_file_storage::{FileObjectStore, FileStorageLimits, FileUsageSink};
 use runku_gateway::CorsOrigin;
 use runku_local::{
     LocalChannelExpectation, LocalLogError, LocalLogManager, LocalProcess, LocalProcessConfig,
@@ -35,6 +36,26 @@ pub struct ProductAdapter {
     process: Mutex<Option<LocalProcess>>,
 }
 
+/// Validated server-owned configuration for one Product adapter.
+pub struct ProductAdapterConfig {
+    /// Optional historical Operational Log archive.
+    pub log_archive: Option<LogArchive>,
+    /// Optional replicated Operational Log journal.
+    pub log_journal: Option<NatsLogJournal>,
+    /// Exact browser origins admitted by the Product gateway.
+    pub allowed_origins: BTreeSet<CorsOrigin>,
+    /// Optional relative Product authentication configuration path.
+    pub auth_config: Option<PathBuf>,
+    /// Optional externally configured application-file object backend.
+    pub file_object_store: Option<FileObjectStore>,
+    /// Validated application-file resource limits.
+    pub file_storage_limits: FileStorageLimits,
+    /// Optional authoritative application-file usage destination.
+    pub file_usage_sink: Option<std::sync::Arc<dyn FileUsageSink>>,
+    /// Bounded cadence for delivering the application-file usage outbox.
+    pub file_usage_interval: std::time::Duration,
+}
+
 impl std::fmt::Debug for ProductAdapter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -46,13 +67,7 @@ impl std::fmt::Debug for ProductAdapter {
 }
 
 impl ProductAdapter {
-    pub async fn open(
-        root: PathBuf,
-        log_archive: Option<LogArchive>,
-        log_journal: Option<NatsLogJournal>,
-        allowed_origins: BTreeSet<CorsOrigin>,
-        auth_config: Option<PathBuf>,
-    ) -> Result<Self, &'static str> {
+    pub async fn open(root: PathBuf, config: ProductAdapterConfig) -> Result<Self, &'static str> {
         let state = load_local(&root)
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?
@@ -60,11 +75,15 @@ impl ProductAdapter {
         let adapter = Self {
             root,
             scope: state.scope(),
-            log_archive,
-            log_journal,
+            log_archive: config.log_archive,
+            log_journal: config.log_journal,
             process_config: LocalProcessConfig {
-                allowed_origins,
-                auth_config,
+                allowed_origins: config.allowed_origins,
+                auth_config: config.auth_config,
+                file_object_store: config.file_object_store,
+                file_storage_limits: config.file_storage_limits,
+                file_usage_sink: config.file_usage_sink,
+                file_usage_interval: config.file_usage_interval,
                 ..LocalProcessConfig::default()
             },
             process: Mutex::new(None),

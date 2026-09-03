@@ -20,6 +20,7 @@ runku-data-sqlite = { path = "../runku-data-sqlite" }
 runku-development = { path = "../runku-development" }
 runku-development-access = { path = "../runku-development-access" }
 runku-execution = { path = "../runku-execution" }
+runku-file-storage = { path = "../runku-file-storage" }
 runku-gateway = { path = "../runku-gateway" }
 runku-identity = { path = "../runku-identity" }
 runku-identity-provider = { path = "../runku-identity-provider" }
@@ -42,6 +43,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+runku-build = { path = "../runku-build" }
 runku-protocol = { path = "../runku-protocol" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

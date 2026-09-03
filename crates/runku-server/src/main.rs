@@ -16,6 +16,10 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use runku_file_storage::{
+    FileObjectStore, FileStorageError, FileStorageLimits, FileUsageEvent, FileUsageSink,
+    S3FileCredentials, S3FileStaticCredentials, S3FileStoreConfig,
+};
 use runku_gateway::CorsOrigin;
 use runku_identity::{
     ApplicationScope, JwtAlgorithm, JwtPrincipalProfile, JwtProviderConfig, KeyringCrypto,
@@ -39,10 +43,11 @@ use runku_platform_identity::{
     SqlPlatformIdentityRepository,
 };
 use runku_value::TimestampMicros;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use zeroize::Zeroizing;
 
-use crate::product::ProductAdapter;
+use crate::product::{ProductAdapter, ProductAdapterConfig};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3220";
 const BOOTSTRAP_RECOVERY_CONFIRMATION: &str = "replace-lost-initial-owner-code";
@@ -90,6 +95,7 @@ async fn run() -> Result<(), &'static str> {
         return run_logs_worker_command().await;
     }
     let config = ServerConfig::load()?;
+    let file_object_store = config.file_storage.open().await?;
     if command == "check" {
         let _ = external_authenticator(config.oidc.as_ref())?;
         println!("configuration valid");
@@ -137,10 +143,16 @@ async fn run() -> Result<(), &'static str> {
         Some(root) => Some(Arc::new(
             Box::pin(ProductAdapter::open(
                 root.clone(),
-                config.log_archive.clone(),
-                log_journal.clone(),
-                config.product_allowed_origins.clone(),
-                config.product_auth_config.clone(),
+                ProductAdapterConfig {
+                    log_archive: config.log_archive.clone(),
+                    log_journal: log_journal.clone(),
+                    allowed_origins: config.product_allowed_origins.clone(),
+                    auth_config: config.product_auth_config.clone(),
+                    file_object_store,
+                    file_storage_limits: config.file_storage_limits,
+                    file_usage_sink: config.file_usage_sink.clone(),
+                    file_usage_interval: config.file_usage_interval,
+                },
             ))
             .await?,
         )),
@@ -198,9 +210,33 @@ struct ServerConfig {
     product_auth_config: Option<PathBuf>,
     log_archive: Option<LogArchive>,
     log_journal: Option<ServerLogJournalConfig>,
+    file_storage: ServerFileStorage,
+    file_storage_limits: FileStorageLimits,
+    file_usage_sink: Option<Arc<dyn FileUsageSink>>,
+    file_usage_interval: Duration,
+}
+
+enum ServerFileStorage {
+    ProductFilesystem,
+    Filesystem(PathBuf),
+    S3(FileObjectStore),
+}
+
+impl ServerFileStorage {
+    async fn open(&self) -> Result<Option<FileObjectStore>, &'static str> {
+        match self {
+            Self::ProductFilesystem => Ok(None),
+            Self::Filesystem(root) => FileObjectStore::filesystem(root)
+                .await
+                .map(Some)
+                .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID"),
+            Self::S3(store) => Ok(Some(store.clone())),
+        }
+    }
 }
 
 impl ServerConfig {
+    #[allow(clippy::too_many_lines)]
     fn load() -> Result<Self, &'static str> {
         let database_url = required_secret("RUNKU_DATABASE_URL")?;
         if !(database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")) {
@@ -288,6 +324,14 @@ impl ServerConfig {
         if log_journal.is_some() && log_archive.is_none() {
             return Err("SERVER_LOG_ARCHIVE_S3_REQUIRED");
         }
+        let (file_storage, file_storage_limits) = load_file_storage()?;
+        let (file_usage_sink, file_usage_interval) = load_file_usage_sink()?;
+        if product_root.is_none() && !matches!(file_storage, ServerFileStorage::ProductFilesystem) {
+            return Err("SERVER_FILE_STORAGE_WITHOUT_PRODUCT_ROOT");
+        }
+        if product_root.is_none() && file_usage_sink.is_some() {
+            return Err("SERVER_FILE_USAGE_WITHOUT_PRODUCT_ROOT");
+        }
         Ok(Self {
             database_url,
             pepper,
@@ -301,7 +345,294 @@ impl ServerConfig {
             product_auth_config,
             log_archive,
             log_journal,
+            file_storage,
+            file_storage_limits,
+            file_usage_sink,
+            file_usage_interval,
         })
+    }
+}
+
+fn load_file_storage() -> Result<(ServerFileStorage, FileStorageLimits), &'static str> {
+    let limits = load_file_storage_limits()?;
+    let backend =
+        env::var("RUNKU_FILE_STORAGE_BACKEND").unwrap_or_else(|_| "filesystem".to_owned());
+    let storage = match backend.as_str() {
+        "filesystem" => match env::var_os("RUNKU_FILE_STORAGE_FILESYSTEM_ROOT") {
+            None => ServerFileStorage::ProductFilesystem,
+            Some(value) => {
+                let root = PathBuf::from(value);
+                if !root.is_absolute() || root == Path::new("/") {
+                    return Err("SERVER_FILE_STORAGE_CONFIGURATION_INVALID");
+                }
+                ServerFileStorage::Filesystem(root)
+            }
+        },
+        "s3" => load_s3_file_storage()?,
+        _ => return Err("SERVER_FILE_STORAGE_CONFIGURATION_INVALID"),
+    };
+    Ok((storage, limits))
+}
+
+fn load_file_storage_limits() -> Result<FileStorageLimits, &'static str> {
+    let limits = FileStorageLimits {
+        environment_bytes: optional_u64(
+            "RUNKU_FILE_STORAGE_ENVIRONMENT_BYTES",
+            FileStorageLimits::DEFAULT.environment_bytes,
+        )?,
+        file_bytes: optional_u64(
+            "RUNKU_FILE_STORAGE_FILE_BYTES",
+            FileStorageLimits::DEFAULT.file_bytes,
+        )?,
+        action_bytes: optional_u64(
+            "RUNKU_FILE_STORAGE_ACTION_BYTES",
+            FileStorageLimits::DEFAULT.action_bytes,
+        )?,
+        concurrent_uploads: usize::try_from(optional_u64(
+            "RUNKU_FILE_STORAGE_CONCURRENT_UPLOADS",
+            u64::try_from(FileStorageLimits::DEFAULT.concurrent_uploads)
+                .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        )?)
+        .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        concurrent_downloads: usize::try_from(optional_u64(
+            "RUNKU_FILE_STORAGE_CONCURRENT_DOWNLOADS",
+            u64::try_from(FileStorageLimits::DEFAULT.concurrent_downloads)
+                .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        )?)
+        .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        maximum_live_upload_grants: usize::try_from(optional_u64(
+            "RUNKU_FILE_STORAGE_MAXIMUM_LIVE_UPLOAD_GRANTS",
+            u64::try_from(FileStorageLimits::DEFAULT.maximum_live_upload_grants)
+                .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        )?)
+        .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        maximum_files: usize::try_from(optional_u64(
+            "RUNKU_FILE_STORAGE_MAXIMUM_FILES",
+            u64::try_from(FileStorageLimits::DEFAULT.maximum_files)
+                .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        )?)
+        .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        maximum_pending_usage_events: usize::try_from(optional_u64(
+            "RUNKU_FILE_STORAGE_MAXIMUM_PENDING_USAGE_EVENTS",
+            u64::try_from(FileStorageLimits::DEFAULT.maximum_pending_usage_events)
+                .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        )?)
+        .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?,
+        filesystem_minimum_free_bytes: optional_u64(
+            "RUNKU_FILE_STORAGE_FILESYSTEM_MINIMUM_FREE_BYTES",
+            FileStorageLimits::DEFAULT.filesystem_minimum_free_bytes,
+        )?,
+        upload_grant_ttl: Duration::from_secs(optional_u64(
+            "RUNKU_FILE_STORAGE_UPLOAD_GRANT_TTL_SECONDS",
+            FileStorageLimits::DEFAULT.upload_grant_ttl.as_secs(),
+        )?),
+        maximum_download_grant_ttl: Duration::from_secs(optional_u64(
+            "RUNKU_FILE_STORAGE_DOWNLOAD_GRANT_MAX_TTL_SECONDS",
+            FileStorageLimits::DEFAULT
+                .maximum_download_grant_ttl
+                .as_secs(),
+        )?),
+    }
+    .validated()
+    .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")?;
+    Ok(limits)
+}
+
+fn load_s3_file_storage() -> Result<ServerFileStorage, &'static str> {
+    let mut config = S3FileStoreConfig::new(
+        required("RUNKU_FILE_STORAGE_S3_BUCKET")?,
+        required("RUNKU_FILE_STORAGE_S3_REGION")?,
+    );
+    config.endpoint = env::var("RUNKU_FILE_STORAGE_S3_ENDPOINT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    if let Ok(prefix) = env::var("RUNKU_FILE_STORAGE_S3_PREFIX") {
+        config.prefix = prefix;
+    }
+    config.virtual_hosted_style =
+        storage_bool("RUNKU_FILE_STORAGE_S3_VIRTUAL_HOSTED_STYLE", false)?;
+    config.allow_loopback_http = storage_bool("RUNKU_FILE_STORAGE_S3_ALLOW_LOOPBACK_HTTP", false)?;
+    let access = optional_secret("RUNKU_FILE_STORAGE_S3_ACCESS_KEY_ID")?;
+    let secret = optional_secret("RUNKU_FILE_STORAGE_S3_SECRET_ACCESS_KEY")?;
+    let session = optional_secret("RUNKU_FILE_STORAGE_S3_SESSION_TOKEN")?;
+    config.credentials = match (access, secret) {
+        (None, None) if session.is_none() => S3FileCredentials::Environment,
+        (Some(access), Some(secret)) => {
+            let credentials = S3FileStaticCredentials::new(access, secret);
+            S3FileCredentials::Static(match session {
+                Some(token) => credentials.with_session_token(token),
+                None => credentials,
+            })
+        }
+        _ => return Err("SERVER_FILE_STORAGE_CONFIGURATION_INVALID"),
+    };
+    FileObjectStore::s3(&config)
+        .map(ServerFileStorage::S3)
+        .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")
+}
+
+#[derive(Clone)]
+struct HttpFileUsageSink {
+    client: reqwest::Client,
+    endpoint: url::Url,
+    cell_id: String,
+    token: Arc<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for HttpFileUsageSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpFileUsageSink")
+            .field("endpoint", &self.endpoint)
+            .field("cell_id", &self.cell_id)
+            .field("token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageSinkEnvelope<'a> {
+    events: Vec<UsageSinkEvent<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageSinkEvent<'a> {
+    event_id: &'a str,
+    cell_id: &'a str,
+    project_id: &'a str,
+    environment_id: &'a str,
+    kind: &'a str,
+    quantity: &'a str,
+    unit: &'a str,
+    occurred_at_micros: i64,
+    dimensions: BTreeMap<&'static str, &'static str>,
+}
+
+#[async_trait::async_trait]
+impl FileUsageSink for HttpFileUsageSink {
+    async fn deliver(&self, events: &[FileUsageEvent]) -> Result<(), FileStorageError> {
+        if events.is_empty() || events.len() > 100 {
+            return Err(FileStorageError::InvalidRequest);
+        }
+        let events = events
+            .iter()
+            .map(|event| {
+                Ok(UsageSinkEvent {
+                    event_id: &event.event_id,
+                    cell_id: &self.cell_id,
+                    project_id: &event.project_id,
+                    environment_id: &event.environment_id,
+                    kind: &event.kind,
+                    quantity: &event.quantity,
+                    unit: &event.unit,
+                    occurred_at_micros: event
+                        .occurred_at_micros
+                        .parse()
+                        .map_err(|_| FileStorageError::Corruption)?,
+                    dimensions: BTreeMap::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, FileStorageError>>()?;
+        let body = serde_json::to_vec(&UsageSinkEnvelope { events })
+            .map_err(|_| FileStorageError::Corruption)?;
+        let response = self
+            .client
+            .post(self.endpoint.clone())
+            .bearer_auth(self.token.as_str())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| FileStorageError::Unavailable)?;
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(FileStorageError::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+type FileUsageSinkConfig = (Option<Arc<dyn FileUsageSink>>, Duration);
+
+fn load_file_usage_sink() -> Result<FileUsageSinkConfig, &'static str> {
+    let endpoint = env::var("RUNKU_FILE_USAGE_SINK_URL").ok();
+    let cell_id = env::var("RUNKU_FILE_USAGE_CELL_ID").ok();
+    let token = optional_secret("RUNKU_FILE_USAGE_SINK_TOKEN")?;
+    let allow_loopback = storage_bool("RUNKU_FILE_USAGE_SINK_ALLOW_LOOPBACK_HTTP", false)?;
+    let interval = Duration::from_secs(optional_u64("RUNKU_FILE_USAGE_INTERVAL_SECONDS", 5)?);
+    if !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&interval) {
+        return Err("SERVER_FILE_USAGE_CONFIGURATION_INVALID");
+    }
+    let (endpoint, cell_id, token) = match (endpoint, cell_id, token) {
+        (None, None, None)
+            if !allow_loopback && env::var_os("RUNKU_FILE_USAGE_INTERVAL_SECONDS").is_none() =>
+        {
+            return Ok((None, interval));
+        }
+        (Some(endpoint), Some(cell_id), Some(token)) => (endpoint, cell_id, token),
+        _ => return Err("SERVER_FILE_USAGE_CONFIGURATION_INVALID"),
+    };
+    let endpoint =
+        url::Url::parse(&endpoint).map_err(|_| "SERVER_FILE_USAGE_CONFIGURATION_INVALID")?;
+    let loopback = endpoint.host_str().is_some_and(|host| {
+        host.trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+    });
+    if (endpoint.scheme() != "https"
+        && !(endpoint.scheme() == "http" && allow_loopback && loopback))
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.path() == "/"
+        || !cell_id.starts_with("cell_")
+        || cell_id.len() > 69
+        || !cell_id[5..]
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || cell_id.len() < 7
+        || token.len() > 16 * 1024
+        || token.bytes().any(|byte| !byte.is_ascii_graphic())
+    {
+        return Err("SERVER_FILE_USAGE_CONFIGURATION_INVALID");
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "SERVER_FILE_USAGE_CONFIGURATION_INVALID")?;
+    Ok((
+        Some(Arc::new(HttpFileUsageSink {
+            client,
+            endpoint,
+            cell_id,
+            token: Arc::new(Zeroizing::new(token)),
+        })),
+        interval,
+    ))
+}
+
+fn optional_u64(name: &str, default: u64) -> Result<u64, &'static str> {
+    env::var(name)
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| "SERVER_FILE_STORAGE_CONFIGURATION_INVALID")
+        .map(|value| value.unwrap_or(default))
+}
+
+fn storage_bool(name: &str, default: bool) -> Result<bool, &'static str> {
+    match env::var(name) {
+        Ok(value) if value == "true" => Ok(true),
+        Ok(value) if value == "false" => Ok(false),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Ok(_) | Err(env::VarError::NotUnicode(_)) => {
+            Err("SERVER_FILE_STORAGE_CONFIGURATION_INVALID")
+        }
     }
 }
 
@@ -806,6 +1137,22 @@ fn required_secret(name: &str) -> Result<String, &'static str> {
     }
 }
 
+fn optional_secret(name: &str) -> Result<Option<String>, &'static str> {
+    let direct = match env::var(name) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => return Err("SERVER_SECRET_VALUE_INVALID"),
+    };
+    let file_name = format!("{name}_FILE");
+    let file = env::var_os(&file_name);
+    match (direct, file) {
+        (Some(_), Some(_)) => Err("SERVER_SECRET_CONFIGURATION_CONFLICT"),
+        (Some(value), None) => validate_secret_value(value).map(Some),
+        (None, Some(path)) => read_secret_file(Path::new(&path)).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
 fn validate_secret_value(value: String) -> Result<String, &'static str> {
     if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
         return Err("SERVER_SECRET_VALUE_INVALID");
@@ -886,7 +1233,10 @@ async fn shutdown() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use tempfile::NamedTempFile;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
@@ -919,6 +1269,80 @@ mod tests {
         let link = directory.path().join("link");
         symlink(&target, &link)?;
         assert_eq!(read_secret_file(&link), Err("SERVER_SECRET_FILE_INVALID"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_usage_sink_sends_exact_authenticated_batch_without_redirects()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            loop {
+                let read = stream.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(headers_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..headers_end])?;
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .ok_or("missing content length")?;
+                if request.len() >= headers_end + 4 + length {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            Ok::<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>(request)
+        });
+        let sink = HttpFileUsageSink {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
+            endpoint: url::Url::parse(&format!("http://{address}/v1/internal/usage-events"))?,
+            cell_id: "cell_local-test".to_owned(),
+            token: Arc::new(Zeroizing::new("workload-secret".to_owned())),
+        };
+        sink.deliver(&[FileUsageEvent {
+            sequence: 1,
+            event_id: "use_01J00000000000000000000000".to_owned(),
+            project_id: "prj_01J00000000000000000000000".to_owned(),
+            environment_id: "env_01J00000000000000000000000".to_owned(),
+            kind: "application_file.committed".to_owned(),
+            quantity: "6".to_owned(),
+            unit: "byte".to_owned(),
+            occurred_at_micros: "1767225600000000".to_owned(),
+        }])
+        .await?;
+        let request = server.await??;
+        let text = std::str::from_utf8(&request)?;
+        let headers = text
+            .split("\r\n\r\n")
+            .next()
+            .ok_or("missing headers")?
+            .to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer workload-secret\r\n"));
+        assert!(text.contains("\"cellId\":\"cell_local-test\""));
+        let body = text.split("\r\n\r\n").nth(1).ok_or("missing body")?;
+        assert!(!body.contains("workload-secret"));
+        assert!(body.contains("\"occurredAtMicros\":1767225600000000"));
         Ok(())
     }
 }

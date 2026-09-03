@@ -18,6 +18,7 @@ cp "$repository/deployments/docker/compose.browser.yaml" "$stage/compose.browser
 cp "$repository/deployments/docker/compose.ha-logs.yaml" "$stage/compose.ha-logs.yaml"
 cp "$repository/deployments/docker/compose.ha-s3-compatible.yaml" "$stage/compose.ha-s3-compatible.yaml"
 cp "$repository/deployments/docker/compose.s3-logs.yaml" "$stage/compose.s3-logs.yaml"
+cp "$repository/deployments/docker/compose.s3-files.yaml" "$stage/compose.s3-files.yaml"
 cp "$repository/deployments/docker/compose.s3-compatible.yaml" "$stage/compose.s3-compatible.yaml"
 cp "$repository/deployments/docker/.env.example" "$stage/.env.example"
 cp "$repository/deployments/docker/runku-selfhost" "$stage/runku-selfhost"

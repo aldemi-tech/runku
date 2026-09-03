@@ -13,7 +13,10 @@ pub use model::{
     PresentedCredentials, RealtimePreparedSubscription, RealtimeQueryService,
     RealtimeSubscribeContext,
 };
-pub use router::{GatewayHttpConfig, build_router, build_router_with_realtime, serve};
+pub use router::{
+    GatewayHttpConfig, build_router, build_router_with_files, build_router_with_realtime,
+    build_router_with_realtime_and_files, serve,
+};
 pub use service::{
     ArtifactCacheTelemetrySnapshot, DevelopmentCatalog, GatewayClock, PrincipalVerificationError,
     PrincipalVerifier, ProductInvocationConfig, ProductInvocationService, ServingCatalog,

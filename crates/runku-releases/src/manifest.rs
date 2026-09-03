@@ -97,6 +97,10 @@ pub enum Capability {
     NetworkHttps,
     /// Create a durable Scheduled Invocation.
     SchedulerCreate,
+    /// Read application files and create bounded download grants.
+    FileRead,
+    /// Store/delete application files and create bounded upload grants.
+    FileWrite,
     /// Read one named secret through the secret provider.
     Secret(String),
 }
@@ -254,6 +258,19 @@ impl ReleaseManifestV1 {
                 previous_capability = Some(capability);
             }
         }
+        let storage_requested = self.functions.iter().any(|function| {
+            function.capabilities.iter().any(|capability| {
+                matches!(capability, Capability::FileRead | Capability::FileWrite)
+            })
+        });
+        if storage_requested
+            && !matches!(
+                self.runtime_version.as_str(),
+                "runku-js-2" | "runku-node-2" | "runku-hybrid-2"
+            )
+        {
+            return Err(ReleaseError::InvalidManifest);
+        }
         let mut previous_cron: Option<&CronName> = None;
         for cron in &self.cron_definitions {
             let target = self
@@ -287,7 +304,7 @@ impl ReleaseManifestV1 {
         self.validate()?;
         if !matches!(
             self.runtime_version.as_str(),
-            "platform-js-1" | "runku-js-1"
+            "platform-js-1" | "runku-js-1" | "runku-js-2"
         ) || self
             .functions
             .iter()
@@ -345,11 +362,11 @@ impl ReleaseManifestV1 {
     pub fn ensure_local_full_node_supported(&self) -> Result<(), ReleaseError> {
         self.validate()?;
         let version_supported = match self.runtime_version.as_str() {
-            "runku-node-1" => self
+            "runku-node-1" | "runku-node-2" => self
                 .functions
                 .iter()
                 .all(|function| function.runtime_class == RuntimeClass::FullNode),
-            "runku-hybrid-1" => {
+            "runku-hybrid-1" | "runku-hybrid-2" => {
                 self.functions
                     .iter()
                     .any(|function| function.runtime_class == RuntimeClass::SafeV8)
@@ -718,6 +735,8 @@ const fn decode_capability(tag: u8) -> Result<Capability, ReleaseError> {
         6 => Ok(Capability::FunctionAction),
         7 => Ok(Capability::NetworkHttps),
         8 => Ok(Capability::SchedulerCreate),
+        10 => Ok(Capability::FileRead),
+        11 => Ok(Capability::FileWrite),
         _ => Err(ReleaseError::Unsupported),
     }
 }
@@ -745,6 +764,8 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
                 | Capability::FunctionAction
                 | Capability::NetworkHttps
                 | Capability::SchedulerCreate
+                | Capability::FileRead
+                | Capability::FileWrite
                 | Capability::Secret(_)
         ),
     }
@@ -833,6 +854,8 @@ const fn capability_tag(value: &Capability) -> u8 {
         Capability::FunctionAction => 6,
         Capability::NetworkHttps => 7,
         Capability::SchedulerCreate => 8,
+        Capability::FileRead => 10,
+        Capability::FileWrite => 11,
         Capability::Secret(_) => 9,
     }
 }

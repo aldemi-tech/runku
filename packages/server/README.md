@@ -88,6 +88,8 @@ All fields are required and statically extractable. `auth` is `none|optional|gue
 | `function:action` | no | no | yes | `ctx.runAction` |
 | `network:https` | no | no | yes | `ctx.https.request` |
 | `scheduler:create` | no | yes | yes | `ctx.scheduler.runAfter/runAt` |
+| `storage:read` | no | no | yes | `ctx.storage.getMetadata/createDownload/get` |
+| `storage:write` | no | no | yes | `ctx.storage.createUpload/store/delete` |
 
 Every context also exposes `ctx.invocation`, cooperative yield, and bounded structured `ctx.log`.
 
@@ -137,6 +139,27 @@ await ctx.scheduler.runAfter(
 ```
 
 Times are microseconds. Durable delivery is at-least-once; external effects require idempotency.
+
+## Application files
+
+Actions use `ctx.storage` only when the matching capability is declared. Direct bytes are bounded;
+HTTP grants are used for larger streaming transfers:
+
+```ts
+const upload = await ctx.storage.createUpload({
+  maxBytes: 8_000_000,
+  contentType: "image/png",
+})
+const download = await ctx.storage.createDownload(fileId, {
+  expiresInMicros: 60_000_000n,
+})
+```
+
+`storage:read` and `storage:write` produce runtime contract version 2. Safe V8 and local Full Node
+implement it; the current distributed Full Node Agent path rejects it. File IDs do not authorize
+access: verify principal/application ownership before returning a grant. See
+[Application file storage](../../docs/functions/file-storage.md) for exact APIs, HTTP flow, quotas,
+security, S3/filesystem configuration, and recovery responsibility.
 
 ## Cron and canonical constants
 

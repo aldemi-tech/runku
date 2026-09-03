@@ -131,6 +131,47 @@ export interface MutationOptions extends CallOptions {
   readonly operationId?: string;
 }
 
+/** Opaque Environment-scoped application file identity. */
+export type FileId = `fil_${string}`;
+
+/** Immutable metadata returned after a file is committed. */
+export interface FileMetadata {
+  readonly fileId: FileId;
+  readonly sizeBytes: string;
+  readonly sha256: string;
+  readonly contentType: string;
+  readonly createdAtMicros: string;
+}
+
+/** One-shot upload authority issued by an Action with `storage:write`. */
+export interface FileUploadGrant {
+  readonly uploadId: string;
+  readonly path: string;
+  readonly token: string;
+  readonly expiresAtMicros: string;
+  readonly maxBytes: string;
+}
+
+/** Short-lived download authority issued by an Action with `storage:read`. */
+export interface FileDownloadGrant {
+  readonly path: string;
+  readonly token: string;
+  readonly expiresAtMicros: string;
+  readonly metadata: FileMetadata;
+}
+
+export interface FileUploadOptions {
+  readonly signal?: AbortSignal;
+  /** Must equal the media type declared when the Action created the grant. */
+  readonly contentType?: string;
+}
+
+export interface FileDownloadOptions {
+  readonly signal?: AbortSignal;
+  /** Optional inclusive-exclusive byte range. */
+  readonly range?: Readonly<{ start: bigint; end: bigint }>;
+}
+
 export type RunkuMetadata =
   | Readonly<{ kind: "query"; snapshotSequence: bigint | null }>
   | Readonly<{
@@ -196,6 +237,15 @@ export interface TypedRunkuClient<Registry> {
     options?: CallOptions,
   ): Promise<RunkuResult<FunctionResult<Registry, Name>>>;
   realtime(options?: RealtimeClientOptions): TypedRunkuRealtimeClient<Registry>;
+  uploadFile(
+    grant: FileUploadGrant,
+    body: BodyInit,
+    options?: FileUploadOptions,
+  ): Promise<FileMetadata>;
+  downloadFile(
+    grant: FileDownloadGrant,
+    options?: FileDownloadOptions,
+  ): Promise<Response>;
 }
 
 /** Typed realtime view restricted to public query contracts. */
@@ -303,6 +353,82 @@ export class RunkuClient {
     options: CallOptions = {},
   ): Promise<RunkuResult<T>> {
     return this.#call<T>("action", functionName, argumentsValue, options, undefined);
+  }
+
+  /** Streams a body through a one-shot upload grant. Uploads are never automatically retried. */
+  async uploadFile(
+    grant: FileUploadGrant,
+    body: BodyInit,
+    options: FileUploadOptions = {},
+  ): Promise<FileMetadata> {
+    const validated = validateUploadGrant(grant);
+    const lifecycle = abortLifecycle(options.signal, this.#timeoutMs);
+    try {
+      const headers = new Headers({ accept: "application/json" });
+      headers.set("authorization", `Bearer ${validated.token}`);
+      if (options.contentType !== undefined) {
+        headers.set("content-type", validateMediaType(options.contentType));
+      }
+      const init: RequestInit & { duplex?: "half" } = {
+        method: "PUT",
+        headers,
+        body,
+        signal: lifecycle.signal,
+      };
+      if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+        init.duplex = "half";
+      }
+      const response = await this.#fetch(`${this.#baseUrl}${validated.path}`, init);
+      validateContentType(response);
+      const bytes = await readBounded(response);
+      const decoded = decodeJson(bytes);
+      if (response.status === 201) return decodeFileUploadSuccess(decoded);
+      throw decodeFailure(decoded, response.status, response.headers.get("x-runku-request-id"));
+    } catch (error) {
+      if (lifecycle.signal.aborted) throw abortError(lifecycle.timedOut());
+      throw error instanceof RunkuError
+        ? error
+        : localError("SDK_NETWORK_ERROR", "The file upload failed.", true);
+    } finally {
+      lifecycle.dispose();
+    }
+  }
+
+  /** Opens an authenticated streaming download response; the client deadline covers the stream. */
+  async downloadFile(
+    grant: FileDownloadGrant,
+    options: FileDownloadOptions = {},
+  ): Promise<Response> {
+    const validated = validateDownloadGrant(grant);
+    const lifecycle = abortLifecycle(options.signal, this.#timeoutMs);
+    try {
+      const headers = new Headers({ accept: validated.metadata.contentType });
+      headers.set("authorization", `Bearer ${validated.token}`);
+      const range = validateFileRange(options.range, validated.metadata.sizeBytes);
+      if (range !== undefined) headers.set("range", range.header);
+      const response = await this.#fetch(`${this.#baseUrl}${validated.path}`, {
+        method: "GET",
+        headers,
+        signal: lifecycle.signal,
+      });
+      if (response.status !== 200 && response.status !== 206) {
+        validateContentType(response);
+        const bytes = await readBounded(response);
+        throw decodeFailure(
+          decodeJson(bytes),
+          response.status,
+          response.headers.get("x-runku-request-id"),
+        );
+      }
+      validateFileDownloadResponse(response, validated.metadata, range);
+      return wrapDownloadLifecycle(response, lifecycle);
+    } catch (error) {
+      lifecycle.dispose();
+      if (lifecycle.signal.aborted) throw abortError(lifecycle.timedOut());
+      throw error instanceof RunkuError
+        ? error
+        : localError("SDK_NETWORK_ERROR", "The file download failed.", true);
+    }
   }
 
   async #call<T extends RunkuValue>(
@@ -939,6 +1065,192 @@ function decodeFailure(value: unknown, status: number, headerRequestId: string |
     retryable: value.error.retryable,
     status,
     requestId: value.requestId,
+  });
+}
+
+function validateTransferToken(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 1024
+      || /[^\x21-\x7e]/.test(value)) throw new TypeError("file transfer token is invalid");
+  return value;
+}
+
+function validateTransferPath(path: unknown, expected: string): string {
+  if (typeof path !== "string" || path !== expected) {
+    throw new TypeError("file transfer path is invalid");
+  }
+  return path;
+}
+
+function validateUploadGrant(grant: FileUploadGrant): FileUploadGrant {
+  if (!isRecord(grant)) throw new TypeError("file upload grant is invalid");
+  const uploadId = parseTransferId(grant.uploadId, "upl");
+  const path = validateTransferPath(grant.path, `/v1/files/uploads/${uploadId}`);
+  parseU64ForInput(grant.maxBytes, true);
+  parseI64ForInput(grant.expiresAtMicros);
+  return Object.freeze({
+    uploadId,
+    path,
+    token: validateTransferToken(grant.token),
+    expiresAtMicros: grant.expiresAtMicros as string,
+    maxBytes: grant.maxBytes as string,
+  });
+}
+
+function validateDownloadGrant(grant: FileDownloadGrant): FileDownloadGrant {
+  if (!isRecord(grant)) throw new TypeError("file download grant is invalid");
+  const metadata = decodeFileMetadata(grant.metadata);
+  const path = validateTransferPath(grant.path, `/v1/files/downloads/${metadata.fileId}`);
+  parseI64ForInput(grant.expiresAtMicros);
+  return Object.freeze({
+    path,
+    token: validateTransferToken(grant.token),
+    expiresAtMicros: grant.expiresAtMicros as string,
+    metadata,
+  });
+}
+
+function parseTransferId(value: unknown, prefix: "upl" | "fil"): string {
+  if (typeof value !== "string" || !new RegExp(`^${prefix}_${ULID_PATTERN}$`).test(value)) {
+    throw new TypeError("file resource ID is invalid");
+  }
+  return value;
+}
+
+function parseU64ForInput(value: unknown, nonzero = false): bigint {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new TypeError("file size is invalid");
+  }
+  const parsed = BigInt(value);
+  if (parsed > (1n << 64n) - 1n || (nonzero && parsed === 0n)) {
+    throw new TypeError("file size is invalid");
+  }
+  return parsed;
+}
+
+function parseI64ForInput(value: unknown): bigint {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new TypeError("file grant expiration is invalid");
+  }
+  const parsed = BigInt(value);
+  if (parsed > (1n << 63n) - 1n) throw new TypeError("file grant expiration is invalid");
+  return parsed;
+}
+
+function validateMediaType(value: string): string {
+  if (value.length === 0 || value.length > 255 || value.split("/").length !== 2
+      || /[^\x20-\x7e]/.test(value) || /[\\"']/.test(value)) {
+    throw new TypeError("file media type is invalid");
+  }
+  return value.toLowerCase();
+}
+
+function decodeFileMetadata(value: unknown): FileMetadata {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    "fileId", "sizeBytes", "sha256", "contentType", "createdAtMicros",
+  ])) throw protocolError();
+  const fileId = parseTransferId(value.fileId, "fil") as FileId;
+  parseU64ForInput(value.sizeBytes, true);
+  if (typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+    throw protocolError();
+  }
+  if (typeof value.contentType !== "string"
+      || validateMediaType(value.contentType) !== value.contentType) throw protocolError();
+  parseI64ForInput(value.createdAtMicros);
+  return Object.freeze({
+    fileId,
+    sizeBytes: value.sizeBytes as string,
+    sha256: value.sha256,
+    contentType: value.contentType,
+    createdAtMicros: value.createdAtMicros as string,
+  });
+}
+
+function decodeFileUploadSuccess(value: unknown): FileMetadata {
+  if (!isRecord(value) || !hasExactKeys(value, ["version", "status", "file"])
+      || value.version !== 1 || value.status !== "ok") throw protocolError();
+  return decodeFileMetadata(value.file);
+}
+
+function validateFileRange(
+  range: FileDownloadOptions["range"],
+  size: string,
+): Readonly<{ header: string; start: bigint; end: bigint }> | undefined {
+  if (range === undefined) return undefined;
+  const maximum = parseU64ForInput(size, true);
+  if (range.start < 0n || range.end <= range.start || range.end > maximum) {
+    throw new TypeError("file byte range is invalid");
+  }
+  return Object.freeze({
+    header: `bytes=${range.start}-${range.end - 1n}`,
+    start: range.start,
+    end: range.end,
+  });
+}
+
+function validateFileDownloadResponse(
+  response: Response,
+  metadata: FileMetadata,
+  range: Readonly<{ start: bigint; end: bigint }> | undefined,
+): void {
+  if ((range === undefined && response.status !== 200)
+      || (range !== undefined && response.status !== 206)
+      || response.body === null
+      || response.headers.get("content-type") !== metadata.contentType
+      || response.headers.get("etag") !== `"${metadata.sha256}"`
+      || response.headers.get("accept-ranges") !== "bytes"
+      || response.headers.get("content-disposition") !== "attachment") throw protocolError();
+  const expectedLength = range === undefined
+    ? parseU64ForInput(metadata.sizeBytes, true)
+    : range.end - range.start;
+  const length = response.headers.get("content-length");
+  if (length === null || parseU64ForInput(length, true) !== expectedLength) throw protocolError();
+  const contentRange = response.headers.get("content-range");
+  if (range === undefined) {
+    if (contentRange !== null) throw protocolError();
+  } else if (contentRange !== `bytes ${range.start}-${range.end - 1n}/${metadata.sizeBytes}`) {
+    throw protocolError();
+  }
+}
+
+function wrapDownloadLifecycle(
+  response: Response,
+  lifecycle: ReturnType<typeof abortLifecycle>,
+): Response {
+  const reader = response.body?.getReader();
+  if (reader === undefined) {
+    lifecycle.dispose();
+    throw protocolError();
+  }
+  let closed = false;
+  const finish = (): void => {
+    if (closed) return;
+    closed = true;
+    lifecycle.dispose();
+  };
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          finish();
+          controller.close();
+        } else {
+          controller.enqueue(next.value);
+        }
+      } catch (error) {
+        finish();
+        controller.error(lifecycle.signal.aborted ? abortError(lifecycle.timedOut()) : error);
+      }
+    },
+    async cancel(reason) {
+      finish();
+      await reader.cancel(reason);
+    },
+  });
+  return new Response(stream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
   });
 }
 

@@ -29,10 +29,12 @@ use runku_execution::{
     ActionExecutor, MutationExecutor, QueryExecutor, ScheduledInvocationRunner, ScheduledWorker,
     ScheduledWorkerConfig,
 };
+use runku_file_storage::{FileObjectStore, FileStorageLimits, FileStorageService, FileUsageSink};
 use runku_gateway::{
     CorsOrigin, DevelopmentCatalog, GatewayClock, GatewayHttpConfig, PrincipalVerificationError,
     PrincipalVerifier, ProductInvocationConfig, ProductInvocationService, RealtimeGateway,
-    RealtimeGatewayConfig, ServingCatalog, SystemGatewayClock, build_router_with_realtime,
+    RealtimeGatewayConfig, ServingCatalog, SystemGatewayClock,
+    build_router_with_realtime_and_files,
 };
 use runku_identity::{ApplicationCredentialResolver, KeyringCrypto, PrincipalEvidence};
 use runku_identity_provider::JwtProviderManager;
@@ -58,7 +60,7 @@ use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
 use crate::{
     LocalProjectState, LocalStateError, load_local, load_local_auth_config,
     publish::reconcile_cron_head,
-    state::{LocalLock, acquire_process_lock, load_identity_pepper},
+    state::{LocalLock, acquire_process_lock, load_file_storage_pepper, load_identity_pepper},
 };
 
 /// Validated bounded local daemon policy.
@@ -78,6 +80,14 @@ pub struct LocalProcessConfig {
     pub log_archive: Option<LogArchive>,
     /// Optional replicated journal; absent archives directly in the same process.
     pub log_journal: Option<NatsLogJournal>,
+    /// Optional externally configured object backend; absent uses the local dedicated directory.
+    pub file_object_store: Option<FileObjectStore>,
+    /// Environment, per-file, Action-memory, concurrency, and grant limits.
+    pub file_storage_limits: FileStorageLimits,
+    /// Optional at-least-once sink for authoritative application-file usage events.
+    pub file_usage_sink: Option<Arc<dyn FileUsageSink>>,
+    /// Cadence for bounded usage outbox delivery.
+    pub file_usage_interval: Duration,
     /// Maximum time graceful shutdown waits before aborting a stuck task.
     pub shutdown_grace: Duration,
 }
@@ -92,6 +102,10 @@ impl Default for LocalProcessConfig {
             log_archive_interval: Duration::from_secs(60),
             log_archive: None,
             log_journal: None,
+            file_object_store: None,
+            file_storage_limits: FileStorageLimits::DEFAULT,
+            file_usage_sink: None,
+            file_usage_interval: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(5),
         }
     }
@@ -106,6 +120,8 @@ impl LocalProcessConfig {
                 .contains(&self.log_archive_interval)
             || !(Duration::from_millis(100)..=Duration::from_secs(30))
                 .contains(&self.shutdown_grace)
+            || !(Duration::from_millis(100)..=Duration::from_secs(300))
+                .contains(&self.file_usage_interval)
         {
             return Err(LocalProcessError::InvalidConfiguration);
         }
@@ -172,6 +188,10 @@ pub struct LocalProcessTelemetrySnapshot {
     pub log_journal_polls: u64,
     /// Operational Log records confirmed by replicated-journal `PubAck`.
     pub log_journal_records: u64,
+    /// Successful authoritative file-usage outbox deliveries, including idle polls.
+    pub file_usage_polls: u64,
+    /// Authoritative file-usage facts durably accepted by the configured sink.
+    pub file_usage_events: u64,
     /// Sanitized background failures across all loops.
     pub background_failures: u64,
     /// Tasks forcibly aborted after the shutdown grace period.
@@ -188,6 +208,8 @@ struct LocalProcessTelemetry {
     log_archive_records: AtomicU64,
     log_journal_polls: AtomicU64,
     log_journal_records: AtomicU64,
+    file_usage_polls: AtomicU64,
+    file_usage_events: AtomicU64,
     background_failures: AtomicU64,
     forced_shutdowns: AtomicU64,
 }
@@ -203,6 +225,8 @@ impl LocalProcessTelemetry {
             log_archive_records: self.log_archive_records.load(Ordering::Relaxed),
             log_journal_polls: self.log_journal_polls.load(Ordering::Relaxed),
             log_journal_records: self.log_journal_records.load(Ordering::Relaxed),
+            file_usage_polls: self.file_usage_polls.load(Ordering::Relaxed),
+            file_usage_events: self.file_usage_events.load(Ordering::Relaxed),
             background_failures: self.background_failures.load(Ordering::Relaxed),
             forced_shutdowns: self.forced_shutdowns.load(Ordering::Relaxed),
         }
@@ -387,6 +411,23 @@ impl LocalProcess {
                 .await
                 .map_err(|_| LocalProcessError::Composition)?,
         );
+        let file_objects = match config.file_object_store.clone() {
+            Some(objects) => objects,
+            None => FileObjectStore::filesystem(&paths.file_storage_objects)
+                .await
+                .map_err(|_| LocalProcessError::Composition)?,
+        };
+        let files = Arc::new(
+            FileStorageService::open_sqlite(
+                state.scope(),
+                &paths.file_storage_database,
+                file_objects,
+                load_file_storage_pepper(&paths).await.map_err(map_state)?,
+                config.file_storage_limits,
+            )
+            .await
+            .map_err(|_| LocalProcessError::Composition)?,
+        );
         let log_repository: Arc<dyn LogRepository> = Arc::new(
             SqlLogRepository::connect_sqlite(
                 &sqlite_url(&paths.observability_database),
@@ -504,6 +545,7 @@ impl LocalProcess {
             )
             .map_err(|_| LocalProcessError::Composition)?
             .with_full_node_runtime(local_node)
+            .with_file_storage(files.clone())
             .with_development_catalog(Arc::clone(&development_catalog))
             .map_err(|_| LocalProcessError::Composition)?
             .with_operational_logs(log_boundary),
@@ -516,7 +558,7 @@ impl LocalProcess {
             registry.clone(),
         )
         .map_err(|_| LocalProcessError::Composition)?;
-        let gateway = build_router_with_realtime(
+        let gateway = build_router_with_realtime_and_files(
             GatewayHttpConfig {
                 allowed_origins: config.allowed_origins,
                 max_concurrent_requests: 1_024,
@@ -524,6 +566,7 @@ impl LocalProcess {
             },
             service.clone(),
             realtime,
+            files.clone(),
         )
         .map_err(|_| LocalProcessError::Composition)?;
 
@@ -625,6 +668,15 @@ impl LocalProcess {
                 log_forwarder,
                 config.log_archive_interval,
                 log_maintenance_shutdown.subscribe(),
+                Arc::clone(&telemetry),
+            ));
+        }
+        if let Some(sink) = config.file_usage_sink.clone() {
+            tasks.push(spawn_file_usage_loop(
+                files,
+                sink,
+                config.file_usage_interval,
+                shutdown.subscribe(),
                 Arc::clone(&telemetry),
             ));
         }
@@ -988,6 +1040,57 @@ fn spawn_log_forward_loop(
     })
 }
 
+fn spawn_file_usage_loop(
+    files: Arc<FileStorageService>,
+    sink: Arc<dyn FileUsageSink>,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+    telemetry: Arc<LocalProcessTelemetry>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let deliver_once = || async {
+            let events = files.pending_usage_events(100).await?;
+            if events.is_empty() {
+                return Ok::<usize, runku_runtime::FileStorageError>(0);
+            }
+            sink.deliver(&events).await?;
+            let through = events
+                .last()
+                .map(|event| event.sequence)
+                .ok_or(runku_runtime::FileStorageError::Corruption)?;
+            files.acknowledge_usage_events(through).await?;
+            Ok(events.len())
+        };
+        let record = |result: Result<usize, runku_runtime::FileStorageError>| {
+            if let Ok(events) = result {
+                telemetry.file_usage_polls.fetch_add(1, Ordering::Relaxed);
+                telemetry
+                    .file_usage_events
+                    .fetch_add(u64::try_from(events).unwrap_or(u64::MAX), Ordering::Relaxed);
+                events > 0
+            } else {
+                telemetry
+                    .background_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        };
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => { record(deliver_once().await); }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        while record(deliver_once().await) {}
+                        return;
+                    }
+                }
+            }
+        }
+    })
+}
+
 async fn run_loop<F, Fut>(interval: Duration, mut shutdown: watch::Receiver<bool>, mut poll: F)
 where
     F: FnMut() -> Fut,
@@ -1027,15 +1130,19 @@ fn map_state(error: LocalStateError) -> LocalProcessError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr, str::FromStr, time::Duration};
+    use std::{collections::BTreeSet, net::SocketAddr, path::Path, str::FromStr, time::Duration};
 
+    use runku_build::{BuildMetadata, build_project};
     use runku_core::{
         ApplicationClientId, BuildId, CodeTarget, CredentialId, FunctionId, ProjectId, ReleaseId,
         WorkspaceRef,
     };
     use runku_development::DevelopmentActor;
     use runku_identity::{ApplicationScope, ClientKind};
-    use runku_protocol::{QueryCallV1, decode_error_v1, decode_success_v1, encode_query_call_v1};
+    use runku_protocol::{
+        ActionCallV1, QueryCallV1, decode_error_v1, decode_success_v1, encode_action_call_v1,
+        encode_query_call_v1,
+    };
     use runku_releases::{
         AuthPolicy, Capability, FunctionManifest, FunctionType, FunctionVisibility,
         ReleaseManifestV1, RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_release_manifest,
@@ -1212,6 +1319,167 @@ mod tests {
         assert_eq!(restarted.state(), &state);
         assert!(restarted.is_ready());
         restarted.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn process_action_grants_drive_authenticated_http_file_transfer() -> TestResult {
+        let directory = tempdir()?;
+        let workspace = WorkspaceRef::from_str("default")?;
+        let (state, _) = initialize_local(
+            directory.path(),
+            workspace.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            TimestampMicros::new(1_800_000_000_000_000),
+        )
+        .await?;
+        let source = directory.path().join("runku");
+        std::fs::create_dir(&source)?;
+        std::fs::write(
+            source.join("schema.ts"),
+            "import { defineSchema } from '@runku/server'; export default defineSchema({});",
+        )?;
+        std::fs::write(
+            source.join("files.ts"),
+            r#"
+import { action, v } from "@runku/server"
+export const beginUpload = action({
+  auth: "none", visibility: "public", capabilities: ["storage:write"],
+  args: v.null(), returns: v.any(),
+  handler(ctx) { return ctx.storage.createUpload({ maxBytes: 6, contentType: "text/plain" }); },
+})
+export const beginDownload = action({
+  auth: "none", visibility: "public", capabilities: ["storage:read"],
+  args: v.string(), returns: v.any(),
+  handler(ctx, fileId) { return ctx.storage.createDownload(fileId, { expiresInMicros: 1000000n }); },
+})
+"#,
+        )?;
+        let output = build_project(
+            directory.path(),
+            Path::new("runku"),
+            state.project_id,
+            BuildMetadata {
+                release_id: ReleaseId::generate(),
+                build_id: BuildId::generate(),
+                created_at: TimestampMicros::new(1_800_000_000_000_001),
+            },
+        )?;
+        publish_local(
+            directory.path(),
+            &workspace,
+            &DevelopmentActor::from_str("file-transfer-test")?,
+            &std::fs::read(output.manifest_path)?,
+            &std::fs::read(output.artifact_path)?,
+        )
+        .await?;
+        let identities = LocalIdentityManager::open(directory.path()).await?;
+        let scopes = BTreeSet::from(["functions:invoke".parse::<ApplicationScope>()?]);
+        let client_id = ApplicationClientId::generate();
+        identities
+            .create_client(
+                client_id,
+                "file-transfer-browser".parse()?,
+                ClientKind::Public,
+                scopes.clone(),
+                TimestampMicros::new(1_800_000_000_000_002),
+            )
+            .await?;
+        let application_key = identities
+            .create_credential(
+                CredentialId::generate(),
+                client_id,
+                "file-transfer-key".parse()?,
+                scopes,
+                TimestampMicros::new(1_800_000_000_000_003),
+                None,
+            )
+            .await?;
+        let process = LocalProcess::start(directory.path(), test_config()).await?;
+        let base = format!("http://{}", process.address());
+        let client = reqwest::Client::new();
+        let invoke = |function: &str,
+                      arguments: CanonicalValue|
+         -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            Ok(encode_action_call_v1(&ActionCallV1 {
+                target: CodeTarget::Workspace(workspace.clone()),
+                function: function.parse()?,
+                arguments,
+            })?)
+        };
+        let upload_response = client
+            .post(format!("{base}/v1/action"))
+            .header("content-type", "application/json")
+            .header("x-runku-key", application_key.key.expose())
+            .body(invoke("files.beginUpload", CanonicalValue::Null)?)
+            .send()
+            .await?;
+        let status = upload_response.status();
+        let bytes = upload_response.bytes().await?;
+        if status != reqwest::StatusCode::OK {
+            return Err(
+                format!("upload grant Action failed: {:?}", decode_error_v1(&bytes)?).into(),
+            );
+        }
+        let CanonicalValue::Object(upload) = decode_success_v1(&bytes)?.result else {
+            return Err("upload grant was not an object".into());
+        };
+        let Some(CanonicalValue::String(upload_path)) = upload.get("path") else {
+            return Err("upload grant path missing".into());
+        };
+        let Some(CanonicalValue::String(upload_token)) = upload.get("token") else {
+            return Err("upload grant token missing".into());
+        };
+        let stored = client
+            .put(format!("{base}{upload_path}"))
+            .bearer_auth(upload_token)
+            .header("content-type", "text/plain")
+            .body("abcdef")
+            .send()
+            .await?;
+        assert_eq!(stored.status(), reqwest::StatusCode::CREATED);
+        let stored: serde_json::Value = serde_json::from_slice(&stored.bytes().await?)?;
+        let file_id = stored["file"]["fileId"]
+            .as_str()
+            .ok_or("stored file ID missing")?
+            .to_owned();
+        let download_response = client
+            .post(format!("{base}/v1/action"))
+            .header("content-type", "application/json")
+            .header("x-runku-key", application_key.key.expose())
+            .body(invoke(
+                "files.beginDownload",
+                CanonicalValue::String(file_id),
+            )?)
+            .send()
+            .await?;
+        let status = download_response.status();
+        let bytes = download_response.bytes().await?;
+        if status != reqwest::StatusCode::OK {
+            return Err(format!(
+                "download grant Action failed: {:?}",
+                decode_error_v1(&bytes)?
+            )
+            .into());
+        }
+        let CanonicalValue::Object(download) = decode_success_v1(&bytes)?.result else {
+            return Err("download grant was not an object".into());
+        };
+        let Some(CanonicalValue::String(download_path)) = download.get("path") else {
+            return Err("download grant path missing".into());
+        };
+        let Some(CanonicalValue::String(download_token)) = download.get("token") else {
+            return Err("download grant token missing".into());
+        };
+        let downloaded = client
+            .get(format!("{base}{download_path}"))
+            .bearer_auth(download_token)
+            .send()
+            .await?;
+        assert_eq!(downloaded.status(), reqwest::StatusCode::OK);
+        assert_eq!(downloaded.bytes().await?.as_ref(), b"abcdef");
+        process.shutdown().await;
         Ok(())
     }
 

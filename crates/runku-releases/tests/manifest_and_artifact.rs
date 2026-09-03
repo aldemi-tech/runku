@@ -369,6 +369,26 @@ fn release_manifest_golden_vector_is_normative() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn storage_release_manifest_golden_vector_is_normative() -> Result<(), Box<dyn Error>> {
+    #[derive(Deserialize)]
+    struct GoldenVector {
+        encoded_hex: String,
+        manifest_sha256: String,
+    }
+    let vector: GoldenVector = serde_json::from_str(include_str!(
+        "../../../protocol/v1/release-manifest-storage-vectors.json"
+    ))?;
+    let encoded = encode_release_manifest(&storage_manifest()?)?;
+    assert_eq!(lower_hex(&encoded), vector.encoded_hex);
+    assert_eq!(
+        Sha256Digest::of(&encoded).to_string(),
+        vector.manifest_sha256
+    );
+    assert_eq!(decode_release_manifest(&encoded)?, storage_manifest()?);
+    Ok(())
+}
+
 proptest! {
     #[test]
     fn bounded_manifest_variants_round_trip(
@@ -569,6 +589,21 @@ fn sample_manifest() -> Result<ReleaseManifestV1, Box<dyn Error>> {
             args: CanonicalValue::Null,
         }],
     })
+}
+
+fn storage_manifest() -> Result<ReleaseManifestV1, Box<dyn Error>> {
+    let mut manifest = sample_manifest()?;
+    manifest.runtime_version = "runku-js-2".parse()?;
+    manifest.functions[1].capabilities = vec![
+        Capability::AuthRead,
+        Capability::FunctionMutation,
+        Capability::NetworkHttps,
+        Capability::SchedulerCreate,
+        Capability::FileRead,
+        Capability::FileWrite,
+        Capability::Secret("webhook-signing".to_owned()),
+    ];
+    Ok(manifest)
 }
 
 fn lower_hex(bytes: &[u8]) -> String {

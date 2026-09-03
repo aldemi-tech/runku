@@ -14,6 +14,7 @@ members = [
     "crates/runku-development-service",
     "crates/runku-execution",
     "crates/runku-execution-queue",
+    "crates/runku-file-storage",
     "crates/runku-gateway",
     "crates/runku-identity",
     "crates/runku-identity-provider",
@@ -65,7 +66,7 @@ jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws
 proptest = "=1.11.0"
 prost = "=0.14.4"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "logs"] }
-object_store = { version = "=0.14.1", default-features = false, features = ["aws", "fs"] }
+object_store = { version = "=0.14.1", default-features = false, features = ["aws", "fs", "tokio"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
 rpassword = "=7.5.4"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -81,6 +82,7 @@ ulid = { version = "=3.0.0", features = ["serde"] }
 url = "=2.5.8"
 zeroize = "=1.9.0"
 futures-util = "=0.3.34"
+fs2 = "=0.4.3"
 
 [workspace.lints.rust]
 missing_docs = "deny"

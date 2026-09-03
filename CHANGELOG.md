@@ -2,6 +2,44 @@
 
 All notable changes are documented in this file.
 
+## 0.4.0 - 2026-09-03
+
+### Added
+
+- Environment-scoped application files for Safe V8 and local Full Node Actions, with typed SDK
+  operations, short-lived bearer grants, bounded streaming HTTP upload/download, filesystem and
+  S3-compatible backends, quotas, checksums, range reads, and explicit capability admission.
+- A transactional application-file usage outbox that exports stable, scope-bound committed and
+  deleted byte facts to an optional HTTPS sink and acknowledges them only after durable acceptance.
+- `runku init --project-id/--environment-id` for provisioners that must initialize a Product using
+  an existing canonical Project/Environment scope; exact replay is idempotent and divergence fails.
+- A reproducible MinIO file-storage conformance campaign and optional compact Compose S3 overlay.
+
+### Changed
+
+- File download admission is held for the full response stream. Full reads verify length and
+  SHA-256 before clean completion; range reads require the persisted backend ETag/version and exact
+  length.
+- Ambient S3 configuration imports only the documented credential-provider variables. Endpoint,
+  transport, addressing, and loopback exceptions remain explicit Runku configuration.
+- Release manifests and runtime contracts add versioned file-storage capabilities without granting
+  filesystem paths or object-store credentials to application code.
+
+### Security
+
+- File IDs do not authorize reads. Grants are Environment-bound, expiring, non-query bearer
+  credentials; upload grants are one-shot and header/checksum drift fails closed.
+- Object keys are generated from validated scope, metadata and usage facts commit atomically,
+  transfer limits are bounded, and logs never contain tokens, filenames, object keys, or file bytes.
+
+### Compatibility and rollback
+
+- `0.4.0` reads existing `0.3.0` Product state and adds isolated file metadata/outbox state on first
+  use. A rollback to `0.3.0` cannot serve new storage-capable manifests or application files but
+  does not reinterpret existing lifecycle/log state.
+- The new CLI initialization flags are additive; existing invocations continue to generate scope.
+  Cloud provisioners must require `0.4.0` or newer before supplying explicit IDs.
+
 ## 0.3.0 - 2026-09-02
 
 ### Added

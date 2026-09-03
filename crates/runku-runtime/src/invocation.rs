@@ -15,7 +15,9 @@ use runku_observability::{
 use runku_releases::{ReleaseManifestV1, Sha256Digest};
 use runku_value::{CanonicalValue, encode_stored_value};
 
-use crate::{DataRead, DataWrite, FunctionInvoke, HttpsEgress, RuntimeError, ScheduleCreate};
+use crate::{
+    DataRead, DataWrite, FileStorage, FunctionInvoke, HttpsEgress, RuntimeError, ScheduleCreate,
+};
 
 const MIB: usize = 1024 * 1024;
 const MIN_HEAP_BYTES: usize = 16 * MIB;
@@ -307,6 +309,7 @@ pub struct InvocationRequest {
     pub(crate) data: Option<Arc<dyn DataRead>>,
     pub(crate) data_write: Option<Arc<dyn DataWrite>>,
     pub(crate) scheduler: Option<Arc<dyn ScheduleCreate>>,
+    pub(crate) file_storage: Option<Arc<dyn FileStorage>>,
     pub(crate) functions: Option<Arc<dyn FunctionInvoke>>,
     pub(crate) operational_logs: Option<Arc<dyn OperationalLogSink>>,
     pub(crate) performance: Option<InvocationPerformanceRecorder>,
@@ -367,6 +370,7 @@ impl InvocationRequest {
             data: None,
             data_write: None,
             scheduler: None,
+            file_storage: None,
             functions: None,
             operational_logs: None,
             performance: None,
@@ -426,6 +430,7 @@ impl InvocationRequest {
             data: None,
             data_write: None,
             scheduler: None,
+            file_storage: None,
             functions: None,
             operational_logs: self.operational_logs.clone(),
             performance: self.performance.clone(),
@@ -598,6 +603,33 @@ impl InvocationRequest {
         Ok(self)
     }
 
+    /// Injects application file storage into an Action declaring a storage capability.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Actions and Functions without `storage:read` or `storage:write`.
+    pub fn with_file_storage(
+        mut self,
+        storage: Arc<dyn FileStorage>,
+    ) -> Result<Self, RuntimeError> {
+        let authorized = self.manifest.functions.iter().any(|function| {
+            function.id == self.function_id
+                && function.function_type == runku_releases::FunctionType::Action
+                && function.capabilities.iter().any(|capability| {
+                    matches!(
+                        capability,
+                        runku_releases::Capability::FileRead
+                            | runku_releases::Capability::FileWrite
+                    )
+                })
+        });
+        if !authorized {
+            return Err(RuntimeError::InvalidInvocation);
+        }
+        self.file_storage = Some(storage);
+        Ok(self)
+    }
+
     /// Injects the trusted nested Function broker for a caller declaring at least one matching
     /// `function:*` capability.
     ///
@@ -737,6 +769,12 @@ impl InvocationRequest {
     #[must_use]
     pub fn schedule_creator(&self) -> Option<Arc<dyn ScheduleCreate>> {
         self.scheduler.clone()
+    }
+
+    /// Returns the application file storage broker attached to this invocation, when authorized.
+    #[must_use]
+    pub fn file_storage(&self) -> Option<Arc<dyn FileStorage>> {
+        self.file_storage.clone()
     }
 
     /// Attaches an opt-in bounded performance sink for this invocation.

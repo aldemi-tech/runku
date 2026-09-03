@@ -1,0 +1,21 @@
+services:
+  server:
+    environment:
+      RUNKU_FILE_STORAGE_BACKEND: s3
+      RUNKU_FILE_STORAGE_S3_BUCKET: ${RUNKU_FILE_STORAGE_S3_BUCKET:?Set the application-file bucket}
+      RUNKU_FILE_STORAGE_S3_REGION: ${RUNKU_FILE_STORAGE_S3_REGION:?Set the bucket signing region}
+      RUNKU_FILE_STORAGE_S3_PREFIX: ${RUNKU_FILE_STORAGE_S3_PREFIX:?Set a unique Environment prefix}
+      RUNKU_FILE_STORAGE_S3_ENDPOINT: ${RUNKU_FILE_STORAGE_S3_ENDPOINT:-}
+      RUNKU_FILE_STORAGE_S3_VIRTUAL_HOSTED_STYLE: ${RUNKU_FILE_STORAGE_S3_VIRTUAL_HOSTED_STYLE:-true}
+      RUNKU_FILE_STORAGE_S3_ALLOW_LOOPBACK_HTTP: "false"
+      RUNKU_FILE_STORAGE_S3_ACCESS_KEY_ID_FILE: /run/secrets/file-s3-access-key-id
+      RUNKU_FILE_STORAGE_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/file-s3-secret-access-key
+    secrets:
+      - file-s3-access-key-id
+      - file-s3-secret-access-key
+
+secrets:
+  file-s3-access-key-id:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/file-s3-access-key-id
+  file-s3-secret-access-key:
+    file: ${RUNKU_SECRETS_DIRECTORY:?Set RUNKU_SECRETS_DIRECTORY}/file-s3-secret-access-key

@@ -101,6 +101,14 @@ jobs:
               --env-file out/archive/runku-selfhost-v${VERSION}/.env \
               -f out/archive/runku-selfhost-v${VERSION}/compose.yaml \
               config --quiet
+          test -f out/archive/runku-selfhost-v${VERSION}/compose.s3-files.yaml
+          RUNKU_UID=65532 RUNKU_GID=65532 \
+            docker compose \
+              --project-directory out/archive/runku-selfhost-v${VERSION} \
+              --env-file out/archive/runku-selfhost-v${VERSION}/.env \
+              -f out/archive/runku-selfhost-v${VERSION}/compose.yaml \
+              -f out/archive/runku-selfhost-v${VERSION}/compose.s3-files.yaml \
+              config --quiet
           rm out/archive/runku-selfhost-v${VERSION}/.env
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -13,6 +13,12 @@ import {
   op_runku_log,
   op_runku_schedule_after,
   op_runku_schedule_at,
+  op_runku_storage_create_upload,
+  op_runku_storage_store,
+  op_runku_storage_metadata,
+  op_runku_storage_create_download,
+  op_runku_storage_get,
+  op_runku_storage_delete,
 } from "ext:core/ops";
 
 const ObjectCtor = Object;
@@ -102,6 +108,57 @@ async function httpsRequest(input) {
     headers: freezeHeaders(response.headers),
     body: ReflectApply(Uint8ArrayFrom, Uint8ArrayCtor, [response.body]),
   });
+}
+
+function storageOptions(input, name) {
+  if (input === null || typeof input !== "object" || ArrayIsArray(input)) {
+    throw new TypeError(`${name} options must be an object`);
+  }
+  return input;
+}
+
+async function storageCreateUpload(input) {
+  const options = storageOptions(input, "storage upload");
+  return ObjectFreeze(await op_runku_storage_create_upload({
+    maxBytes: options.maxBytes,
+    contentType: options.contentType,
+    sha256: options.sha256,
+  }));
+}
+
+async function storageStore(bytes, input = {}) {
+  const options = storageOptions(input, "storage store");
+  return ObjectFreeze(await op_runku_storage_store({
+    bytes: ReflectApply(ArrayFrom, ArrayCtor, [bytes]),
+    contentType: options.contentType,
+    sha256: options.sha256,
+  }));
+}
+
+async function storageMetadata(fileId) {
+  return ObjectFreeze(await op_runku_storage_metadata(StringCtor(fileId)));
+}
+
+async function storageCreateDownload(fileId, input) {
+  const options = storageOptions(input, "storage download");
+  const result = await op_runku_storage_create_download({
+    fileId: StringCtor(fileId),
+    expiresInMicros: StringCtor(options.expiresInMicros),
+  });
+  result.metadata = ObjectFreeze(result.metadata);
+  return ObjectFreeze(result);
+}
+
+async function storageGet(fileId) {
+  const result = await op_runku_storage_get(StringCtor(fileId));
+  return ObjectFreeze({
+    metadata: ObjectFreeze(result.metadata),
+    bytes: ReflectApply(Uint8ArrayFrom, Uint8ArrayCtor, [result.bytes]),
+  });
+}
+
+async function storageDelete(fileId) {
+  await op_runku_storage_delete(StringCtor(fileId));
 }
 
 function decodeDocument(document) {
@@ -412,6 +469,20 @@ ObjectDefineProperty(globalThis, "__runkuPlatformInvoke", {
         runAfter: ObjectFreeze(scheduleAfter),
         runAt: ObjectFreeze(scheduleAt),
       });
+    }
+    if (metadata.storageReadEnabled === true || metadata.storageWriteEnabled === true) {
+      const storage = {};
+      if (metadata.storageReadEnabled === true) {
+        storage.getMetadata = ObjectFreeze(storageMetadata);
+        storage.createDownload = ObjectFreeze(storageCreateDownload);
+        storage.get = ObjectFreeze(storageGet);
+      }
+      if (metadata.storageWriteEnabled === true) {
+        storage.createUpload = ObjectFreeze(storageCreateUpload);
+        storage.store = ObjectFreeze(storageStore);
+        storage.delete = ObjectFreeze(storageDelete);
+      }
+      context.storage = ObjectFreeze(storage);
     }
     if (metadata.functionQueryEnabled === true) {
       context.runQuery = ObjectFreeze(runQuery);

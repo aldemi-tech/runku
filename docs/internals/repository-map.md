@@ -26,6 +26,7 @@ Pure crates must not depend on SQL, HTTP, runtime, filesystem, or deployment fra
 | `runku-releases` | Canonical manifests, artifacts, runtime descriptors, lifecycle values |
 | `runku-release-repository` | Durable Release/Channel repository and adapters |
 | `runku-artifact-s3` | S3-compatible immutable artifact store |
+| `runku-file-storage` | Environment-scoped file metadata, quotas, transfer grants, filesystem/S3 object adapters |
 | `runku-compatibility` | Contract/schema/runtime compatibility reports |
 | `runku-development` | Workspace/Dev Revision repository and serving catalog |
 | `runku-development-access` | Development credential lifecycle |
@@ -98,6 +99,8 @@ authoritative. The client contains no framework configuration discovery.
 - `.runku/`: local authoritative Environment state; never fixture/scaffold material;
 - `.runku/observability.sqlite3`: hot cursor-ordered Operational Log tier;
 - `.runku/observability-archive/`: immutable Parquet segments and strict commit manifests;
+- `.runku/file-storage.sqlite3`: authoritative application-file metadata and quota lifecycle;
+- `.runku/file-storage-objects/`: local application file bytes; separately backed up by the operator;
 - protocol vector JSON/binary fixtures: committed compatibility authority.
 
 Do not edit generated output to change behavior. Change source/generator and prove reproduction.

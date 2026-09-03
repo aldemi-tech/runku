@@ -6,6 +6,11 @@ package, optional browser/HA-log overlays, and bounded conformance assets. Tagge
 the compact server binary/image and installation archive. General distributed roles, Agent, and
 Kubernetes packages remain separate readiness gates.
 
+The compact Docker profile supports Environment-scoped application files on a dedicated filesystem
+mount or an externally operated S3-compatible backend. Runku does not provision that object service
+or manage its backups, replication, versioning, encryption, or lifecycle; see
+[Application file storage](../docs/functions/file-storage.md).
+
 ## Product roles
 
 Every profile must eventually compose the same roles and semantics:

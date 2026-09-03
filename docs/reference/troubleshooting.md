@@ -19,6 +19,23 @@ request/invocation IDs, client/credential IDs, Release/Revision, exit code, and 
 attach keys, JWTs, peppers, dotenv secrets, DSNs, Function arguments, or full `.runku/` state to a
 public issue.
 
+## File upload or download fails
+
+1. Record the stable `FILE_STORAGE_*` code and `x-runku-request-id`, but never the transfer token.
+2. `FORBIDDEN` means a malformed/expired/wrong-scope token; obtain a fresh grant after repeating
+   application ownership authorization. `CONFLICT` on PUT normally means the one-shot grant was
+   consumed; reconcile instead of replaying it. `LIMIT_EXCEEDED` means declared size, Environment
+   quota, concurrency, live-grant admission, Action-memory, or filesystem free-space policy
+   rejected the operation.
+3. For `UNAVAILABLE`, check the dedicated directory ownership/free space or S3 TLS, DNS, bucket,
+   prefix policy, credentials, throttling, and multipart lifecycle. Do not weaken endpoint TLS or
+   broaden credentials as a diagnostic shortcut.
+4. For `CORRUPT`, stop issuing grants for the affected workflow, preserve metadata/provider audit
+   evidence, verify object length/SHA-256 and the coordinated backup, then restore or remove through
+   an application-authorized procedure.
+5. Run the bounded canary and relevant tests listed in
+   [Application file storage](../functions/file-storage.md#evidence-and-diagnosis).
+
 ## Symptom map
 
 | Symptom | Likely class | First check |

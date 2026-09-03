@@ -36,6 +36,7 @@ const LOCK_FILE: &str = "local-state-v1.lock";
 const PROCESS_LOCK_FILE: &str = "local-process-v1.lock";
 const IDENTITY_PEPPER_FILE: &str = "identity-pepper-v1.key";
 const DEVELOPMENT_ACCESS_PEPPER_FILE: &str = "development-access-pepper-v1.key";
+const FILE_STORAGE_PEPPER_FILE: &str = "file-storage-pepper-v1.key";
 const STATE_MAX_BYTES: u64 = 16 * 1024;
 const IDENTITY_PEPPER_BYTES: usize = 32;
 const LOCK_DEADLINE: Duration = Duration::from_secs(5);
@@ -148,6 +149,12 @@ pub struct LocalPaths {
     pub observability_archive: PathBuf,
     /// Durable OTLP exporter checkpoint database, independent from source logs.
     pub otlp_database: PathBuf,
+    /// Durable file lifecycle and quota metadata database.
+    pub file_storage_database: PathBuf,
+    /// Private HMAC key used only for short-lived file transfer grants.
+    pub file_storage_pepper: PathBuf,
+    /// Default local application-file object root.
+    pub file_storage_objects: PathBuf,
     /// Content-addressed artifact directory.
     pub artifacts: PathBuf,
 }
@@ -198,6 +205,9 @@ impl LocalPaths {
             observability_database: state.join("observability.sqlite3"),
             observability_archive: state.join("observability-archive"),
             otlp_database: state.join("otel.sqlite3"),
+            file_storage_database: state.join("file-storage.sqlite3"),
+            file_storage_pepper: state.join(FILE_STORAGE_PEPPER_FILE),
+            file_storage_objects: state.join("file-storage-objects"),
             artifacts: state.join("artifacts"),
             root,
             state,
@@ -294,6 +304,7 @@ pub async fn initialize_local_with_scope(
     };
     ensure_identity_pepper(&paths).await?;
     ensure_development_access_pepper(&paths).await?;
+    ensure_file_storage_pepper(&paths).await?;
     initialize_repositories(&paths, &state).await?;
     Ok((state, paths))
 }
@@ -308,6 +319,13 @@ pub(crate) async fn load_development_access_pepper(
     paths: &LocalPaths,
 ) -> Result<[u8; IDENTITY_PEPPER_BYTES], LocalStateError> {
     load_private_pepper(&paths.development_access_pepper).await
+}
+
+pub(crate) async fn load_file_storage_pepper(
+    paths: &LocalPaths,
+) -> Result<[u8; IDENTITY_PEPPER_BYTES], LocalStateError> {
+    ensure_file_storage_pepper(paths).await?;
+    load_private_pepper(&paths.file_storage_pepper).await
 }
 
 async fn load_private_pepper(path: &Path) -> Result<[u8; IDENTITY_PEPPER_BYTES], LocalStateError> {
@@ -345,6 +363,10 @@ async fn ensure_development_access_pepper(paths: &LocalPaths) -> Result<(), Loca
         "development-access",
     )
     .await
+}
+
+async fn ensure_file_storage_pepper(paths: &LocalPaths) -> Result<(), LocalStateError> {
+    ensure_private_pepper(paths, &paths.file_storage_pepper, "file-storage").await
 }
 
 async fn ensure_private_pepper(

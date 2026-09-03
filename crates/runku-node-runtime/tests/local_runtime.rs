@@ -6,13 +6,14 @@ use runku_build::{BuildMetadata, build_project};
 use runku_core::{
     BuildId, EnvironmentId, EnvironmentScope, InvocationId, ProjectId, ReleaseId, RequestId,
 };
+use runku_file_storage::{FileObjectStore, FileStorageLimits, FileStorageService};
 use runku_node_runtime::{FullNodeActionRuntime, LocalNodeRuntime, LocalNodeRuntimeConfig};
 use runku_observability::{
     InvocationPerformanceSink, MemoryInvocationPerformanceSink, PerformanceOperation,
     PerformanceOutcome, PerformanceRuntime,
 };
 use runku_releases::{ArtifactFormat, RuntimeClass, decode_release_manifest};
-use runku_runtime::{CancellationToken, InvocationRequest};
+use runku_runtime::{CancellationToken, FileStorage, FileStoreRequest, InvocationRequest};
 use runku_value::{CanonicalValue, TimestampMicros};
 use tempfile::tempdir;
 
@@ -64,6 +65,33 @@ export const loop = action({
   auth: "none", visibility: "internal", capabilities: [],
   args: v.null(), returns: v.null(), handler() { for (;;) {} },
 })
+export const storageRoundTrip = action({
+  auth: "none", visibility: "internal", capabilities: ["storage:read", "storage:write"],
+  args: v.null(), returns: v.bytes({ maxBytes: 16 }),
+  async handler(ctx) {
+    const unusedUpload = await ctx.storage.createUpload({ maxBytes: 3, contentType: "text/plain" });
+    if (!unusedUpload.path.startsWith("/v1/files/uploads/")) throw new Error("bad upload grant");
+    const stored = await ctx.storage.store(new Uint8Array([1, 2, 3]), { contentType: "application/octet-stream" });
+    const metadata = await ctx.storage.getMetadata(stored.fileId);
+    const download = await ctx.storage.createDownload(stored.fileId, { expiresInMicros: 1000000n });
+    const loaded = await ctx.storage.get(stored.fileId);
+    if (metadata.sha256 !== download.metadata.sha256) throw new Error("metadata mismatch");
+    await ctx.storage.delete(stored.fileId);
+    return loaded.bytes;
+  },
+})
+export const forgedDelete = action({
+  auth: "none", visibility: "internal", capabilities: ["storage:read"],
+  args: v.string(), returns: v.null(),
+  async handler(_ctx, fileId) {
+    const message = Buffer.from(JSON.stringify({ type: "storageDelete", callId: 999, fileId }));
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(message.length);
+    process.stdout.write(Buffer.concat([header, message]));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return null;
+  },
+})
 "#,
     )?;
     let project_id = ProjectId::generate();
@@ -83,6 +111,7 @@ export const loop = action({
     )?)?);
     assert_eq!(manifest.artifact.format, ArtifactFormat::NodeEsmBundleV1);
     assert_eq!(manifest.functions[0].runtime_class, RuntimeClass::FullNode);
+    assert_eq!(manifest.runtime_version.as_str(), "runku-node-2");
     let basename_id = manifest
         .functions
         .iter()
@@ -95,10 +124,23 @@ export const loop = action({
         .find(|function| function.name.as_str() == "functions.loop")
         .ok_or("loop function missing")?
         .id;
+    let storage_id = manifest
+        .functions
+        .iter()
+        .find(|function| function.name.as_str() == "functions.storageRoundTrip")
+        .ok_or("storage function missing")?
+        .id;
+    let forged_delete_id = manifest
+        .functions
+        .iter()
+        .find(|function| function.name.as_str() == "functions.forgedDelete")
+        .ok_or("forged delete function missing")?
+        .id;
     let artifact: Arc<[u8]> = std::fs::read(output.artifact_path)?.into();
+    let environment_id = EnvironmentId::generate();
     let request = |function_id, arguments, timeout| {
         InvocationRequest::new(
-            EnvironmentScope::new(project_id, EnvironmentId::generate()),
+            EnvironmentScope::new(project_id, environment_id),
             release_id,
             RequestId::generate(),
             InvocationId::generate(),
@@ -125,6 +167,60 @@ export const loop = action({
         Err(runku_runtime::RuntimeError::Unavailable)
     );
     let runtime = LocalNodeRuntime::new(LocalNodeRuntimeConfig::new(directory.path(), 4)?)?;
+    let objects = FileObjectStore::filesystem(&directory.path().join("file-objects")).await?;
+    let file_storage: Arc<dyn FileStorage> = Arc::new(
+        FileStorageService::open_sqlite(
+            EnvironmentScope::new(project_id, environment_id),
+            &directory.path().join("file-metadata.sqlite3"),
+            objects,
+            [9; 32],
+            FileStorageLimits {
+                filesystem_minimum_free_bytes: 0,
+                ..FileStorageLimits::DEFAULT
+            },
+        )
+        .await?,
+    );
+    let protected = file_storage
+        .store(
+            FileStoreRequest {
+                bytes: vec![9],
+                content_type: None,
+                sha256: None,
+            },
+            std::time::Instant::now() + Duration::from_secs(5),
+            CancellationToken::new(),
+        )
+        .await?;
+    let forged_outcome = runtime
+        .execute(
+            request(
+                forged_delete_id,
+                CanonicalValue::String(protected.file_id.clone()),
+                Duration::from_secs(5),
+            )?
+            .with_file_storage(Arc::clone(&file_storage))?,
+        )
+        .await?;
+    assert_eq!(forged_outcome.value, CanonicalValue::Null);
+    assert_eq!(
+        file_storage
+            .metadata(
+                protected.file_id,
+                std::time::Instant::now() + Duration::from_secs(5),
+                CancellationToken::new(),
+            )
+            .await?
+            .size_bytes,
+        "1"
+    );
+    let storage_outcome = runtime
+        .execute(
+            request(storage_id, CanonicalValue::Null, Duration::from_secs(5))?
+                .with_file_storage(file_storage)?,
+        )
+        .await?;
+    assert_eq!(storage_outcome.value, CanonicalValue::Bytes(vec![1, 2, 3]));
     let outcome = runtime
         .execute(request(
             basename_id,

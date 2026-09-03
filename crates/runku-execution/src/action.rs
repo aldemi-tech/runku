@@ -15,9 +15,9 @@ use runku_core::{EnvironmentScope, FunctionName, OperationId, ScheduledInvocatio
 use runku_data::{CommitBatch, LogicalStore, PinnedCode, ScheduledInvocationInsert, StoreError};
 use runku_releases::{Capability, FunctionType, FunctionVisibility, RuntimeClass};
 use runku_runtime::{
-    CancellationToken, FunctionCallError, FunctionCallKind, FunctionCallRequest, FunctionInvoke,
-    HttpsEgress, InvocationRequest, RuntimeError, RuntimeSupervisor, ScheduleCreate, ScheduleError,
-    ScheduleRequest,
+    CancellationToken, FileStorage, FunctionCallError, FunctionCallKind, FunctionCallRequest,
+    FunctionInvoke, HttpsEgress, InvocationRequest, RuntimeError, RuntimeSupervisor,
+    ScheduleCreate, ScheduleError, ScheduleRequest,
 };
 use runku_value::{CanonicalValue, TimestampMicros, encode_stored_value};
 use sha2::{Digest, Sha256};
@@ -130,6 +130,7 @@ pub struct ActionExecutor {
     query: Option<QueryExecutor>,
     mutation: Option<MutationExecutor>,
     https: Option<Arc<dyn HttpsEgress>>,
+    file_storage: Option<Arc<dyn FileStorage>>,
     node: Option<Arc<dyn NodeActionExecutor>>,
 }
 
@@ -153,6 +154,7 @@ impl ActionExecutor {
             query: None,
             mutation: None,
             https: None,
+            file_storage: None,
             node: None,
         }
     }
@@ -174,6 +176,13 @@ impl ActionExecutor {
     #[must_use]
     pub fn with_https_egress(mut self, https: Arc<dyn HttpsEgress>) -> Self {
         self.https = Some(https);
+        self
+    }
+
+    /// Attaches the application file broker used by root and nested Actions.
+    #[must_use]
+    pub fn with_file_storage(mut self, storage: Arc<dyn FileStorage>) -> Self {
+        self.file_storage = Some(storage);
         self
     }
 
@@ -204,6 +213,7 @@ impl ActionExecutor {
         self.execute_with_deadline(request, Some(deadline)).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn execute_with_deadline(
         &self,
         mut request: InvocationRequest,
@@ -233,6 +243,20 @@ impl ActionExecutor {
                 .ok_or(ActionExecutionError::Runtime(RuntimeError::Unavailable))?;
             request = request
                 .with_https(Arc::clone(https))
+                .map_err(ActionExecutionError::Runtime)?;
+        }
+        if selected
+            .capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::FileRead | Capability::FileWrite))
+            && request.file_storage().is_none()
+        {
+            let storage = self
+                .file_storage
+                .as_ref()
+                .ok_or(ActionExecutionError::Runtime(RuntimeError::Unavailable))?;
+            request = request
+                .with_file_storage(Arc::clone(storage))
                 .map_err(ActionExecutionError::Runtime)?;
         }
         let scheduling = selected.capabilities.contains(&Capability::SchedulerCreate);

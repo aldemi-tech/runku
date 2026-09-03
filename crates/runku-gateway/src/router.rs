@@ -1,19 +1,26 @@
 //! Axum router, admission, CORS, timeout, and response hardening.
 
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
-        DefaultBodyLimit, Extension, Request, State, WebSocketUpgrade, rejection::BytesRejection,
+        DefaultBodyLimit, Extension, Path, Request, State, WebSocketUpgrade,
+        rejection::BytesRejection,
     },
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
+use futures_util::StreamExt;
 use runku_core::RequestId;
+use runku_file_storage::FileStorageService;
 use runku_protocol::{
     ErrorClassV1, PUBLIC_ENVELOPE_MAX_BYTES, ProtocolError, PublicErrorV1, decode_action_call_v1,
     decode_mutation_call_v1, decode_query_call_v1, encode_error_v1, encode_success_v1,
@@ -67,6 +74,7 @@ struct GatewayState {
     config: GatewayHttpConfig,
     admission: Arc<Semaphore>,
     realtime: Option<RealtimeGateway>,
+    files: Option<Arc<FileStorageService>>,
 }
 
 /// Builds a Router with strict endpoints, body limit, boundary middleware, and fallback.
@@ -78,7 +86,7 @@ pub fn build_router(
     config: GatewayHttpConfig,
     service: Arc<dyn InvocationService>,
 ) -> Result<Router, ProtocolError> {
-    build_router_inner(config, service, None)
+    build_router_inner(config, service, None, None)
 }
 
 /// Builds the same HTTP Router plus the strict public Realtime WebSocket endpoint.
@@ -91,13 +99,41 @@ pub fn build_router_with_realtime(
     service: Arc<dyn InvocationService>,
     realtime: RealtimeGateway,
 ) -> Result<Router, ProtocolError> {
-    build_router_inner(config, service, Some(realtime))
+    build_router_inner(config, service, Some(realtime), None)
+}
+
+/// Builds the public Function Router plus capability-token file transfer endpoints.
+///
+/// # Errors
+///
+/// Rejects invalid HTTP policy before accepting requests.
+pub fn build_router_with_files(
+    config: GatewayHttpConfig,
+    service: Arc<dyn InvocationService>,
+    files: Arc<FileStorageService>,
+) -> Result<Router, ProtocolError> {
+    build_router_inner(config, service, None, Some(files))
+}
+
+/// Builds the public Function/Realtime Router plus capability-token file transfer endpoints.
+///
+/// # Errors
+///
+/// Rejects invalid HTTP policy before accepting requests.
+pub fn build_router_with_realtime_and_files(
+    config: GatewayHttpConfig,
+    service: Arc<dyn InvocationService>,
+    realtime: RealtimeGateway,
+    files: Arc<FileStorageService>,
+) -> Result<Router, ProtocolError> {
+    build_router_inner(config, service, Some(realtime), Some(files))
 }
 
 fn build_router_inner(
     config: GatewayHttpConfig,
     service: Arc<dyn InvocationService>,
     realtime: Option<RealtimeGateway>,
+    files: Option<Arc<FileStorageService>>,
 ) -> Result<Router, ProtocolError> {
     config.validate()?;
     let state = GatewayState {
@@ -105,6 +141,7 @@ fn build_router_inner(
         service,
         config,
         realtime,
+        files,
     };
     let mut router = Router::new()
         .route("/v1/query", post(query).options(preflight))
@@ -113,12 +150,328 @@ fn build_router_inner(
     if state.realtime.is_some() {
         router = router.route("/v1/realtime", get(realtime_upgrade));
     }
+    if state.files.is_some() {
+        let file_routes = Router::new()
+            .route(
+                "/v1/files/uploads/{upload_id}",
+                put(file_upload).options(file_preflight),
+            )
+            .route(
+                "/v1/files/downloads/{file_id}",
+                get(file_download)
+                    .head(file_download_head)
+                    .options(file_preflight),
+            )
+            .layer(DefaultBodyLimit::disable());
+        router = router.merge(file_routes);
+    }
     Ok(router
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(PUBLIC_ENVELOPE_MAX_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), boundary))
         .with_state(state))
+}
+
+async fn file_upload(
+    State(state): State<GatewayState>,
+    Path(upload_id): Path<String>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(cancellation): Extension<CancellationToken>,
+    request: Request,
+) -> Response {
+    let Some(files) = state.files else {
+        return protocol_failure(request_id, ProtocolError::InvalidRequest);
+    };
+    if request.headers().contains_key(header::CONTENT_ENCODING) {
+        return protocol_failure(request_id, ProtocolError::InvalidRequest);
+    }
+    let token = match parse_file_token(request.headers()) {
+        Ok(token) => token,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    let content_length = match parse_content_length(request.headers()) {
+        Ok(value) => value,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    let content_type = match optional_single_header(request.headers(), &header::CONTENT_TYPE) {
+        Ok(value) => value,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    let stream = request
+        .into_body()
+        .into_data_stream()
+        .map(|result| result.map_err(|_| runku_runtime::FileStorageError::InvalidRequest));
+    match files
+        .upload_http(
+            &upload_id,
+            &token,
+            content_length,
+            content_type.as_deref(),
+            Box::pin(stream),
+            Instant::now() + state.config.request_timeout,
+            cancellation,
+        )
+        .await
+    {
+        Ok(metadata) => file_json_response(
+            StatusCode::CREATED,
+            &serde_json::json!({ "version": 1, "status": "ok", "file": metadata }),
+        ),
+        Err(error) => file_failure(request_id, error),
+    }
+}
+
+async fn file_download(
+    State(state): State<GatewayState>,
+    Path(file_id): Path<String>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(cancellation): Extension<CancellationToken>,
+    headers: HeaderMap,
+) -> Response {
+    file_download_inner(state, file_id, request_id, cancellation, headers, false).await
+}
+
+async fn file_download_head(
+    State(state): State<GatewayState>,
+    Path(file_id): Path<String>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(cancellation): Extension<CancellationToken>,
+    headers: HeaderMap,
+) -> Response {
+    file_download_inner(state, file_id, request_id, cancellation, headers, true).await
+}
+
+async fn file_download_inner(
+    state: GatewayState,
+    file_id: String,
+    request_id: RequestId,
+    cancellation: CancellationToken,
+    headers: HeaderMap,
+    head_only: bool,
+) -> Response {
+    let Some(files) = state.files else {
+        return protocol_failure(request_id, ProtocolError::InvalidRequest);
+    };
+    let token = match parse_file_token(&headers) {
+        Ok(token) => token,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    let range = match parse_range(&headers) {
+        Ok(range) => range,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    match files
+        .download_http(
+            &file_id,
+            &token,
+            range.clone(),
+            Instant::now() + state.config.request_timeout,
+            cancellation,
+        )
+        .await
+    {
+        Ok(download) => {
+            let partial = range.is_some();
+            let length = download.range.end.saturating_sub(download.range.start);
+            let body = if head_only {
+                Body::empty()
+            } else {
+                Body::from_stream(download.stream)
+            };
+            let mut response = Response::new(body);
+            *response.status_mut() = if partial {
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            };
+            let response_headers = response.headers_mut();
+            if let Ok(value) = HeaderValue::from_str(&download.metadata.content_type) {
+                response_headers.insert(header::CONTENT_TYPE, value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+                response_headers.insert(header::CONTENT_LENGTH, value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&format!("\"{}\"", download.metadata.sha256)) {
+                response_headers.insert(header::ETAG, value);
+            }
+            response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            response_headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, no-store"),
+            );
+            response_headers.insert(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("attachment"),
+            );
+            if partial
+                && let Ok(value) = HeaderValue::from_str(&format!(
+                    "bytes {}-{}/{}",
+                    download.range.start,
+                    download.range.end.saturating_sub(1),
+                    download.metadata.size_bytes
+                ))
+            {
+                response_headers.insert(header::CONTENT_RANGE, value);
+            }
+            response
+        }
+        Err(error) => file_failure(request_id, error),
+    }
+}
+
+async fn file_preflight(
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let method = match single_header(
+        &headers,
+        &HeaderName::from_static("access-control-request-method"),
+    ) {
+        Ok(value) => value,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    if headers.get(header::ORIGIN).is_none()
+        || !matches!(method.as_deref(), Some("PUT" | "GET" | "HEAD"))
+        || !valid_file_preflight_headers(&headers)
+    {
+        return protocol_failure(request_id, ProtocolError::InvalidRequest);
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("PUT, GET, HEAD, OPTIONS"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("authorization, content-type, content-length, range"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("content-length, content-range, etag, x-runku-request-id"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+    response
+}
+
+fn valid_file_preflight_headers(headers: &HeaderMap) -> bool {
+    let Ok(requested) = single_header(
+        headers,
+        &HeaderName::from_static("access-control-request-headers"),
+    ) else {
+        return false;
+    };
+    requested.is_none_or(|value| {
+        value.split(',').all(|name| {
+            matches!(
+                name.trim().to_ascii_lowercase().as_str(),
+                "authorization" | "content-type" | "content-length" | "range"
+            )
+        })
+    })
+}
+
+fn parse_file_token(headers: &HeaderMap) -> Result<String, ProtocolError> {
+    let authorization =
+        single_header(headers, &header::AUTHORIZATION)?.ok_or(ProtocolError::InvalidRequest)?;
+    let token = authorization
+        .strip_prefix("Bearer ")
+        .ok_or(ProtocolError::InvalidRequest)?;
+    if token.is_empty() || token.len() > 1024 || !token.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(ProtocolError::InvalidRequest);
+    }
+    Ok(token.to_owned())
+}
+
+fn parse_content_length(headers: &HeaderMap) -> Result<Option<u64>, ProtocolError> {
+    optional_single_header(headers, &header::CONTENT_LENGTH)?
+        .map(|value| {
+            if value == "0"
+                || value.starts_with('0')
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(ProtocolError::InvalidRequest);
+            }
+            value.parse().map_err(|_| ProtocolError::LimitExceeded)
+        })
+        .transpose()
+}
+
+fn parse_range(headers: &HeaderMap) -> Result<Option<std::ops::Range<u64>>, ProtocolError> {
+    let Some(value) = optional_single_header(headers, &header::RANGE)? else {
+        return Ok(None);
+    };
+    let value = value
+        .strip_prefix("bytes=")
+        .ok_or(ProtocolError::InvalidRequest)?;
+    if value.contains(',') {
+        return Err(ProtocolError::InvalidRequest);
+    }
+    let (start, end) = value.split_once('-').ok_or(ProtocolError::InvalidRequest)?;
+    if start.is_empty()
+        || end.is_empty()
+        || start.starts_with('0') && start != "0"
+        || end.starts_with('0') && end != "0"
+    {
+        return Err(ProtocolError::InvalidRequest);
+    }
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| ProtocolError::InvalidRequest)?;
+    let end = end
+        .parse::<u64>()
+        .map_err(|_| ProtocolError::InvalidRequest)?;
+    if end < start {
+        return Err(ProtocolError::InvalidRequest);
+    }
+    Ok(Some(
+        start..end.checked_add(1).ok_or(ProtocolError::LimitExceeded)?,
+    ))
+}
+
+fn optional_single_header(
+    headers: &HeaderMap,
+    name: &HeaderName,
+) -> Result<Option<String>, ProtocolError> {
+    single_header(headers, name)
+}
+
+fn file_json_response(status: StatusCode, value: &serde_json::Value) -> Response {
+    match serde_json::to_vec(&value) {
+        Ok(body) => json_response(status, body),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn file_failure(request_id: RequestId, error: runku_runtime::FileStorageError) -> Response {
+    let class = match error {
+        runku_runtime::FileStorageError::InvalidRequest => ErrorClassV1::InvalidRequest,
+        runku_runtime::FileStorageError::NotFound => ErrorClassV1::NotFound,
+        runku_runtime::FileStorageError::Conflict => ErrorClassV1::Conflict,
+        runku_runtime::FileStorageError::LimitExceeded => ErrorClassV1::LimitExceeded,
+        runku_runtime::FileStorageError::Forbidden => ErrorClassV1::Forbidden,
+        runku_runtime::FileStorageError::Unavailable => ErrorClassV1::Unavailable,
+        runku_runtime::FileStorageError::Timeout | runku_runtime::FileStorageError::Cancelled => {
+            ErrorClassV1::Timeout
+        }
+        runku_runtime::FileStorageError::Corruption => ErrorClassV1::Internal,
+    };
+    public_failure(
+        request_id,
+        public_error(
+            class,
+            error.code(),
+            matches!(
+                error,
+                runku_runtime::FileStorageError::Unavailable
+                    | runku_runtime::FileStorageError::Timeout
+            ),
+        ),
+    )
 }
 
 async fn realtime_upgrade(
@@ -476,6 +829,12 @@ fn decorate(mut response: Response, request_id: RequestId, origin: Option<&str>)
         response
             .headers_mut()
             .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static(
+                "content-length, content-range, content-type, etag, x-runku-file-id, x-runku-file-sha256, x-runku-request-id",
+            ),
+        );
         response
             .headers_mut()
             .insert(header::VARY, HeaderValue::from_static("Origin"));

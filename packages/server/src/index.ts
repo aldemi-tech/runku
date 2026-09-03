@@ -13,13 +13,14 @@ export interface RunkuId {
 declare const documentTableBrand: unique symbol
 declare const tableReferenceBrand: unique symbol
 declare const indexReferenceBrand: unique symbol
+declare const fileIdBrand: unique symbol
 
 /** Canonical Document ID statically associated with one logical schema table. */
 export type DocumentId<TableName extends string> = RunkuId & {
   readonly [documentTableBrand]: TableName
 }
 
-/** Values accepted and returned by the declarative `runku-js-1` runtime. */
+/** Values accepted and returned by the declarative Runku JavaScript runtimes. */
 export type RunkuValue =
   | null
   | boolean
@@ -42,6 +43,8 @@ export type ImplementedCapability =
   | "function:action"
   | "network:https"
   | "scheduler:create"
+  | "storage:read"
+  | "storage:write"
 
 export type QueryCapability = Extract<
   ImplementedCapability,
@@ -64,6 +67,8 @@ export type ActionCapability = Extract<
   | "function:action"
   | "network:https"
   | "scheduler:create"
+  | "storage:read"
+  | "storage:write"
 >
 
 export interface InvocationMetadata {
@@ -80,6 +85,8 @@ export interface InvocationMetadata {
   readonly dataEnabled: boolean
   readonly dataWriteEnabled: boolean
   readonly schedulerEnabled: boolean
+  readonly storageReadEnabled: boolean
+  readonly storageWriteEnabled: boolean
   readonly functionQueryEnabled: boolean
   readonly functionMutationEnabled: boolean
   readonly functionActionEnabled: boolean
@@ -222,6 +229,59 @@ export interface Scheduler {
   ): Promise<string>
 }
 
+/** Opaque Environment-scoped application file identity. It is not an authorization credential. */
+export type FileId = string & { readonly [fileIdBrand]: true }
+
+export interface FileMetadata {
+  readonly fileId: FileId
+  readonly sizeBytes: string
+  readonly sha256: string
+  readonly contentType: string
+  readonly createdAtMicros: string
+}
+
+export interface FileUploadGrant {
+  readonly uploadId: string
+  readonly path: string
+  readonly token: string
+  readonly expiresAtMicros: string
+  readonly maxBytes: string
+}
+
+export interface FileDownloadGrant {
+  readonly path: string
+  readonly token: string
+  readonly expiresAtMicros: string
+  readonly metadata: FileMetadata
+}
+
+export interface FileBytes {
+  readonly metadata: FileMetadata
+  readonly bytes: Uint8Array
+}
+
+export interface FileStorageRead {
+  getMetadata(fileId: FileId | string): Promise<FileMetadata>
+  createDownload(
+    fileId: FileId | string,
+    options: { readonly expiresInMicros: bigint },
+  ): Promise<FileDownloadGrant>
+  get(fileId: FileId | string): Promise<FileBytes>
+}
+
+export interface FileStorageWrite {
+  createUpload(options: {
+    readonly maxBytes: number
+    readonly contentType?: string
+    readonly sha256?: string
+  }): Promise<FileUploadGrant>
+  store(
+    bytes: Uint8Array,
+    options?: { readonly contentType?: string; readonly sha256?: string },
+  ): Promise<FileMetadata>
+  delete(fileId: FileId | string): Promise<void>
+}
+
 /** Bounded best-effort structured Function logger. */
 export interface FunctionLogger {
   debug(message: string, fields?: Readonly<Record<string, RunkuValue>>): Promise<void>
@@ -259,6 +319,14 @@ type HttpsFeature<C extends ActionCapability> = "network:https" extends C
 type SchedulerFeature<C extends MutationCapability | ActionCapability> =
   "scheduler:create" extends C ? { readonly scheduler: Scheduler } : Record<never, never>
 
+type StorageFeature<C extends ActionCapability> =
+  ("storage:read" extends C ? FileStorageRead : Record<never, never>) &
+    ("storage:write" extends C ? FileStorageWrite : Record<never, never>) extends infer S
+    ? [keyof S] extends [never]
+      ? Record<never, never>
+      : { readonly storage: S }
+    : never
+
 type RunQueryFeature<C extends ImplementedCapability> = "function:query" extends C
   ? {
       readonly runQuery: (functionName: string, argumentsValue: RunkuValue) => Promise<RunkuValue>
@@ -292,6 +360,7 @@ export type MutationContext<C extends MutationCapability> = BaseContext &
 export type ActionContext<C extends ActionCapability> = BaseContext &
   AuthFeature<C> &
   HttpsFeature<C> &
+  StorageFeature<C> &
   SchedulerFeature<C> &
   RunQueryFeature<C> &
   RunMutationFeature<C> &

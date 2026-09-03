@@ -51,25 +51,25 @@ the table, and download `SHA256SUMS`. Verify before extraction:
 ```sh
 # Linux example
 sha256sum --check SHA256SUMS --ignore-missing
-tar -xzf runku-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 runku-v0.3.0-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
+tar -xzf runku-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 runku-v0.4.0-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```sh
 # macOS example (verify the named file with the SHA256SUMS value)
-shasum -a 256 runku-v0.3.0-aarch64-apple-darwin.tar.gz
-tar -xzf runku-v0.3.0-aarch64-apple-darwin.tar.gz
+shasum -a 256 runku-v0.4.0-aarch64-apple-darwin.tar.gz
+tar -xzf runku-v0.4.0-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 0755 runku-v0.3.0-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
+install -m 0755 runku-v0.4.0-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```powershell
 # Windows x86_64 example
-Get-FileHash .\runku-v0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-Expand-Archive .\runku-v0.3.0-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
-& .\runku-cli\runku-v0.3.0-x86_64-pc-windows-msvc\runku.exe --version
+Get-FileHash .\runku-v0.4.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Expand-Archive .\runku-v0.4.0-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
+& .\runku-cli\runku-v0.4.0-x86_64-pc-windows-msvc\runku.exe --version
 ```
 
 Compare the printed Windows/macOS hash with the exact filename entry in `SHA256SUMS`. Move the
@@ -111,6 +111,10 @@ runku init --workspace integration --listen 127.0.0.1:3310
 
 Initialization is idempotent for identical settings and conflicts for divergent settings. Do not
 manually edit initialized identity/listener state.
+
+Initialization also creates a private application-file token key. The first Product start opens
+`.runku/file-storage.sqlite3` and `.runku/file-storage-objects/`; both are Environment-scoped state.
+Local helpers do not back up those bytes. See [Application file storage](../functions/file-storage.md).
 
 External Self-Hosted provisioning automation may bind a new root to an already allocated Product
 scope by passing `--project-id prj_* --environment-id env_*` together. This is a provisioning

@@ -123,6 +123,30 @@ Query result; intermediate frame replay is not promised.
 Browser uses native WebSocket. Node/test runtimes may pass `webSocketFactory` implementing the
 documented interface.
 
+## File upload and download
+
+An authorized Action first returns a one-shot `FileUploadGrant` or short-lived
+`FileDownloadGrant`. Transfer through the client so the secret remains an Authorization header and
+the path cannot escape the configured origin:
+
+```ts
+const grant = (await runku.action("files.beginUpload", { size: BigInt(file.size) })).value
+const metadata = await runku.uploadFile(grant, file, { contentType: "image/png" })
+
+const readGrant = (await runku.action("files.beginDownload", {
+  fileId: metadata.fileId,
+})).value
+const response = await runku.downloadFile(readGrant)
+await response.body?.pipeTo(destination)
+```
+
+Uploads are one-shot and never automatically retried. Downloads expose a streaming `Response`;
+the configured deadline and optional AbortSignal remain active until the stream completes or is
+cancelled. One inclusive-exclusive range may be supplied. The SDK validates metadata, checksum
+ETag, lengths, range response, attachment policy, media type, and same-origin canonical path. It
+does not send the Application Key or user bearer to a raw transfer route because the grant is the
+delegated credential. See [Application file storage](../../docs/functions/file-storage.md).
+
 ## Direct/untyped use
 
 `RunkuClient.query/mutation/action<T>()` is available without a generated registry. It still

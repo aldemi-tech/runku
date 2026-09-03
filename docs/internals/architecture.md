@@ -39,6 +39,12 @@ Safe V8 executes bounded ESM artifacts and Platform Ops. Full Node artifacts inc
 descriptor and Node bundle. The broker carries typed nested calls so application semantics remain
 independent of runtime placement.
 
+Application file storage is a Platform Op and HTTP transfer boundary, not direct runtime access to
+a filesystem or S3 credentials. The Product process owns Environment-scoped metadata, quota
+reservation, grant signing, and lifecycle reconciliation; `runku-file-storage` maps generated keys
+to a dedicated filesystem or S3-compatible prefix. Large bodies stream through the Gateway. The
+external byte backend is a privileged dependency whose durability and backup remain operator-owned.
+
 ## Management path
 
 Projects, Environments, Releases, Channels, Workspaces, keyrings, and serving revisions are durable

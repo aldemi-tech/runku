@@ -37,6 +37,9 @@ use output::publish_output;
 const CONTRACT_RUNTIME_VERSION: &str = "runku-js-1";
 const NODE_RUNTIME_VERSION: &str = "runku-node-1";
 const HYBRID_RUNTIME_VERSION: &str = "runku-hybrid-1";
+const CONTRACT_STORAGE_RUNTIME_VERSION: &str = "runku-js-2";
+const NODE_STORAGE_RUNTIME_VERSION: &str = "runku-node-2";
+const HYBRID_STORAGE_RUNTIME_VERSION: &str = "runku-hybrid-2";
 const FUNCTION_ID_DOMAIN: &[u8] = b"RUNKU_FUNCTION_ID_V1";
 const FUNCTION_CONTRACT_DOMAIN: &[u8] = b"RUNKU_FUNCTION_CONTRACT_V1";
 type CompiledFunctions = Vec<(LoadedFunction, Sha256Digest)>;
@@ -200,21 +203,21 @@ pub fn build_project(
         }
         (true, true) => return Err(BuildError::Internal),
     };
-    let (artifact_bytes, artifact_descriptor, runtime_version) = match &artifact {
+    let storage_runtime = functions.iter().any(|function| {
+        function
+            .capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::FileRead | Capability::FileWrite))
+    });
+    let runtime_version = artifact_runtime_version(&artifact, storage_runtime);
+    let (artifact_bytes, artifact_descriptor) = match &artifact {
         CompiledArtifact::Safe(bundle) => (
             encode_safe_esm_bundle(bundle).map_err(map_release)?,
             bundle.descriptor().map_err(map_release)?,
-            CONTRACT_RUNTIME_VERSION,
         ),
-        CompiledArtifact::LocalNode(bundle) => (
+        CompiledArtifact::LocalNode(bundle) | CompiledArtifact::Hybrid(bundle) => (
             encode_node_esm_bundle(bundle).map_err(map_release)?,
             bundle.descriptor().map_err(map_release)?,
-            NODE_RUNTIME_VERSION,
-        ),
-        CompiledArtifact::Hybrid(bundle) => (
-            encode_node_esm_bundle(bundle).map_err(map_release)?,
-            bundle.descriptor().map_err(map_release)?,
-            HYBRID_RUNTIME_VERSION,
         ),
     };
     let cron_definitions = build_crons(loaded.crons, &function_entries)?;
@@ -249,6 +252,17 @@ pub fn build_project(
         &generated_types,
         source_fingerprint,
     )
+}
+
+fn artifact_runtime_version(artifact: &CompiledArtifact, storage: bool) -> &'static str {
+    match (artifact, storage) {
+        (CompiledArtifact::Safe(_), false) => CONTRACT_RUNTIME_VERSION,
+        (CompiledArtifact::Safe(_), true) => CONTRACT_STORAGE_RUNTIME_VERSION,
+        (CompiledArtifact::LocalNode(_), false) => NODE_RUNTIME_VERSION,
+        (CompiledArtifact::LocalNode(_), true) => NODE_STORAGE_RUNTIME_VERSION,
+        (CompiledArtifact::Hybrid(_), false) => HYBRID_RUNTIME_VERSION,
+        (CompiledArtifact::Hybrid(_), true) => HYBRID_STORAGE_RUNTIME_VERSION,
+    }
 }
 
 fn compile_functions(
@@ -415,6 +429,8 @@ fn capability_text(value: &Capability) -> String {
         Capability::FunctionAction => "function:action".to_owned(),
         Capability::NetworkHttps => "network:https".to_owned(),
         Capability::SchedulerCreate => "scheduler:create".to_owned(),
+        Capability::FileRead => "storage:read".to_owned(),
+        Capability::FileWrite => "storage:write".to_owned(),
         Capability::Secret(name) => format!("secret:{name}"),
     }
 }

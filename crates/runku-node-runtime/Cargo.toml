@@ -28,6 +28,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "sync
 async-nats.workspace = true
 runku-build = { path = "../runku-build" }
 runku-artifact-s3 = { path = "../runku-artifact-s3" }
+runku-file-storage = { path = "../runku-file-storage" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 

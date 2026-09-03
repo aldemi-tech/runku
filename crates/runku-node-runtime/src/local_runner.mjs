@@ -125,13 +125,49 @@ function platformContext(request, channel) {
       runAfter: (micros, func, args, options = {}) => channel.call("schedule", {
         function: func, arguments: encode(args), time: { kind: "after", micros: BigInt(micros).toString() },
         idempotencyKey: options.idempotencyKey,
-      }, true),
+      }, "text"),
       runAt: (micros, func, args, options = {}) => channel.call("schedule", {
         function: func, arguments: encode(args), time: { kind: "at", micros: BigInt(micros).toString() },
         idempotencyKey: options.idempotencyKey,
-      }, true),
+      }, "text"),
     });
   }
+  const storage = {};
+  if (capabilities.has("storage:write")) {
+    storage.createUpload = (options) => channel.call("storageCreateUpload", {
+      maxBytes: options?.maxBytes,
+      contentType: options?.contentType,
+      sha256: options?.sha256,
+    }, "json");
+    storage.store = (bytes, options = {}) => {
+      if (!(bytes instanceof Uint8Array)) throw new TypeError("storage bytes must be Uint8Array");
+      return channel.call("storageStore", {
+        bytes: Buffer.from(bytes).toString("base64url"),
+        contentType: options.contentType,
+        sha256: options.sha256,
+      }, "json");
+    };
+    storage.delete = (fileId) => channel.call("storageDelete", {
+      fileId: String(fileId),
+    }, "json");
+  }
+  if (capabilities.has("storage:read")) {
+    storage.getMetadata = (fileId) => channel.call("storageMetadata", {
+      fileId: String(fileId),
+    }, "json");
+    storage.createDownload = (fileId, options) => channel.call("storageCreateDownload", {
+      fileId: String(fileId),
+      expiresInMicros: BigInt(options?.expiresInMicros).toString(),
+    }, "json");
+    storage.get = async (fileId) => {
+      const result = await channel.call("storageGet", { fileId: String(fileId) }, "json");
+      return Object.freeze({
+        metadata: Object.freeze(result.metadata),
+        bytes: new Uint8Array(Buffer.from(result.bytes, "base64url")),
+      });
+    };
+  }
+  if (Object.keys(storage).length) context.storage = Object.freeze(storage);
   return Object.freeze(context);
 }
 
@@ -279,9 +315,9 @@ async function executeFramed(modulePath, exportName) {
   let nextCallId = 1;
   const pending = new Map();
   const channel = {
-    async call(type, payload, text = false) {
+    async call(type, payload, mode = "value") {
       const callId = nextCallId++;
-      const response = new Promise((resolve, reject) => pending.set(callId, { resolve, reject, text }));
+      const response = new Promise((resolve, reject) => pending.set(callId, { resolve, reject, mode }));
       await writeStdoutFrame({ type, callId, ...payload });
       return response;
     },
@@ -294,7 +330,9 @@ async function executeFramed(modulePath, exportName) {
       if (!waiter) throw new TypeError("unknown op response");
       pending.delete(response.callId);
       if (!response.ok) waiter.reject(Object.assign(new Error(response.error), { code: response.error }));
-      else waiter.resolve(waiter.text ? response.text : decode(response.value));
+      else if (waiter.mode === "text") waiter.resolve(response.text);
+      else if (waiter.mode === "json") waiter.resolve(response.json);
+      else waiter.resolve(decode(response.value));
     }
   })().catch(() => {
     for (const waiter of pending.values()) waiter.reject(new Error("platform channel closed"));

@@ -17,6 +17,7 @@ operator/CLI origin        ─► host TLS proxy ─► 127.0.0.1:3220 Managemen
                                     one runku-server container
                                       ├─ Safe V8/background/realtime
                                       ├─ Product SQLite + Parquet/DuckDB
+                                      ├─ application files ─► dedicated filesystem or external S3
                                       └─ Platform Identity ─► PostgreSQL container
 ```
 
@@ -82,6 +83,16 @@ readiness. The initial-owner invitation is written below the configured data dir
 `platform/bootstrap/initial-owner.code`. Enroll it using the protected procedure in
 [Platform operator identity](../../docs/auth/platform-identity.md#enroll-the-initial-owner).
 
+The standalone profile creates a private `${RUNKU_DATA_DIRECTORY}/files` directory, enforces the
+configured Environment/file/Action/free-space quotas, and mounts it separately from the Product
+root. Select `RUNKU_DEPLOYMENT_PROFILE=s3-files` (or `browser-s3-files` when the browser overlay is
+also required) to use `compose.s3-files.yaml` instead. Configure
+the bucket/region/unique prefix in `.env`, place access-key ID and secret access key in the named
+secret files, and use only an HTTPS S3-compatible endpoint. The bucket must already exist. MinIO or
+the selected provider—not Runku—owns encryption, replication, versioning, lifecycle, capacity,
+backup, restore, and availability. See
+[Application file storage](../../docs/functions/file-storage.md#operator-configuration).
+
 ## Publish the listeners through TLS
 
 Configure two exact host-proxy routes:
@@ -143,10 +154,12 @@ external encryption/key-policy reference in the manifest and cannot be `none`:
 ./runku-selfhost verify-backup /mnt/encrypted/runku-backup-2026-09-02
 ```
 
-Backup briefly stops serving, creates a PostgreSQL custom-format dump, archives the complete Product
-and Platform directories, records SHA-256 checksums and the server version, and restarts only if the
-server was previously running. It excludes external secret files. Preserve the matching Platform
-pepper and database access material under separate access control and the same recovery record.
+Backup briefly stops serving, creates a PostgreSQL custom-format dump, archives Product metadata and
+the Platform directory, records SHA-256 checksums and the server version, and restarts only if the
+server was previously running. It excludes external secret files, the dedicated `files/` directory,
+and every external bucket. Runku does not provide application-file backup or additional durability
+strategy. Coordinate a filesystem snapshot or use separately operated MinIO/S3, preserve the
+matching Platform pepper/database access material, and test one recovery point as a unit.
 
 `verify-backup` checks the manifest, every digest, archive path safety, Product identity, and
 `pg_restore` catalog without changing the installation.
@@ -168,6 +181,11 @@ state, restores PostgreSQL in one transaction, runs `runku doctor`, applies the 
 check, starts the server, and waits for readiness. Afterward, verify operator login, exact Project/
 Environment IDs, Application Keys, Channel targets, a Query and idempotent Mutation, Realtime
 reconnect, schedules, and logs across the archive/hot boundary.
+
+Before reopening traffic, restore application file bytes from the separately coordinated
+filesystem/S3 recovery point. The helper restores their metadata only. Missing or mismatched bytes
+make the recovery incomplete and can surface as `FILE_STORAGE_NOT_FOUND` or
+`FILE_STORAGE_CORRUPT`.
 
 An older recovery point can resurrect subsequently revoked sessions or invitations. Reconcile and
 revoke them before reopening public traffic.
@@ -246,6 +264,8 @@ cryptographic recovery material. Destroy them separately only after the backup/r
 - Pin images by version and digest; verify release checksums and provenance before promotion.
 - Backups contain application data, key digests, pending bootstrap material, and audit state. Treat
   them as sensitive even though external peppers are excluded.
+- Runku backup/restore excludes application file bytes and does not configure MinIO/S3 durability;
+  this remains an explicit operator responsibility.
 - The small profile has one active writer and one host failure domain. Use off-host backups or S3
   history according to the required RPO. HA logs protect admitted diagnostics; they do not make the
   Product data path active-active.

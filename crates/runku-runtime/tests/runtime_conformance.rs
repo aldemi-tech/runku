@@ -29,7 +29,9 @@ use runku_releases::{
 };
 use runku_runtime::{
     CancellationToken, DataDocument, DataGetRequest, DataIndexEntry, DataRead, DataReadError,
-    DataScanRequest, DataWrite, FunctionCallError, FunctionCallKind, FunctionCallRequest,
+    DataScanRequest, DataWrite, FileBytes, FileDownloadGrant, FileDownloadGrantRequest,
+    FileMetadata, FileStorage, FileStorageError, FileStoreRequest, FileUploadGrant,
+    FileUploadGrantRequest, FunctionCallError, FunctionCallKind, FunctionCallRequest,
     FunctionInvoke, HttpsEgress, HttpsError, HttpsRequest, HttpsResponse, InvocationRequest,
     RuntimeError, RuntimeLimits, RuntimeSupervisor, ScheduleCreate, ScheduleError, ScheduleRequest,
     ScheduleTime,
@@ -1071,6 +1073,190 @@ async fn action_https_is_capability_scoped_typed_and_recovers_after_error()
 }
 
 #[derive(Debug, Default)]
+struct MockFileStorage {
+    operations: Mutex<Vec<&'static str>>,
+}
+
+impl MockFileStorage {
+    fn record(&self, operation: &'static str) -> Result<(), FileStorageError> {
+        self.operations
+            .lock()
+            .map_err(|_| FileStorageError::Unavailable)?
+            .push(operation);
+        Ok(())
+    }
+}
+
+fn file_metadata() -> FileMetadata {
+    FileMetadata {
+        file_id: "fil_00000000000000000000000001".to_owned(),
+        size_bytes: "3".to_owned(),
+        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        content_type: "text/plain".to_owned(),
+        created_at_micros: "1".to_owned(),
+    }
+}
+
+#[async_trait]
+impl FileStorage for MockFileStorage {
+    async fn create_upload_grant(
+        &self,
+        request: FileUploadGrantRequest,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<FileUploadGrant, FileStorageError> {
+        self.record("create_upload")?;
+        if request.max_bytes != 3 || request.content_type.as_deref() != Some("text/plain") {
+            return Err(FileStorageError::InvalidRequest);
+        }
+        Ok(FileUploadGrant {
+            upload_id: "upl_00000000000000000000000002".to_owned(),
+            path: "/v1/files/uploads/upl_00000000000000000000000002".to_owned(),
+            token: "upload-token".to_owned(),
+            expires_at_micros: "2".to_owned(),
+            max_bytes: "3".to_owned(),
+        })
+    }
+
+    async fn store(
+        &self,
+        request: FileStoreRequest,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<FileMetadata, FileStorageError> {
+        self.record("store")?;
+        if request.bytes != [1, 2, 3] {
+            return Err(FileStorageError::InvalidRequest);
+        }
+        Ok(file_metadata())
+    }
+
+    async fn metadata(
+        &self,
+        file_id: String,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<FileMetadata, FileStorageError> {
+        self.record("metadata")?;
+        if file_id != file_metadata().file_id {
+            return Err(FileStorageError::NotFound);
+        }
+        Ok(file_metadata())
+    }
+
+    async fn create_download_grant(
+        &self,
+        request: FileDownloadGrantRequest,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<FileDownloadGrant, FileStorageError> {
+        self.record("create_download")?;
+        if request.expires_in_micros != "1000" {
+            return Err(FileStorageError::InvalidRequest);
+        }
+        Ok(FileDownloadGrant {
+            path: format!("/v1/files/downloads/{}", request.file_id),
+            token: "download-token".to_owned(),
+            expires_at_micros: "3".to_owned(),
+            metadata: file_metadata(),
+        })
+    }
+
+    async fn get(
+        &self,
+        _file_id: String,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<FileBytes, FileStorageError> {
+        self.record("get")?;
+        Ok(FileBytes {
+            metadata: file_metadata(),
+            bytes: vec![1, 2, 3],
+        })
+    }
+
+    async fn delete(
+        &self,
+        _file_id: String,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<(), FileStorageError> {
+        self.record("delete")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn action_file_storage_is_capability_scoped_and_typed() -> Result<(), Box<dyn Error>> {
+    let supervisor = RuntimeSupervisor::start(RuntimeLimits::builder(1, 8).build()?)?;
+    let absent = supervisor
+        .invoke(request_function(
+            "export default (ctx) => typeof ctx.storage === 'undefined';",
+            CanonicalValue::Null,
+            FunctionType::Action,
+            vec![],
+        )?)
+        .await?;
+    assert_eq!(absent, CanonicalValue::Boolean(true));
+
+    let broker = Arc::new(MockFileStorage::default());
+    let source = r#"
+        export const contract = async (ctx) => {
+          const upload = await ctx.storage.createUpload({ maxBytes: 3, contentType: "text/plain" });
+          const stored = await ctx.storage.store(new Uint8Array([1, 2, 3]));
+          const metadata = await ctx.storage.getMetadata(stored.fileId);
+          const download = await ctx.storage.createDownload(stored.fileId, { expiresInMicros: 1000n });
+          const loaded = await ctx.storage.get(stored.fileId);
+          await ctx.storage.delete(stored.fileId);
+          return Object.isFrozen(ctx.storage) && Object.isFrozen(upload)
+            && Object.isFrozen(metadata) && Object.isFrozen(download)
+            && Object.isFrozen(download.metadata) && loaded.bytes instanceof Uint8Array
+            && loaded.bytes[2] === 3;
+        };
+    "#;
+    let output = supervisor
+        .invoke(
+            request_with_contracts(
+                source,
+                CanonicalValue::Null,
+                FunctionType::Action,
+                vec![Capability::FileRead, Capability::FileWrite],
+                &Contract::Null,
+                &Contract::Boolean,
+                &DocumentSchemaV1::new(Vec::new())?,
+            )?
+            .with_file_storage(broker.clone())?,
+        )
+        .await?;
+    assert_eq!(output, CanonicalValue::Boolean(true));
+    assert_eq!(
+        *broker
+            .operations
+            .lock()
+            .map_err(|_| "storage operations lock")?,
+        [
+            "create_upload",
+            "store",
+            "metadata",
+            "create_download",
+            "get",
+            "delete"
+        ]
+    );
+
+    let query = request_function(
+        "export default () => null;",
+        CanonicalValue::Null,
+        FunctionType::Query,
+        vec![],
+    )?;
+    assert_eq!(
+        query.with_file_storage(broker).map(|_| ()),
+        Err(RuntimeError::InvalidInvocation)
+    );
+    Ok(())
+}
+
+#[derive(Debug, Default)]
 struct MockScheduler {
     requests: Mutex<Vec<ScheduleRequest>>,
 }
@@ -1965,7 +2151,15 @@ fn request_with_contracts(
         project_id,
         build_id: BuildId::from_ulid(Ulid::from(85_u128)),
         created_at: TimestampMicros::new(1_700_000_000_000_000),
-        runtime_version: "runku-js-1".parse()?,
+        runtime_version: if capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::FileRead | Capability::FileWrite))
+        {
+            "runku-js-2"
+        } else {
+            "runku-js-1"
+        }
+        .parse()?,
         artifact: bundle.descriptor()?,
         function_contract_hash: Sha256Digest::from_bytes([2; 32]),
         schema_contract_hash: Sha256Digest::of(&schema_bytes),

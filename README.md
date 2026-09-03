@@ -18,6 +18,7 @@ Runku is currently pre-release.
 | `@runku/client` and `@runku/server` TypeScript SDKs | Published together with the CLI version |
 | Complete SQLite-backed local development process | Implemented and test-covered |
 | Safe V8, local Full Node, HTTP, WebSocket, scheduling, identity, logs | Implemented and test-covered |
+| Environment-scoped application files | Filesystem implemented/tested; S3-compatible adapter has MinIO conformance; byte-store backup remains operator-owned |
 | PostgreSQL, S3-compatible artifacts, NATS execution queue | Implemented as adapters with conformance gates |
 | Remote Workspace protocols and services | Implemented as libraries and integration gates |
 | Platform operator bootstrap, sessions, scoped invitations, browser OIDC, and remote lifecycle/logs | Implemented in source with a full PostgreSQL + browser + Product lifecycle campaign |
@@ -54,6 +55,7 @@ deployment.
 | Install the compact self-hosted product | [Docker standalone installation](deployments/docker/README.md) |
 | Operate or recover a local Environment | [Administration](docs/operations/administration.md) |
 | Store and administer logs in standalone or HA | [Operational Log storage](docs/operations/operational-logs.md) |
+| Upload/download application files | [Application file storage](docs/functions/file-storage.md) |
 | Contribute to Runku | [Contributing](CONTRIBUTING.md) |
 | Work with an AI coding assistant | [Agent instructions](AGENTS.md) |
 

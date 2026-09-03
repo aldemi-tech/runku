@@ -21,6 +21,8 @@ existing one. Backups exclude external secret files and therefore require the or
 Identity pepper during disaster restore.
 
 Use `compose.browser.yaml` only when browser CORS and Product JWT verification are configured. Use
+`compose.s3-files.yaml` for application bytes in an independently operated S3-compatible service;
+Runku does not provide that service's backup, replication, lifecycle, or recovery. Use
 `compose.s3-logs.yaml` for off-host history without another process. Use `compose.ha-logs.yaml` only
 with externally operated TLS NATS JetStream and durable S3-compatible storage; the helper selects
 the matching compatible-endpoint overlays when a custom HTTPS object endpoint is required.

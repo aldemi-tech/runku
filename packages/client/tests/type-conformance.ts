@@ -31,6 +31,13 @@ const subscription = realtime.subscribe("queries.user", { id: "one" }, {
     state.value?.name satisfies string | undefined;
   },
 });
+const fileUpload = typed.uploadFile({
+  uploadId: "upl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  path: "/v1/files/uploads/upl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  token: "token",
+  expiresAtMicros: "1",
+  maxBytes: "3",
+}, new Uint8Array([1, 2, 3]));
 const roomId = documentId("rooms", "doc_01ARZ3NDEKTSV4RRFFQ69G5FAV");
 roomId.toString() satisfies string;
 
@@ -53,4 +60,4 @@ void realtime.subscribe("mutations.rename", { id: "one", name: "Ada" }, { onValu
 // @ts-expect-error realtime arguments come from the generated query contract
 void realtime.subscribe("queries.user", { name: "Ada" }, { onValue() {} });
 
-void [query, mutation, subscription];
+void [query, mutation, subscription, fileUpload];

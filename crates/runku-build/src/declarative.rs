@@ -1678,6 +1678,8 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
                 | Capability::FunctionAction
                 | Capability::NetworkHttps
                 | Capability::SchedulerCreate
+                | Capability::FileRead
+                | Capability::FileWrite
                 | Capability::Secret(_)
         ),
     }
@@ -1693,6 +1695,8 @@ fn parse_capability(value: &str) -> Result<Capability, BuildError> {
         "function:action" => Ok(Capability::FunctionAction),
         "network:https" => Ok(Capability::NetworkHttps),
         "scheduler:create" => Ok(Capability::SchedulerCreate),
+        "storage:read" => Ok(Capability::FileRead),
+        "storage:write" => Ok(Capability::FileWrite),
         _ => Err(BuildError::InvalidConfig),
     }
 }

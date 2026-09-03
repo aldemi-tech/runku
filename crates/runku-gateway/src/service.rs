@@ -37,7 +37,9 @@ use runku_releases::{
     FunctionType, ReleaseError, ReleaseManifestV1, ReleaseRepository, ReleaseRouter, RuntimeClass,
     ServingSnapshot, Sha256Digest,
 };
-use runku_runtime::{DataReadError, HttpsEgress, InvocationRequest, RuntimeError, ScheduleError};
+use runku_runtime::{
+    DataReadError, FileStorage, HttpsEgress, InvocationRequest, RuntimeError, ScheduleError,
+};
 use runku_schema::SchemaError;
 use runku_value::TimestampMicros;
 
@@ -657,6 +659,13 @@ impl ProductInvocationService {
     #[must_use]
     pub fn with_operational_logs(mut self, sink: Arc<dyn OperationalLogSink>) -> Self {
         self.operational_logs = Some(sink);
+        self
+    }
+
+    /// Attaches capability-scoped application file storage to root and nested Actions.
+    #[must_use]
+    pub fn with_file_storage(mut self, storage: Arc<dyn FileStorage>) -> Self {
+        self.action = self.action.clone().with_file_storage(storage);
         self
     }
 

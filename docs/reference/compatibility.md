@@ -13,9 +13,9 @@ Runku versions contracts at every boundary that can outlive one process:
 Unknown versions fail closed. A client-selected Release is served only while its contract and
 runtime remain supported. Channel routing cannot silently replace an explicit incompatible Release.
 
-The source line reports version `0.3.0` and has not established a general stable compatibility
-window. Version 0.3.0 is the first supported compact Docker installation floor; later versions must
-name and test their exact previous-supported upgrade path.
+The source line reports version `0.4.0` and has not established a general stable compatibility
+window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.0 supports a
+deliberate forward upgrade from that floor.
 Tagged releases coordinate the CLI, both TypeScript SDKs, Linux compact server binaries, and the
 compact server image. Agent, distributed deployment, protocol, storage, and runtime support windows
 remain separate distribution gates.
@@ -25,7 +25,7 @@ remain separate distribution gates.
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout is not identified by `0.3.0` alone |
+| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.0` alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
 | TypeScript packages | `@runku/client`, `@runku/server`, and `@runku/cli` update together |
@@ -40,8 +40,16 @@ remain separate distribution gates.
 
 The source line adds optional `runku init --project-id/--environment-id` flags as a compatible CLI
 extension. Existing invocations keep generated IDs. Provisioners that use the extension must require
-both IDs and must not expect a 0.3.0 binary to recognize them; adoption begins only with the first
-tagged release that includes this contract.
+both IDs and must require a 0.4.0-or-newer binary.
+
+Application files are a compatible additive SDK/HTTP surface but introduce new manifest capability
+tags and runtime versions `runku-js-2`, `runku-node-2`, and `runku-hybrid-2`. Version 1 manifests
+cannot declare `storage:read`/`storage:write`; old binaries fail closed on the new version/tags.
+Safe V8 and local Full Node implement version 2. Production OCI/distributed Full Node remains on
+version 1 until its mediated Agent channel is versioned, so promotion of a Node storage manifest to
+that profile is rejected rather than silently dropping the capability. File metadata schema v1 and
+generated S3 key layout `v1/projects/{project}/environments/{environment}/files/{file}` are durable;
+future changes require expand/migrate/contract and rollback documentation.
 
 ## Change rules
 

@@ -21,7 +21,7 @@ developer feedback, not the security boundary.
 | Action | Mediated/external effects and orchestration | Never automatic |
 
 Capabilities are `db:read`, `db:write`, `auth:read`, `function:query`, `function:mutation`,
-`function:action`, `network:https`, and `scheduler:create`. Each Function class accepts a safe
+`function:action`, `network:https`, `scheduler:create`, `storage:read`, and `storage:write`. Each Function class accepts a safe
 subset. An absent capability removes that context member and is rejected at runtime if bypassed.
 
 ## Safe V8
@@ -95,6 +95,13 @@ idempotency/reconciliation.
 
 Cron declares a UTC schedule for an existing Mutation or Action. Activation/cursor state is durable
 and tied to the versioned manifest. A Channel move does not retarget pending work.
+
+## Application files
+
+Actions may use capability-scoped immutable file storage. Small objects can cross the runtime
+boundary directly; larger bodies use one-shot upload and short-lived download grants over streaming
+HTTP. Backends, quotas, token security, retry behavior, and operator-owned recovery are specified in
+[Application file storage](file-storage.md).
 
 ## Failure design
 

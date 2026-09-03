@@ -1,16 +1,17 @@
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use runku_contracts::{Contract, decode_contract};
 use runku_observability::{PerformanceComponent, PerformanceOperation};
 use runku_protocol::WireValueV1;
 use runku_releases::{
-    ArtifactFormat, FunctionType, ReleaseManifestV1, RuntimeClass, Sha256Digest,
+    ArtifactFormat, Capability, FunctionType, ReleaseManifestV1, RuntimeClass, Sha256Digest,
     decode_node_esm_bundle,
 };
 use runku_runtime::{
-    FunctionCallKind, FunctionCallRequest, InvocationRequest, RuntimeError, ScheduleRequest,
-    ScheduleTime,
+    FileDownloadGrantRequest, FileStoreRequest, FileUploadGrantRequest, FunctionCallKind,
+    FunctionCallRequest, InvocationRequest, RuntimeError, ScheduleRequest, ScheduleTime,
 };
 use runku_value::{TimestampMicros, encode_stored_value};
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,8 @@ use crate::{FullNodeActionOutcome, FullNodeActionRuntime};
 
 const LOCAL_RUNNER: &str = include_str!("local_runner.mjs");
 const MAX_CONCURRENCY: usize = 128;
-const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PLATFORM_OPS_PER_INVOCATION: u64 = 10_000;
 
 /// Validated developer-machine Node process settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -315,6 +317,7 @@ impl LocalNodeRuntime {
         Ok(path)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_process(
         &self,
         request: &InvocationRequest,
@@ -345,6 +348,7 @@ impl LocalNodeRuntime {
         let stderr_task = tokio::spawn(read_bounded(stderr, limit));
         let cancellation = request.cancellation();
         write_frame(&mut stdin, &input, limit).await?;
+        let mut platform_ops = 0_u64;
         let response = loop {
             let frame = tokio::select! {
                 frame = read_frame(&mut stdout, limit) => frame,
@@ -357,9 +361,18 @@ impl LocalNodeRuntime {
                     return Err(RuntimeError::DeadlineExceeded);
                 }
             }?;
-            match serde_json::from_slice::<NodeMessageV1>(&frame)
-                .map_err(|_| RuntimeError::InvalidResult)?
-            {
+            let message = serde_json::from_slice::<NodeMessageV1>(&frame)
+                .map_err(|_| RuntimeError::InvalidResult)?;
+            if !matches!(&message, NodeMessageV1::Result { .. }) {
+                platform_ops = platform_ops
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidInvocation)?;
+                if platform_ops > MAX_PLATFORM_OPS_PER_INVOCATION {
+                    terminate(&mut child).await;
+                    return Err(RuntimeError::InvalidInvocation);
+                }
+            }
+            match message {
                 NodeMessageV1::Result { response } => break response,
                 NodeMessageV1::FunctionCall {
                     call_id,
@@ -388,6 +401,58 @@ impl LocalNodeRuntime {
                     )
                     .await;
                     write_text_result(&mut stdin, call_id, result, limit).await?;
+                }
+                NodeMessageV1::StorageCreateUpload {
+                    call_id,
+                    max_bytes,
+                    content_type,
+                    sha256,
+                } => {
+                    let result = handle_storage_create_upload(
+                        request,
+                        max_bytes,
+                        content_type,
+                        sha256,
+                        deadline,
+                    )
+                    .await;
+                    write_json_result(&mut stdin, call_id, result, limit).await?;
+                }
+                NodeMessageV1::StorageStore {
+                    call_id,
+                    bytes,
+                    content_type,
+                    sha256,
+                } => {
+                    let result =
+                        handle_storage_store(request, bytes, content_type, sha256, deadline).await;
+                    write_json_result(&mut stdin, call_id, result, limit).await?;
+                }
+                NodeMessageV1::StorageMetadata { call_id, file_id } => {
+                    let result = handle_storage_metadata(request, file_id, deadline).await;
+                    write_json_result(&mut stdin, call_id, result, limit).await?;
+                }
+                NodeMessageV1::StorageCreateDownload {
+                    call_id,
+                    file_id,
+                    expires_in_micros,
+                } => {
+                    let result = handle_storage_create_download(
+                        request,
+                        file_id,
+                        expires_in_micros,
+                        deadline,
+                    )
+                    .await;
+                    write_json_result(&mut stdin, call_id, result, limit).await?;
+                }
+                NodeMessageV1::StorageGet { call_id, file_id } => {
+                    let result = handle_storage_get(request, file_id, deadline).await;
+                    write_json_result(&mut stdin, call_id, result, limit).await?;
+                }
+                NodeMessageV1::StorageDelete { call_id, file_id } => {
+                    let result = handle_storage_delete(request, file_id, deadline).await;
+                    write_json_result(&mut stdin, call_id, result, limit).await?;
                 }
             }
         };
@@ -501,6 +566,8 @@ fn capability_name(capability: &runku_releases::Capability) -> String {
         runku_releases::Capability::FunctionAction => "function:action".to_owned(),
         runku_releases::Capability::NetworkHttps => "network:https".to_owned(),
         runku_releases::Capability::SchedulerCreate => "scheduler:create".to_owned(),
+        runku_releases::Capability::FileRead => "storage:read".to_owned(),
+        runku_releases::Capability::FileWrite => "storage:write".to_owned(),
         runku_releases::Capability::Secret(name) => format!("secret:{name}"),
     }
 }
@@ -666,6 +733,144 @@ async fn handle_schedule(
         .map_err(|error| error.code().to_owned())
 }
 
+async fn handle_storage_create_upload(
+    request: &InvocationRequest,
+    max_bytes: u64,
+    content_type: Option<String>,
+    sha256: Option<String>,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, String> {
+    require_storage_capability(request, &Capability::FileWrite)?;
+    let value = request
+        .file_storage()
+        .ok_or_else(|| "FILE_STORAGE_FORBIDDEN".to_owned())?
+        .create_upload_grant(
+            FileUploadGrantRequest {
+                max_bytes,
+                content_type,
+                sha256,
+            },
+            deadline.into_std(),
+            request.cancellation(),
+        )
+        .await
+        .map_err(|error| error.code().to_owned())?;
+    serde_json::to_value(value).map_err(|_| "FILE_STORAGE_UNAVAILABLE".to_owned())
+}
+
+async fn handle_storage_store(
+    request: &InvocationRequest,
+    bytes: String,
+    content_type: Option<String>,
+    sha256: Option<String>,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, String> {
+    require_storage_capability(request, &Capability::FileWrite)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(bytes)
+        .map_err(|_| "FILE_STORAGE_REQUEST_INVALID".to_owned())?;
+    let value = request
+        .file_storage()
+        .ok_or_else(|| "FILE_STORAGE_FORBIDDEN".to_owned())?
+        .store(
+            FileStoreRequest {
+                bytes,
+                content_type,
+                sha256,
+            },
+            deadline.into_std(),
+            request.cancellation(),
+        )
+        .await
+        .map_err(|error| error.code().to_owned())?;
+    serde_json::to_value(value).map_err(|_| "FILE_STORAGE_UNAVAILABLE".to_owned())
+}
+
+async fn handle_storage_metadata(
+    request: &InvocationRequest,
+    file_id: String,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, String> {
+    require_storage_capability(request, &Capability::FileRead)?;
+    let value = request
+        .file_storage()
+        .ok_or_else(|| "FILE_STORAGE_FORBIDDEN".to_owned())?
+        .metadata(file_id, deadline.into_std(), request.cancellation())
+        .await
+        .map_err(|error| error.code().to_owned())?;
+    serde_json::to_value(value).map_err(|_| "FILE_STORAGE_UNAVAILABLE".to_owned())
+}
+
+async fn handle_storage_create_download(
+    request: &InvocationRequest,
+    file_id: String,
+    expires_in_micros: String,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, String> {
+    require_storage_capability(request, &Capability::FileRead)?;
+    let value = request
+        .file_storage()
+        .ok_or_else(|| "FILE_STORAGE_FORBIDDEN".to_owned())?
+        .create_download_grant(
+            FileDownloadGrantRequest {
+                file_id,
+                expires_in_micros,
+            },
+            deadline.into_std(),
+            request.cancellation(),
+        )
+        .await
+        .map_err(|error| error.code().to_owned())?;
+    serde_json::to_value(value).map_err(|_| "FILE_STORAGE_UNAVAILABLE".to_owned())
+}
+
+async fn handle_storage_get(
+    request: &InvocationRequest,
+    file_id: String,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, String> {
+    require_storage_capability(request, &Capability::FileRead)?;
+    let value = request
+        .file_storage()
+        .ok_or_else(|| "FILE_STORAGE_FORBIDDEN".to_owned())?
+        .get(file_id, deadline.into_std(), request.cancellation())
+        .await
+        .map_err(|error| error.code().to_owned())?;
+    Ok(serde_json::json!({
+        "metadata": value.metadata,
+        "bytes": URL_SAFE_NO_PAD.encode(value.bytes),
+    }))
+}
+
+async fn handle_storage_delete(
+    request: &InvocationRequest,
+    file_id: String,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, String> {
+    require_storage_capability(request, &Capability::FileWrite)?;
+    request
+        .file_storage()
+        .ok_or_else(|| "FILE_STORAGE_FORBIDDEN".to_owned())?
+        .delete(file_id, deadline.into_std(), request.cancellation())
+        .await
+        .map_err(|error| error.code().to_owned())?;
+    Ok(serde_json::Value::Null)
+}
+
+fn require_storage_capability(
+    request: &InvocationRequest,
+    required: &Capability,
+) -> Result<(), String> {
+    request
+        .manifest()
+        .functions
+        .iter()
+        .find(|function| function.id == request.function_id())
+        .is_some_and(|function| function.capabilities.contains(required))
+        .then_some(())
+        .ok_or_else(|| "FILE_STORAGE_FORBIDDEN".to_owned())
+}
+
 async fn write_op_result(
     writer: &mut (impl AsyncWrite + Unpin),
     call_id: u64,
@@ -686,6 +891,7 @@ async fn write_op_result(
         ok,
         value,
         text: None,
+        json: None,
         error,
     })
     .map_err(|_| RuntimeError::Internal)?;
@@ -708,6 +914,30 @@ async fn write_text_result(
         ok,
         value: None,
         text,
+        json: None,
+        error,
+    })
+    .map_err(|_| RuntimeError::Internal)?;
+    write_frame(writer, &bytes, limit).await
+}
+
+async fn write_json_result(
+    writer: &mut (impl AsyncWrite + Unpin),
+    call_id: u64,
+    result: Result<serde_json::Value, String>,
+    limit: usize,
+) -> Result<(), RuntimeError> {
+    let (ok, json, error) = match result {
+        Ok(json) => (true, Some(json), None),
+        Err(error) => (false, None, Some(error)),
+    };
+    let bytes = serde_json::to_vec(&NodeOpResultV1 {
+        r#type: "opResult",
+        call_id,
+        ok,
+        value: None,
+        text: None,
+        json,
         error,
     })
     .map_err(|_| RuntimeError::Internal)?;
@@ -772,6 +1002,35 @@ enum NodeMessageV1 {
         time: NodeScheduleTimeV1,
         idempotency_key: Option<String>,
     },
+    StorageCreateUpload {
+        call_id: u64,
+        max_bytes: u64,
+        content_type: Option<String>,
+        sha256: Option<String>,
+    },
+    StorageStore {
+        call_id: u64,
+        bytes: String,
+        content_type: Option<String>,
+        sha256: Option<String>,
+    },
+    StorageMetadata {
+        call_id: u64,
+        file_id: String,
+    },
+    StorageCreateDownload {
+        call_id: u64,
+        file_id: String,
+        expires_in_micros: String,
+    },
+    StorageGet {
+        call_id: u64,
+        file_id: String,
+    },
+    StorageDelete {
+        call_id: u64,
+        file_id: String,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -793,6 +1052,7 @@ struct NodeOpResultV1 {
     ok: bool,
     value: Option<WireValueV1>,
     text: Option<String>,
+    json: Option<serde_json::Value>,
     error: Option<String>,
 }
 

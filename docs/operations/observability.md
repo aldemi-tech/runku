@@ -1,5 +1,12 @@
 # Observability signals
 
+For application files, alert on sustained `FILE_STORAGE_UNAVAILABLE`/`FILE_STORAGE_CORRUPT`, quota
+rejection below expected usage, approach to the filesystem free-space floor, S3 authorization or
+throttling failures, and incomplete multipart growth reported by the provider. HTTP status,
+`x-runku-request-id`, immutable SHA-256/size metadata, and backend audit logs are the correlation
+surfaces. Never record transfer tokens, user filenames, object keys, or File IDs as unrestricted
+labels. See [Application file storage](../functions/file-storage.md#evidence-and-diagnosis).
+
 This page defines signal ownership and the minimum dashboards/alerts. The storage, streaming,
 retention, HA, recovery, and exact configuration runbook is
 [Operational Log storage and administration](operational-logs.md).

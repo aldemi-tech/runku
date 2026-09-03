@@ -1,5 +1,11 @@
 # Backup and recovery
 
+> **Application file exclusion:** Runku does not back up application file bytes or manage
+> replication/versioning for their filesystem/S3 backend. The compact helper deliberately excludes
+> `${RUNKU_DATA_DIRECTORY}/files` and external buckets even though it preserves file metadata under
+> the Product root. A valid disaster-recovery plan must coordinate and independently verify that
+> backend. See [Application file storage](../functions/file-storage.md#backup-restore-and-residual-responsibility).
+
 Backup is an integrity protocol, not a file-copy feature. A recoverable Runku backup must capture
 all authoritative state required to preserve Project/Environment identity, application data,
 Release routing, credentials, schedules, and artifact references.
@@ -18,6 +24,7 @@ Release routing, credentials, schedules, and artifact references.
 | Platform operators/grants/sessions/invitations/audit | not part of local application state | PostgreSQL Platform Identity schema | Authoritative and sensitive |
 | Platform credential/OIDC peppers | not part of local application state | Secret provider + coordinated recovery manifest | Authoritative cryptographic material |
 | Artifacts | `.runku/artifacts/` and build store | S3-compatible object storage | Authoritative immutable content by digest |
+| Application files | `.runku/file-storage-objects/` plus `.runku/file-storage.sqlite3` metadata | dedicated filesystem or S3-compatible prefix plus Product metadata | Authoritative application bytes; Runku backup excludes the byte backend |
 | Process locks/caches/scratch | local ephemeral paths | Pod/host ephemeral storage | Reconstructible; never restore as authority |
 
 ## Consistent local backup

@@ -31,15 +31,17 @@ Read in this order:
    identity, and code pinning.
 4. [Functions and runtimes](functions/functions-and-runtimes.md): declarations, capabilities, Safe
    V8, Full Node, nested calls, HTTPS, scheduling, and failure semantics.
-5. [Data and Realtime](data/data-and-realtime.md): values, documents, indexes, transactions, OCC,
+5. [Application file storage](functions/file-storage.md): Action APIs, streamed HTTP transfer,
+   filesystem/S3 backends, quotas, security, and operator-owned recovery.
+6. [Data and Realtime](data/data-and-realtime.md): values, documents, indexes, transactions, OCC,
    outbox, subscriptions, and resync.
-6. [Application identity](auth/application-identity.md): Application Clients, key types, user/service
+7. [Application identity](auth/application-identity.md): Application Clients, key types, user/service
    identity, JWT/OIDC, browser/server separation, and rotation.
-7. [Platform operator identity](auth/platform-identity.md): first-owner bootstrap, `runku login`,
+8. [Platform operator identity](auth/platform-identity.md): first-owner bootstrap, `runku login`,
    scoped invitations, sessions, OIDC, PostgreSQL state, and recovery.
-8. [Authenticated remote lifecycle](operations/remote-lifecycle.md): use one operator session for
+9. [Authenticated remote lifecycle](operations/remote-lifecycle.md): use one operator session for
    publish, Release validation, promotion, rollback, historical logs, and streaming logs.
-9. [`@runku/server`](../packages/server/README.md) and
+10. [`@runku/server`](../packages/server/README.md) and
    [`@runku/client`](../packages/client/README.md): exact TypeScript APIs and examples.
 
 ## Release and CI/CD path

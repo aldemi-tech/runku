@@ -63,7 +63,7 @@ install-cli-check:
 	@install_root=$$(mktemp -d); \
 	trap 'rm -rf "$$install_root"' EXIT; \
 	$(MAKE) --no-print-directory install-cli CARGO_INSTALL_ROOT="$$install_root"; \
-	"$$install_root/bin/runku" --version | rg -x 'runku 0\.3\.0'; \
+	"$$install_root/bin/runku" --version | rg -x 'runku 0\.4\.0'; \
 	"$$install_root/bin/runku" --help | rg -F 'runku dev [--root PATH]'
 
 cli-package-check: js-install
@@ -83,6 +83,12 @@ selfhost-package-check:
 	  --project-directory "$$package_root/runku-selfhost-v$$version" \
 	  --env-file "$$package_root/runku-selfhost-v$$version/.env" \
 	  -f "$$package_root/runku-selfhost-v$$version/compose.yaml" config --quiet; \
+	test -f "$$package_root/runku-selfhost-v$$version/compose.s3-files.yaml"; \
+	RUNKU_UID=$$(id -u) RUNKU_GID=$$(id -g) docker compose \
+	  --project-directory "$$package_root/runku-selfhost-v$$version" \
+	  --env-file "$$package_root/runku-selfhost-v$$version/.env" \
+	  -f "$$package_root/runku-selfhost-v$$version/compose.yaml" \
+	  -f "$$package_root/runku-selfhost-v$$version/compose.s3-files.yaml" config --quiet; \
 	sh -n "$$package_root/runku-selfhost-v$$version/runku-selfhost"; \
 	test -z "$$(find "$$package_root/runku-selfhost-v$$version" -type f \
 	  \( -name '*password*' -o -name '*.creds' -o -name '*.key' \) -print -quit)"

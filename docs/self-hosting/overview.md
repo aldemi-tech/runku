@@ -32,6 +32,11 @@ together. Repeating the same command is idempotent; a different scope conflicts 
 Product state. This lets an external fleet controller reconcile durable identity without editing
 private state files or linking engine crates.
 
+Application file storage is an Environment-scoped Product capability backed by a dedicated
+filesystem directory or an operator-provided S3-compatible prefix. The compact package implements
+both choices; it does not operate MinIO/S3 or back up, replicate, or version application file bytes.
+See [Application file storage](../functions/file-storage.md) before selecting capacity and recovery.
+
 ## Product topology
 
 ```text

@@ -11,6 +11,8 @@ Runku assumes application code, client input, artifacts, and network peers may b
 - Shared untrusted Full Node uses a microVM boundary, not Docker alone.
 - HTTPS egress resolves and pins allowed destinations and denies private infrastructure ranges.
 - Artifact size and digest are verified on every trust-boundary read.
+- Application file grants are Environment-bound, short-lived HMAC bearer credentials; upload
+  grants are one-shot and File IDs alone grant no access.
 - Transactions publish outbox and scheduling state atomically with data changes.
 - Public and development credentials cannot exchange roles.
 - Platform operator access uses separate invitation/access/refresh credentials and scoped grants;
@@ -65,6 +67,9 @@ VM-grade microVM boundary. See [SECURITY.md](../../SECURITY.md) to report vulner
 - OCC/idempotency/replay errors and repeated external effects;
 - sandbox escape, resource exhaustion, host/Agent secret exposure;
 - secret leakage through logs, errors, bundles, traces, or backups;
+- file-grant replay/theft, quota reservation abuse, oversized/chunked uploads, range amplification,
+  path traversal, MIME confusion, checksum drift, filesystem exhaustion, orphaned multipart parts,
+  or a privileged/compromised object-storage operator;
 - unsafe migration, partial restore, wrong identity, or downgrade.
 
 ## Deployment and secret controls
@@ -91,6 +96,21 @@ updates even when RustSec reports no exploitable advisory.
 One-time secret material belongs in a secret manager. Rotate with overlap, verify replacement, then
 revoke. Never place secrets in CLI arguments, ConfigMaps, image layers, source, generated types,
 public env prefixes, logs, traces, errors, or unencrypted backups.
+
+Application Functions never receive filesystem paths, bucket endpoints, or S3 credentials. Storage
+Platform Ops derive generated object keys from Project, Environment, and canonical File ID; reserve
+quota before accepting bytes; enforce byte, file-count, live-grant, Action, concurrency, and
+free-space limits; reject encoded bodies, duplicate headers, malformed media
+types/checksums/ranges; and verify immutable metadata on read. Transfer tokens belong only in
+`Authorization`, never query strings, logs, traces, referrers, analytics, or persisted application
+documents. Exact browser CORS origins still apply.
+
+The filesystem/S3 operator remains privileged. Use a dedicated root or prefix, least-privilege
+credentials, TLS, encryption at rest, audit, capacity alerts, multipart-abort lifecycle, and an
+independently tested backup/restore strategy. Runku does not configure or operate those durability
+controls. Filesystem roots must be absolute, non-root, non-symlink directories; an existing Unix
+root must already be private because Runku will not change broad directory permissions. See
+[Application file storage](../functions/file-storage.md).
 
 The compact Docker profile mounts the PostgreSQL URL and Platform Identity pepper as separate
 one-line secret files. Runku rejects simultaneous direct/file sources, relative paths, symlinks,

@@ -48,6 +48,12 @@ compose() {
     s3-logs)
       docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.s3-logs.yaml" "$@"
       ;;
+    s3-files)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.s3-files.yaml" "$@"
+      ;;
+    browser-s3-files)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-files.yaml" "$@"
+      ;;
     browser-s3-logs)
       docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" -f "$SCRIPT_DIRECTORY/compose.s3-logs.yaml" "$@"
       ;;
@@ -155,11 +161,11 @@ configure() {
   test "$uid" -ne 0 || fail "RUNKU_UID must be non-root"
   test "$gid" -ne 0 || fail "RUNKU_GID must be non-root"
 
-  mkdir -p "$data_directory/product" "$data_directory/platform" "$secrets_directory"
-  for directory in "$data_directory" "$data_directory/product" "$data_directory/platform" "$secrets_directory"; do
+  mkdir -p "$data_directory/product" "$data_directory/platform" "$data_directory/files" "$secrets_directory"
+  for directory in "$data_directory" "$data_directory/product" "$data_directory/platform" "$data_directory/files" "$secrets_directory"; do
     test ! -L "$directory" || fail "persistent and secret directories must not be symlinks"
   done
-  chmod 0700 "$data_directory" "$data_directory/product" "$data_directory/platform" "$secrets_directory"
+  chmod 0700 "$data_directory" "$data_directory/product" "$data_directory/platform" "$data_directory/files" "$secrets_directory"
   case "$(uname -s)" in
     Linux) actual_uid=$(stat -c '%u' "$data_directory/product"); actual_gid=$(stat -c '%g' "$data_directory/product") ;;
     Darwin) actual_uid=$(stat -f '%u' "$data_directory/product"); actual_gid=$(stat -f '%g' "$data_directory/product") ;;
@@ -184,6 +190,12 @@ configure() {
   deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
   case "${deployment_profile:-standalone}" in
     *s3-logs*|*ha-logs*) require_external_secret "$secrets_directory/archive-aws-credentials" ;;
+  esac
+  case "${deployment_profile:-standalone}" in
+    *s3-files*)
+      require_external_secret "$secrets_directory/file-s3-access-key-id"
+      require_external_secret "$secrets_directory/file-s3-secret-access-key"
+      ;;
   esac
   case "${deployment_profile:-standalone}" in
     *ha-logs*)
@@ -424,7 +436,7 @@ uninstall() {
   mode=$1
   if test "$mode" = keep-data; then
     compose down
-    printf 'containers removed; PostgreSQL volume, Product data, and secrets were retained\n'
+    printf 'containers removed; PostgreSQL volume, Product data, application files, and secrets were retained\n'
     return
   fi
   test "$mode" = delete-data || fail "usage: runku-selfhost uninstall keep-data|delete-data"
@@ -433,8 +445,8 @@ uninstall() {
   data_directory=$(env_value RUNKU_DATA_DIRECTORY)
   compose down --volumes
   test "$data_directory" != / || fail "refusing to delete a root data directory"
-  rm -rf "$data_directory/product" "$data_directory/platform"
-  printf 'installation containers, PostgreSQL volume, and Product state removed; secret files were retained\n'
+  rm -rf "$data_directory/product" "$data_directory/platform" "$data_directory/files"
+  printf 'installation containers, PostgreSQL volume, Product state, and filesystem application files removed; secret files were retained\n'
 }
 
 command=${1:-}

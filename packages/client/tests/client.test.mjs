@@ -176,6 +176,70 @@ test("Action uses its endpoint and is never automatically retried", async () => 
   assert.equal(calls, 1);
 });
 
+test("File transfers use same-origin bearer grants without application credentials", async () => {
+  const uploadId = "upl_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+  const fileId = "fil_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+  const metadata = {
+    fileId,
+    sizeBytes: "3",
+    sha256: "a".repeat(64),
+    contentType: "text/plain",
+    createdAtMicros: "1",
+  };
+  const calls = [];
+  const client = new RunkuClient({
+    baseUrl: "https://api.example",
+    target: "channel:stable",
+    applicationKey: PUBLISHABLE_KEY,
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      if (init.method === "PUT") {
+        return new Response(JSON.stringify({ version: 1, status: "ok", file: metadata }), {
+          status: 201,
+          headers: { "content-type": "application/json", "x-runku-request-id": REQUEST_ID },
+        });
+      }
+      return new Response("abc", {
+        status: 206,
+        headers: {
+          "accept-ranges": "bytes",
+          "content-disposition": "attachment",
+          "content-length": "3",
+          "content-range": "bytes 0-2/3",
+          "content-type": "text/plain",
+          etag: `"${metadata.sha256}"`,
+        },
+      });
+    },
+  });
+  const uploaded = await client.uploadFile({
+    uploadId,
+    path: `/v1/files/uploads/${uploadId}`,
+    token: "upload.secret",
+    expiresAtMicros: "999999999999999",
+    maxBytes: "3",
+  }, new Uint8Array([97, 98, 99]), { contentType: "text/plain" });
+  assert.equal(uploaded.fileId, fileId);
+  const downloaded = await client.downloadFile({
+    path: `/v1/files/downloads/${fileId}`,
+    token: "download.secret",
+    expiresAtMicros: "999999999999999",
+    metadata,
+  }, { range: { start: 0n, end: 3n } });
+  assert.equal(await downloaded.text(), "abc");
+  assert.equal(calls[0].url, `https://api.example/v1/files/uploads/${uploadId}`);
+  assert.equal(calls[0].init.headers.get("authorization"), "Bearer upload.secret");
+  assert.equal(calls[0].init.headers.get("x-runku-key"), null);
+  assert.equal(calls[1].init.headers.get("range"), "bytes=0-2");
+  await assert.rejects(client.uploadFile({
+    uploadId,
+    path: "https://evil.example/upload",
+    token: "secret",
+    expiresAtMicros: "1",
+    maxBytes: "3",
+  }, "abc"), TypeError);
+});
+
 test("Abort, response limits, malformed envelopes, and config fail closed", async () => {
   let abortCalls = 0;
   const aborting = new RunkuClient({

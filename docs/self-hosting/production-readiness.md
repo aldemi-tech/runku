@@ -8,7 +8,8 @@ conformance assets are evidence inputs, not substitutes for a released package.
 
 ## Compact Docker support decision
 
-Version 0.3.0 establishes the first supported compact-installation floor with this exact boundary:
+Version 0.4.0 supports a forward upgrade from the 0.3.0 compact-installation floor with this exact
+boundary:
 
 | Area | Included |
 |---|---|
@@ -16,9 +17,10 @@ Version 0.3.0 establishes the first supported compact-installation floor with th
 | Runtime | Safe V8; no Full Node Agent |
 | Processes | one `runku-server` plus PostgreSQL; optional same-image log workers |
 | Logs | embedded filesystem Parquet/DuckDB, optional external NATS/S3 HA log overlay |
+| Application files | Environment-scoped metadata plus dedicated filesystem or external S3-compatible bytes; byte-store backup/recovery remains operator-owned |
 | Network | dedicated Linux host, loopback listeners, operator-owned TLS reverse proxy |
 | Lifecycle | setup, invitation/OIDC login, publish, promote, rollback, logs, backup, verify, restore, upgrade, guarded uninstall |
-| Upgrade floor | 0.3.0; later releases must qualify their exact previous-supported version |
+| Upgrade floor | forward upgrade from 0.3.0; no database downgrade window |
 
 The release package and executable evidence cover:
 
@@ -31,6 +33,8 @@ The release package and executable evidence cover:
 - [x] restart with automatic serving of the persisted Channel;
 - [x] explicit image upgrade preflight and guarded data deletion;
 - [x] source-level standalone archive and NATS/S3 archive failure/conformance tests.
+- [x] filesystem and digest-pinned MinIO file transfer conformance with Safe V8, local Full Node,
+      authenticated Action-to-HTTP integration, quotas, checksums, range reads, and cleanup.
 
 The source gate is `make selfhost-package-check`; a pre-tag manual Release workflow additionally
 runs `scripts/selfhost-artifact-evidence.sh` with freshly built Linux archives and the packaged

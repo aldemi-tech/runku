@@ -31,9 +31,11 @@ use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
 use crate::{
-    DataDocument, DataGetRequest, DataIndexEntry, DataRead, DataScanRequest, DataWrite,
-    FunctionCallError, FunctionCallKind, FunctionCallRequest, FunctionInvoke, HttpsEgress,
-    HttpsRequest, HttpsResponse, RuntimeError, ScheduleCreate, ScheduleRequest, ScheduleTime,
+    DataDocument, DataGetRequest, DataIndexEntry, DataRead, DataScanRequest, DataWrite, FileBytes,
+    FileDownloadGrant, FileDownloadGrantRequest, FileMetadata, FileStorage, FileStoreRequest,
+    FileUploadGrant, FileUploadGrantRequest, FunctionCallError, FunctionCallKind,
+    FunctionCallRequest, FunctionInvoke, HttpsEgress, HttpsRequest, HttpsResponse, RuntimeError,
+    ScheduleCreate, ScheduleRequest, ScheduleTime,
     invocation::{InvocationRequest, RuntimeLimits},
     logging::InvocationLogContext,
     value_bridge::{WireValue, from_wire, to_wire},
@@ -64,6 +66,9 @@ struct PlatformState {
     document_schema: Option<Arc<DocumentSchemaV1>>,
     scheduling: bool,
     scheduler: Option<Arc<dyn ScheduleCreate>>,
+    storage_read: bool,
+    storage_write: bool,
+    file_storage: Option<Arc<dyn FileStorage>>,
     function_query: bool,
     function_mutation: bool,
     function_action: bool,
@@ -216,6 +221,133 @@ async fn op_runku_https(
         .ok_or_else(|| deno_error::JsErrorBox::generic("HTTPS_BROKER_UNAVAILABLE"))?;
     https
         .execute(request, platform.deadline, platform.cancellation.clone())
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+}
+
+fn storage_broker(
+    platform: &PlatformState,
+) -> Result<&Arc<dyn FileStorage>, deno_error::JsErrorBox> {
+    if platform.function_type != FunctionType::Action {
+        return Err(deno_error::JsErrorBox::generic(
+            "FILE_STORAGE_CAPABILITY_DENIED",
+        ));
+    }
+    platform
+        .file_storage
+        .as_ref()
+        .ok_or_else(|| deno_error::JsErrorBox::generic("FILE_STORAGE_BROKER_UNAVAILABLE"))
+}
+
+#[op2]
+#[serde]
+async fn op_runku_storage_create_upload(
+    state: Rc<RefCell<OpState>>,
+    #[serde] request: FileUploadGrantRequest,
+) -> Result<FileUploadGrant, deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    if !platform.storage_write {
+        return Err(deno_error::JsErrorBox::generic(
+            "FILE_STORAGE_WRITE_CAPABILITY_DENIED",
+        ));
+    }
+    storage_broker(&platform)?
+        .create_upload_grant(request, platform.deadline, platform.cancellation.clone())
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+}
+
+#[op2]
+#[serde]
+async fn op_runku_storage_store(
+    state: Rc<RefCell<OpState>>,
+    #[serde] request: FileStoreRequest,
+) -> Result<FileMetadata, deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    if !platform.storage_write {
+        return Err(deno_error::JsErrorBox::generic(
+            "FILE_STORAGE_WRITE_CAPABILITY_DENIED",
+        ));
+    }
+    storage_broker(&platform)?
+        .store(request, platform.deadline, platform.cancellation.clone())
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+}
+
+#[op2]
+#[serde]
+async fn op_runku_storage_metadata(
+    state: Rc<RefCell<OpState>>,
+    #[string] file_id: String,
+) -> Result<FileMetadata, deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    if !platform.storage_read {
+        return Err(deno_error::JsErrorBox::generic(
+            "FILE_STORAGE_READ_CAPABILITY_DENIED",
+        ));
+    }
+    storage_broker(&platform)?
+        .metadata(file_id, platform.deadline, platform.cancellation.clone())
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+}
+
+#[op2]
+#[serde]
+async fn op_runku_storage_create_download(
+    state: Rc<RefCell<OpState>>,
+    #[serde] request: FileDownloadGrantRequest,
+) -> Result<FileDownloadGrant, deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    if !platform.storage_read {
+        return Err(deno_error::JsErrorBox::generic(
+            "FILE_STORAGE_READ_CAPABILITY_DENIED",
+        ));
+    }
+    storage_broker(&platform)?
+        .create_download_grant(request, platform.deadline, platform.cancellation.clone())
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+}
+
+#[op2]
+#[serde]
+async fn op_runku_storage_get(
+    state: Rc<RefCell<OpState>>,
+    #[string] file_id: String,
+) -> Result<FileBytes, deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    if !platform.storage_read {
+        return Err(deno_error::JsErrorBox::generic(
+            "FILE_STORAGE_READ_CAPABILITY_DENIED",
+        ));
+    }
+    storage_broker(&platform)?
+        .get(file_id, platform.deadline, platform.cancellation.clone())
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+}
+
+#[op2]
+async fn op_runku_storage_delete(
+    state: Rc<RefCell<OpState>>,
+    #[string] file_id: String,
+) -> Result<(), deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    if !platform.storage_write {
+        return Err(deno_error::JsErrorBox::generic(
+            "FILE_STORAGE_WRITE_CAPABILITY_DENIED",
+        ));
+    }
+    storage_broker(&platform)?
+        .delete(file_id, platform.deadline, platform.cancellation.clone())
         .await
         .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
 }
@@ -601,6 +733,12 @@ fn platform_extension() -> Extension {
     const DATA_DELETE_OP: OpDecl = op_runku_data_delete();
     const SCHEDULE_AFTER_OP: OpDecl = op_runku_schedule_after();
     const SCHEDULE_AT_OP: OpDecl = op_runku_schedule_at();
+    const STORAGE_CREATE_UPLOAD_OP: OpDecl = op_runku_storage_create_upload();
+    const STORAGE_STORE_OP: OpDecl = op_runku_storage_store();
+    const STORAGE_METADATA_OP: OpDecl = op_runku_storage_metadata();
+    const STORAGE_CREATE_DOWNLOAD_OP: OpDecl = op_runku_storage_create_download();
+    const STORAGE_GET_OP: OpDecl = op_runku_storage_get();
+    const STORAGE_DELETE_OP: OpDecl = op_runku_storage_delete();
     const FUNCTION_QUERY_OP: OpDecl = op_runku_function_query();
     const FUNCTION_MUTATION_OP: OpDecl = op_runku_function_mutation();
     const FUNCTION_ACTION_OP: OpDecl = op_runku_function_action();
@@ -627,6 +765,12 @@ fn platform_extension() -> Extension {
             DATA_DELETE_OP,
             SCHEDULE_AFTER_OP,
             SCHEDULE_AT_OP,
+            STORAGE_CREATE_UPLOAD_OP,
+            STORAGE_STORE_OP,
+            STORAGE_METADATA_OP,
+            STORAGE_CREATE_DOWNLOAD_OP,
+            STORAGE_GET_OP,
+            STORAGE_DELETE_OP,
             FUNCTION_QUERY_OP,
             FUNCTION_MUTATION_OP,
             FUNCTION_ACTION_OP,
@@ -653,6 +797,8 @@ struct WireInvocationMetadata {
     data_enabled: bool,
     data_write_enabled: bool,
     scheduler_enabled: bool,
+    storage_read_enabled: bool,
+    storage_write_enabled: bool,
     function_query_enabled: bool,
     function_mutation_enabled: bool,
     function_action_enabled: bool,
@@ -730,7 +876,7 @@ fn validate_input(
     }
     if !matches!(
         request.manifest.runtime_version.as_str(),
-        "platform-js-1" | "runku-js-1" | "runku-hybrid-1"
+        "platform-js-1" | "runku-js-1" | "runku-js-2" | "runku-hybrid-1" | "runku-hybrid-2"
     ) {
         return Err(RuntimeError::UnsupportedRuntime);
     }
@@ -770,7 +916,10 @@ fn validate_input(
     };
     let bundle =
         decode_safe_esm_bundle(resource_bytes).map_err(|_| RuntimeError::InvalidArtifact)?;
-    if request.manifest.runtime_version.as_str() == "runku-hybrid-1" {
+    if matches!(
+        request.manifest.runtime_version.as_str(),
+        "runku-hybrid-1" | "runku-hybrid-2"
+    ) {
         let node_bundle = runku_releases::decode_node_esm_bundle(resource_bytes)
             .map_err(|_| RuntimeError::InvalidArtifact)?;
         if request.manifest.artifact.format == runku_releases::ArtifactFormat::NodeEsmBundleV1 {
@@ -793,7 +942,7 @@ fn validate_input(
         .to_owned();
     let (result_contract, document_schema) = if matches!(
         request.manifest.runtime_version.as_str(),
-        "runku-js-1" | "runku-hybrid-1"
+        "runku-js-1" | "runku-js-2" | "runku-hybrid-1" | "runku-hybrid-2"
     ) {
         let arguments_contract = contract_resource(&bundle, function.arguments_contract_hash)?;
         arguments_contract
@@ -986,6 +1135,11 @@ fn platform_state(
             FunctionType::Mutation | FunctionType::Action
         ) && function.capabilities.contains(&Capability::SchedulerCreate),
         scheduler: request.scheduler.clone(),
+        storage_read: function.function_type == FunctionType::Action
+            && function.capabilities.contains(&Capability::FileRead),
+        storage_write: function.function_type == FunctionType::Action
+            && function.capabilities.contains(&Capability::FileWrite),
+        file_storage: request.file_storage.clone(),
         function_query: function.capabilities.contains(&Capability::FunctionQuery),
         function_mutation: function
             .capabilities
@@ -1272,6 +1426,10 @@ fn metadata(request: &InvocationRequest, function: &FunctionManifest) -> WireInv
             function.function_type,
             FunctionType::Mutation | FunctionType::Action
         ) && function.capabilities.contains(&Capability::SchedulerCreate),
+        storage_read_enabled: function.function_type == FunctionType::Action
+            && function.capabilities.contains(&Capability::FileRead),
+        storage_write_enabled: function.function_type == FunctionType::Action
+            && function.capabilities.contains(&Capability::FileWrite),
         function_query_enabled: function.capabilities.contains(&Capability::FunctionQuery),
         function_mutation_enabled: function
             .capabilities
@@ -1341,6 +1499,8 @@ fn capability(value: &Capability) -> String {
         Capability::FunctionAction => "function:action".to_owned(),
         Capability::NetworkHttps => "network:https".to_owned(),
         Capability::SchedulerCreate => "scheduler:create".to_owned(),
+        Capability::FileRead => "storage:read".to_owned(),
+        Capability::FileWrite => "storage:write".to_owned(),
         Capability::Secret(name) => format!("secret:{name}"),
     }
 }

@@ -228,13 +228,15 @@ impl SafeEsmBundleV1 {
         }) {
             return Err(ReleaseError::InvalidArtifact);
         }
-        if manifest.runtime_version.as_str() == "runku-js-1"
-            && (self.resource(manifest.schema_contract_hash).is_none()
-                || self.resource(manifest.index_contract_hash).is_none()
-                || manifest.functions.iter().any(|function| {
-                    self.resource(function.arguments_contract_hash).is_none()
-                        || self.resource(function.result_contract_hash).is_none()
-                }))
+        if matches!(
+            manifest.runtime_version.as_str(),
+            "runku-js-1" | "runku-js-2"
+        ) && (self.resource(manifest.schema_contract_hash).is_none()
+            || self.resource(manifest.index_contract_hash).is_none()
+            || manifest.functions.iter().any(|function| {
+                self.resource(function.arguments_contract_hash).is_none()
+                    || self.resource(function.result_contract_hash).is_none()
+            }))
         {
             return Err(ReleaseError::InvalidArtifact);
         }

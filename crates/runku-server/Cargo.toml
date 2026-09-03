@@ -1,6 +1,6 @@
 [package]
 name = "runku-server"
-version = "0.3.0"
+version = "0.4.0"
 description = "Self-hosted Runku server composition"
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,7 @@ runku-management-service = { path = "../runku-management-service" }
 runku-core = { path = "../runku-core" }
 runku-development = { path = "../runku-development" }
 runku-gateway = { path = "../runku-gateway" }
+runku-file-storage = { path = "../runku-file-storage" }
 runku-identity = { path = "../runku-identity" }
 runku-identity-provider = { path = "../runku-identity-provider" }
 runku-platform-identity = { path = "../runku-platform-identity" }
@@ -33,6 +34,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 url.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

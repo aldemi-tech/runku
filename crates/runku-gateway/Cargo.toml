@@ -11,10 +11,12 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+futures-util.workspace = true
 runku-core = { path = "../runku-core" }
 runku-data = { path = "../runku-data" }
 runku-development = { path = "../runku-development" }
 runku-execution = { path = "../runku-execution" }
+runku-file-storage = { path = "../runku-file-storage" }
 runku-identity = { path = "../runku-identity" }
 runku-identity-provider = { path = "../runku-identity-provider" }
 runku-node-runtime = { path = "../runku-node-runtime" }
@@ -25,13 +27,14 @@ runku-releases = { path = "../runku-releases" }
 runku-runtime = { path = "../runku-runtime" }
 runku-schema = { path = "../runku-schema" }
 runku-value = { path = "../runku-value" }
+serde.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "time"] }
 ulid.workspace = true
 url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-futures-util.workspace = true
 runku-data-sqlite = { path = "../runku-data-sqlite" }
 runku-execution-queue = { path = "../runku-execution-queue" }
 runku-identity-repository = { path = "../runku-identity-repository" }

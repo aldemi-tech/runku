@@ -1,5 +1,12 @@
 # Administration runbook
 
+Application file capacity is a separate operational domain. Monitor committed/reserved quota,
+filesystem free-space floor or provider bucket capacity, S3 error/latency, and abandoned multipart
+growth without using File IDs or tokens as metric labels. Canary upload, range download, checksum,
+and delete after configuration, restore, credential rotation, backend maintenance, and upgrade.
+Runku does not back up this byte store; follow the decision and incident procedures in
+[Application file storage](../functions/file-storage.md).
+
 This runbook defines operator habits and evidence for the currently composed local Environment and
 the acceptance contract for future packaged server roles. It does not invent unavailable remote
 administration commands.
