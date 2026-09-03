@@ -2,6 +2,20 @@
 
 All notable changes are documented in this file.
 
+## 0.4.2 - 2026-09-03
+
+### Fixed
+
+- A freshly initialized Environment now returns a coherent empty Release/Channel status snapshot
+  at serving revision zero. This lets the authenticated `runku link` preflight succeed before the
+  first publish without weakening exact-scope authorization.
+
+### Compatibility and rollback
+
+- Product storage and wire shapes are unchanged from 0.4.1; only the previously invalid empty
+  status becomes a successful bounded response. Downgrading to 0.4.1 makes first-link fail again
+  until a Release exists.
+
 ## 0.4.1 - 2026-09-03
 
 ### Added

@@ -82,6 +82,8 @@ runku link --root /workspace/application \
 The command calls authenticated `status` first. Only a successful exact-scope response permits
 local initialization and creation of the non-secret Management-origin descriptor. A `401`, `403`,
 invalid response, or transport failure leaves a previously uninitialized directory unchanged.
+The valid status of a newly provisioned Environment is revision zero with no Releases or Channels,
+so first-link does not require a seed publish.
 Once present, the descriptor makes every later `--remote` command reject a different Management
 origin. This prevents login-profile substitution; server-side authorization is still reloaded on
 every operation and the descriptor is never treated as a credential.

@@ -1,6 +1,6 @@
 {
   "name": "@runku/cli-darwin-arm64",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Native Runku CLI for macOS ARM64",
   "license": "Apache-2.0",
   "repository": {

@@ -103,7 +103,7 @@ pub struct LocalChannelStatus {
 /// Coherent local Release/Channel status at one repository revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalReleaseStatusReport {
-    /// Positive serving configuration revision.
+    /// Serving configuration revision. A freshly initialized Environment is revision zero.
     pub serving_revision: u64,
     /// Default Channel, if configured.
     pub default_channel: Option<ChannelName>,
@@ -314,7 +314,18 @@ impl LocalReleaseManager {
     ///
     /// Returns unavailable/corrupt state failures.
     pub async fn status(&self) -> Result<LocalReleaseStatusReport, LocalReleaseError> {
-        let snapshot = self.snapshot().await?;
+        let snapshot = match self.snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(LocalReleaseError::NotFound) => {
+                return Ok(LocalReleaseStatusReport {
+                    serving_revision: 0,
+                    default_channel: None,
+                    releases: Vec::new(),
+                    channels: Vec::new(),
+                });
+            }
+            Err(error) => return Err(error),
+        };
         let default_channel = snapshot.default_channel().cloned();
         let releases = snapshot
             .releases()
@@ -730,6 +741,26 @@ mod tests {
         release_id: ReleaseId,
         manifest: Vec<u8>,
         artifact: Vec<u8>,
+    }
+
+    #[tokio::test]
+    async fn freshly_initialized_environment_has_an_empty_status_snapshot() -> TestResult {
+        let directory = tempdir()?;
+        initialize_local(
+            directory.path(),
+            WorkspaceRef::from_str("default")?,
+            SocketAddr::from(([127, 0, 0, 1], 3289)),
+            TimestampMicros::new(1),
+        )
+        .await?;
+
+        let manager = LocalReleaseManager::open(directory.path()).await?;
+        let status = manager.status().await?;
+        assert_eq!(status.serving_revision, 0);
+        assert_eq!(status.default_channel, None);
+        assert!(status.releases.is_empty());
+        assert!(status.channels.is_empty());
+        Ok(())
     }
 
     fn package(

@@ -198,7 +198,8 @@ runku status [--root PATH]
 
 Returns one coherent Release/Channel snapshot. Use before promotion, rollback, compatibility
 investigation, or retrying a conflict. `--remote` reads it through the current operator session and
-requires `releases:read` at the root's exact Environment.
+requires `releases:read` at the root's exact Environment. A freshly initialized Environment returns
+revision `0` with empty Release and Channel arrays; absence of a first publish is not an error.
 
 ## Build and lifecycle
 

@@ -1,6 +1,6 @@
 [package]
 name = "runku-server"
-version = "0.4.1"
+version = "0.4.2"
 description = "Self-hosted Runku server composition"
 edition.workspace = true
 rust-version.workspace = true
