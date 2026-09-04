@@ -109,6 +109,12 @@ Operator credentials are separate. Bootstrap and delegated `rk_inv_v1_*` codes a
 independently revocable `ops_*` session. Never use `rk_sec_*` as operator authentication or copy an
 operator refresh token into application configuration.
 
+Automated delegated enrollment supplies a durable `opn_*` `Idempotency-Key`. After a timeout or
+lost response, query `/v1/access/invitation-operations/{opn_*}` rather than POSTing new secret
+material. If the operation exists but its one-time code was not durably delivered, DELETE the
+returned invitation ID, repeat that idempotent revocation until `204`, and create a replacement
+under a new Operation ID. Never store codes in deployment logs or recover them from PostgreSQL.
+
 If the initial-owner file is lost before the first enrollment, stop the server and use
 `runku-server recover-bootstrap` with the explicit confirmation documented in
 [Platform operator identity](../auth/platform-identity.md#enroll-the-initial-owner). The operation

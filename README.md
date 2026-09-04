@@ -21,7 +21,7 @@ Runku is currently pre-release.
 | Environment-scoped application files | Filesystem implemented/tested; S3-compatible adapter has MinIO conformance; byte-store backup remains operator-owned |
 | PostgreSQL, S3-compatible artifacts, NATS execution queue | Implemented as adapters with conformance gates; server composition can select a scope-bound Function platform PostgreSQL logical store |
 | Remote Workspace protocols and services | Implemented as libraries and integration gates |
-| Platform operator bootstrap, sessions, scoped invitations, browser OIDC, and remote lifecycle/logs | Implemented in source with a full PostgreSQL + browser + Product lifecycle campaign |
+| Platform operator bootstrap, sessions, reconcilable scoped invitations, browser OIDC, and remote lifecycle/logs | Implemented in source with a full PostgreSQL + browser + Product lifecycle campaign |
 | Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
 | Compact Docker standalone installation | Release-packaged with PostgreSQL, secret files, probes, backup/verify/restore/upgrade, and guarded removal |
 | Embedded Operational Log history | SQLite hot tier, filesystem/S3 Parquet, DuckDB query, safe retention, and live stream implemented and test-covered |

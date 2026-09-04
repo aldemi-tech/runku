@@ -25,16 +25,17 @@ use sqlx::{
 };
 
 use crate::{
-    AccessScope, BootstrapCreate, ConsumedInvitation, ExternalOperatorIdentity, InvitationKind,
-    NewInvitation, NewOperatorSession, Operator, OperatorContext, OperatorGrant, OperatorName,
+    AccessScope, BootstrapCreate, ConsumedInvitation, ExternalOperatorIdentity,
+    IdempotentInvitationCreate, InvitationKind, InvitationStatus, NewInvitation,
+    NewOperatorSession, Operator, OperatorContext, OperatorGrant, OperatorInvitation, OperatorName,
     OperatorSession, OperatorStatus, PlatformCapability, PlatformIdentityBackend,
     PlatformIdentityError, PlatformIdentityRepository, PlatformIdentityTelemetrySnapshot,
     RefreshedSession, SessionStatus, key::PlatformDigest,
 };
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MIGRATION_LOCK: i64 = 7_251_204_431;
-const SCHEMA: &[&str] = &[
+const SCHEMA_V1: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS runku_platform_meta (singleton_id BIGINT PRIMARY KEY, initialized BOOLEAN NOT NULL, authorization_revision BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS runku_operators (operator_id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, created_at_micros BIGINT NOT NULL, authorization_revision BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS runku_operator_identities (provider_id TEXT NOT NULL, subject_id TEXT NOT NULL, operator_id TEXT NOT NULL, created_at_micros BIGINT NOT NULL, PRIMARY KEY(provider_id, subject_id), FOREIGN KEY(operator_id) REFERENCES runku_operators(operator_id) ON DELETE CASCADE)",
@@ -44,6 +45,14 @@ const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS runku_operator_sessions (session_id TEXT PRIMARY KEY, operator_id TEXT NOT NULL, device_name TEXT NOT NULL, access_digest BYTEA NOT NULL, refresh_digest BYTEA NOT NULL, status TEXT NOT NULL, created_at_micros BIGINT NOT NULL, last_used_at_micros BIGINT NOT NULL, access_expires_at_micros BIGINT NOT NULL, refresh_expires_at_micros BIGINT NOT NULL, revoked_at_micros BIGINT NULL, FOREIGN KEY(operator_id) REFERENCES runku_operators(operator_id) ON DELETE CASCADE)",
     "CREATE INDEX IF NOT EXISTS runku_sessions_by_operator ON runku_operator_sessions(operator_id, status, session_id)",
     "CREATE TABLE IF NOT EXISTS runku_platform_audit (event_id TEXT PRIMARY KEY, actor_operator_id TEXT NULL, subject_operator_id TEXT NULL, operation TEXT NOT NULL, outcome TEXT NOT NULL, occurred_at_micros BIGINT NOT NULL)",
+];
+const SCHEMA_V2: &[&str] = &[
+    "ALTER TABLE runku_operator_invitations ADD COLUMN revoked_at_micros BIGINT NULL",
+    "CREATE TABLE runku_operator_invitation_operations (operation_id TEXT PRIMARY KEY, request_digest BYTEA NOT NULL, invitation_id TEXT NOT NULL UNIQUE, scope_kind TEXT NOT NULL, project_id TEXT NULL, environment_id TEXT NULL, created_by TEXT NOT NULL, created_at_micros BIGINT NOT NULL, CHECK (length(request_digest) = 32), CHECK (created_at_micros >= 0), CHECK ((scope_kind = 'installation' AND project_id IS NULL AND environment_id IS NULL) OR (scope_kind = 'project' AND project_id IS NOT NULL AND environment_id IS NULL) OR (scope_kind = 'environment' AND project_id IS NOT NULL AND environment_id IS NOT NULL)), FOREIGN KEY(invitation_id) REFERENCES runku_operator_invitations(invitation_id), FOREIGN KEY(created_by) REFERENCES runku_operators(operator_id))",
+    "CREATE INDEX runku_invitation_operations_by_creator ON runku_operator_invitation_operations(created_by, operation_id)",
+    "ALTER TABLE runku_platform_audit ADD COLUMN request_operation_id TEXT NULL",
+    "ALTER TABLE runku_platform_audit ADD COLUMN subject_invitation_id TEXT NULL",
+    "CREATE INDEX runku_platform_audit_by_invitation ON runku_platform_audit(subject_invitation_id, occurred_at_micros, event_id)",
 ];
 
 /// Operational role selected for repository composition.
@@ -85,7 +94,9 @@ impl PlatformIdentityRepositoryConfig {
 struct Counters {
     bootstraps_created: AtomicU64,
     invitations_created: AtomicU64,
+    invitation_replays: AtomicU64,
     invitations_consumed: AtomicU64,
+    invitations_revoked: AtomicU64,
     authentications: AtomicU64,
     authentication_failures: AtomicU64,
     refreshes: AtomicU64,
@@ -254,6 +265,83 @@ impl PlatformIdentityRepository for SqlPlatformIdentityRepository {
         self.track(result)
     }
 
+    async fn create_invitation_idempotent(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+        request_digest: [u8; 32],
+        invitation: &NewInvitation,
+    ) -> Result<IdempotentInvitationCreate, PlatformIdentityError> {
+        let result = create_invitation_idempotent(
+            &self.pool,
+            self.backend,
+            actor,
+            operation_id,
+            request_digest,
+            invitation,
+        )
+        .await;
+        match result {
+            Ok(IdempotentInvitationCreate::Created) => {
+                self.counters
+                    .invitations_created
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(IdempotentInvitationCreate::Replayed(_)) => {
+                self.counters
+                    .invitation_replays
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {}
+        }
+        self.track(result)
+    }
+
+    async fn replay_invitation_operation(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+        request_digest: [u8; 32],
+    ) -> Result<Option<OperatorInvitation>, PlatformIdentityError> {
+        let result = replay_invitation_operation(
+            &self.pool,
+            self.backend,
+            actor,
+            operation_id,
+            request_digest,
+        )
+        .await;
+        if matches!(result, Ok(Some(_))) {
+            self.counters
+                .invitation_replays
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.track(result)
+    }
+
+    async fn invitation_by_operation(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+    ) -> Result<OperatorInvitation, PlatformIdentityError> {
+        self.track(invitation_by_operation(&self.pool, self.backend, actor, operation_id).await)
+    }
+
+    async fn revoke_invitation(
+        &self,
+        actor: &OperatorContext,
+        invitation_id: OperatorInvitationId,
+        now: TimestampMicros,
+    ) -> Result<bool, PlatformIdentityError> {
+        let result = revoke_invitation(&self.pool, self.backend, actor, invitation_id, now).await;
+        if matches!(result, Ok(true)) {
+            self.counters
+                .invitations_revoked
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.track(result)
+    }
+
     async fn consume_invitation(
         &self,
         invitation_id: OperatorInvitationId,
@@ -370,7 +458,9 @@ impl PlatformIdentityRepository for SqlPlatformIdentityRepository {
         PlatformIdentityTelemetrySnapshot {
             bootstraps_created: self.counters.bootstraps_created.load(Ordering::Relaxed),
             invitations_created: self.counters.invitations_created.load(Ordering::Relaxed),
+            invitation_replays: self.counters.invitation_replays.load(Ordering::Relaxed),
             invitations_consumed: self.counters.invitations_consumed.load(Ordering::Relaxed),
+            invitations_revoked: self.counters.invitations_revoked.load(Ordering::Relaxed),
             authentications: self.counters.authentications.load(Ordering::Relaxed),
             authentication_failures: self
                 .counters
@@ -484,6 +574,7 @@ async fn create_invitation(
     validate_invitation(invitation)?;
     if invitation.kind != InvitationKind::Operator
         || invitation.created_by != Some(actor.operator.id)
+        || invitation.grants.len() != 1
     {
         return Err(PlatformIdentityError::InvalidInput);
     }
@@ -512,6 +603,237 @@ async fn create_invitation(
     )
     .await?;
     tx.commit().await.map_err(|error| map_commit_error(&error))
+}
+
+async fn create_invitation_idempotent(
+    pool: &AnyPool,
+    backend: PlatformIdentityBackend,
+    actor: &OperatorContext,
+    operation_id: OperationId,
+    request_digest: [u8; 32],
+    invitation: &NewInvitation,
+) -> Result<IdempotentInvitationCreate, PlatformIdentityError> {
+    validate_invitation(invitation)?;
+    if invitation.kind != InvitationKind::Operator
+        || invitation.created_by != Some(actor.operator.id)
+        || invitation.grants.len() != 1
+    {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
+    let mut tx = begin_write(pool, backend).await?;
+    let fresh = load_context_tx(&mut tx, actor.session.id).await?;
+    if fresh.operator.authorization_revision != actor.operator.authorization_revision {
+        return Err(PlatformIdentityError::Forbidden);
+    }
+    authorize_invitation_grants(&fresh, &invitation.grants)?;
+    let prior = sqlx::query(
+        "SELECT request_digest, invitation_id FROM runku_operator_invitation_operations WHERE operation_id = $1",
+    )
+    .bind(operation_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if let Some(prior) = prior {
+        let stored: Vec<u8> = prior
+            .try_get("request_digest")
+            .map_err(|_| PlatformIdentityError::Corruption)?;
+        if decode_sha256(stored)? != request_digest {
+            return Err(PlatformIdentityError::InvitationOperationReused);
+        }
+        let invitation_id = text(&prior, "invitation_id")?
+            .parse::<OperatorInvitationId>()
+            .map_err(|_| PlatformIdentityError::Corruption)?;
+        let invitation = load_invitation_tx(&mut tx, invitation_id).await?;
+        tx.commit()
+            .await
+            .map_err(|error| map_commit_error(&error))?;
+        return Ok(IdempotentInvitationCreate::Replayed(invitation));
+    }
+    insert_invitation(&mut tx, invitation).await?;
+    let grant = invitation
+        .grants
+        .first()
+        .ok_or(PlatformIdentityError::InvalidInput)?;
+    let (_, scope_kind, project_id, environment_id) = encode_scope(grant.scope);
+    sqlx::query("INSERT INTO runku_operator_invitation_operations (operation_id, request_digest, invitation_id, scope_kind, project_id, environment_id, created_by, created_at_micros) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+        .bind(operation_id.to_string())
+        .bind(request_digest.to_vec())
+        .bind(invitation.id.to_string())
+        .bind(scope_kind)
+        .bind(project_id)
+        .bind(environment_id)
+        .bind(actor.operator.id.to_string())
+        .bind(invitation.created_at.get())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_constraint_error)?;
+    audit_invitation(
+        &mut tx,
+        actor.operator.id,
+        "invitation.create",
+        Some(operation_id),
+        invitation.id,
+        invitation.created_at,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| map_commit_error(&error))?;
+    Ok(IdempotentInvitationCreate::Created)
+}
+
+async fn invitation_by_operation(
+    pool: &AnyPool,
+    backend: PlatformIdentityBackend,
+    actor: &OperatorContext,
+    operation_id: OperationId,
+) -> Result<OperatorInvitation, PlatformIdentityError> {
+    let mut tx = begin_write(pool, backend).await?;
+    let current = load_context_tx(&mut tx, actor.session.id).await?;
+    if current.operator.authorization_revision != actor.operator.authorization_revision {
+        return Err(PlatformIdentityError::Forbidden);
+    }
+    let invitation_id = sqlx::query_scalar::<_, String>(
+        "SELECT invitation_id FROM runku_operator_invitation_operations WHERE operation_id = $1",
+    )
+    .bind(operation_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or(PlatformIdentityError::NotFound)?
+    .parse::<OperatorInvitationId>()
+    .map_err(|_| PlatformIdentityError::Corruption)?;
+    let invitation = load_invitation_tx(&mut tx, invitation_id).await?;
+    authorize_invitation_management(&current, &invitation)?;
+    tx.commit()
+        .await
+        .map_err(|error| map_commit_error(&error))?;
+    Ok(invitation)
+}
+
+async fn replay_invitation_operation(
+    pool: &AnyPool,
+    backend: PlatformIdentityBackend,
+    actor: &OperatorContext,
+    operation_id: OperationId,
+    request_digest: [u8; 32],
+) -> Result<Option<OperatorInvitation>, PlatformIdentityError> {
+    let mut tx = begin_write(pool, backend).await?;
+    let current = load_context_tx(&mut tx, actor.session.id).await?;
+    if current.operator.authorization_revision != actor.operator.authorization_revision {
+        return Err(PlatformIdentityError::Forbidden);
+    }
+    let prior = sqlx::query(
+        "SELECT request_digest, invitation_id FROM runku_operator_invitation_operations WHERE operation_id = $1",
+    )
+    .bind(operation_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let Some(prior) = prior else {
+        tx.commit()
+            .await
+            .map_err(|error| map_commit_error(&error))?;
+        return Ok(None);
+    };
+    let stored: Vec<u8> = prior
+        .try_get("request_digest")
+        .map_err(|_| PlatformIdentityError::Corruption)?;
+    if decode_sha256(stored)? != request_digest {
+        return Err(PlatformIdentityError::InvitationOperationReused);
+    }
+    let invitation_id = text(&prior, "invitation_id")?
+        .parse::<OperatorInvitationId>()
+        .map_err(|_| PlatformIdentityError::Corruption)?;
+    let invitation = load_invitation_tx(&mut tx, invitation_id).await?;
+    authorize_invitation_grants(&current, &invitation.grants)?;
+    tx.commit()
+        .await
+        .map_err(|error| map_commit_error(&error))?;
+    Ok(Some(invitation))
+}
+
+async fn revoke_invitation(
+    pool: &AnyPool,
+    backend: PlatformIdentityBackend,
+    actor: &OperatorContext,
+    invitation_id: OperatorInvitationId,
+    now: TimestampMicros,
+) -> Result<bool, PlatformIdentityError> {
+    if now.get() < 0 {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
+    let mut tx = begin_write(pool, backend).await?;
+    let current = load_context_tx(&mut tx, actor.session.id).await?;
+    if current.operator.authorization_revision != actor.operator.authorization_revision {
+        return Err(PlatformIdentityError::Forbidden);
+    }
+    let invitation = load_invitation_tx(&mut tx, invitation_id).await?;
+    authorize_invitation_management(&current, &invitation)?;
+    match invitation.status {
+        InvitationStatus::Consumed => return Err(PlatformIdentityError::Conflict),
+        InvitationStatus::Revoked => {
+            tx.commit()
+                .await
+                .map_err(|error| map_commit_error(&error))?;
+            return Ok(false);
+        }
+        InvitationStatus::Pending | InvitationStatus::Expired => {}
+    }
+    let changed = sqlx::query("UPDATE runku_operator_invitations SET status = 'revoked', revoked_at_micros = $1 WHERE invitation_id = $2 AND status = 'pending'")
+        .bind(now.get())
+        .bind(invitation_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    if changed.rows_affected() != 1 {
+        return Err(PlatformIdentityError::Conflict);
+    }
+    audit_invitation(
+        &mut tx,
+        actor.operator.id,
+        "invitation.revoke",
+        invitation.operation_id,
+        invitation_id,
+        now,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| map_commit_error(&error))?;
+    Ok(true)
+}
+
+fn authorize_invitation_grants(
+    actor: &OperatorContext,
+    grants: &[OperatorGrant],
+) -> Result<(), PlatformIdentityError> {
+    for grant in grants {
+        actor.authorize(grant.scope, PlatformCapability::OperatorsManage)?;
+        if grant
+            .capabilities
+            .iter()
+            .any(|capability| actor.authorize(grant.scope, *capability).is_err())
+        {
+            return Err(PlatformIdentityError::Forbidden);
+        }
+    }
+    Ok(())
+}
+
+fn authorize_invitation_management(
+    actor: &OperatorContext,
+    invitation: &OperatorInvitation,
+) -> Result<(), PlatformIdentityError> {
+    for grant in &invitation.grants {
+        if actor
+            .authorize(grant.scope, PlatformCapability::OperatorsManage)
+            .is_err()
+        {
+            return Err(PlatformIdentityError::NotFound);
+        }
+    }
+    Ok(())
 }
 
 async fn consume_invitation(
@@ -786,6 +1108,83 @@ async fn list_sessions(
     let rows = sqlx::query("SELECT session_id, operator_id, device_name, status, created_at_micros, last_used_at_micros, access_expires_at_micros, refresh_expires_at_micros FROM runku_operator_sessions WHERE operator_id = $1 ORDER BY session_id")
         .bind(actor.operator.id.to_string()).fetch_all(pool).await.map_err(map_sqlx_error)?;
     rows.iter().map(decode_session).collect()
+}
+
+async fn load_invitation_tx(
+    tx: &mut Transaction<'_, Any>,
+    invitation_id: OperatorInvitationId,
+) -> Result<OperatorInvitation, PlatformIdentityError> {
+    let row = sqlx::query("SELECT i.invitation_id, i.kind, i.operator_name, i.grants_json, i.status, i.created_by, i.created_at_micros, i.expires_at_micros, i.consumed_at_micros, i.revoked_at_micros, o.operation_id, o.scope_kind AS operation_scope_kind, o.project_id AS operation_project_id, o.environment_id AS operation_environment_id FROM runku_operator_invitations i LEFT JOIN runku_operator_invitation_operations o ON o.invitation_id = i.invitation_id WHERE i.invitation_id = $1")
+        .bind(invitation_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or(PlatformIdentityError::NotFound)?;
+    decode_invitation(&row)
+}
+
+fn decode_invitation(row: &sqlx::any::AnyRow) -> Result<OperatorInvitation, PlatformIdentityError> {
+    let kind = text(row, "kind")?;
+    if kind != "operator" {
+        return Err(PlatformIdentityError::NotFound);
+    }
+    let grants_json: Vec<u8> = row
+        .try_get("grants_json")
+        .map_err(|_| PlatformIdentityError::Corruption)?;
+    let created_by = row
+        .try_get::<Option<String>, _>("created_by")
+        .map_err(|_| PlatformIdentityError::Corruption)?
+        .ok_or(PlatformIdentityError::Corruption)?
+        .parse::<OperatorId>()
+        .map_err(|_| PlatformIdentityError::Corruption)?;
+    let operation_id = row
+        .try_get::<Option<String>, _>("operation_id")
+        .map_err(|_| PlatformIdentityError::Corruption)?
+        .map(|value| {
+            value
+                .parse::<OperationId>()
+                .map_err(|_| PlatformIdentityError::Corruption)
+        })
+        .transpose()?;
+    let grants = decode_grants(&grants_json)?;
+    if operation_id.is_some() {
+        let scope_kind = row
+            .try_get::<Option<String>, _>("operation_scope_kind")
+            .map_err(|_| PlatformIdentityError::Corruption)?
+            .ok_or(PlatformIdentityError::Corruption)?;
+        let project_id = row
+            .try_get::<Option<String>, _>("operation_project_id")
+            .map_err(|_| PlatformIdentityError::Corruption)?;
+        let environment_id = row
+            .try_get::<Option<String>, _>("operation_environment_id")
+            .map_err(|_| PlatformIdentityError::Corruption)?;
+        let operation_scope = decode_scope_values(
+            &scope_kind,
+            project_id.as_deref(),
+            environment_id.as_deref(),
+        )?;
+        if grants.as_slice().first().map(|grant| grant.scope) != Some(operation_scope)
+            || grants.len() != 1
+        {
+            return Err(PlatformIdentityError::Corruption);
+        }
+    }
+    Ok(OperatorInvitation {
+        id: text(row, "invitation_id")?
+            .parse()
+            .map_err(|_| PlatformIdentityError::Corruption)?,
+        operation_id,
+        operator_name: text(row, "operator_name")?
+            .parse()
+            .map_err(|_| PlatformIdentityError::Corruption)?,
+        grants,
+        status: parse_invitation_status(&text(row, "status")?)?,
+        created_by,
+        created_at: timestamp(row, "created_at_micros")?,
+        expires_at: timestamp(row, "expires_at_micros")?,
+        consumed_at: optional_timestamp(row, "consumed_at_micros")?,
+        revoked_at: optional_timestamp(row, "revoked_at_micros")?,
+    })
 }
 
 async fn insert_invitation(
@@ -1113,6 +1512,27 @@ async fn audit(
     Ok(())
 }
 
+async fn audit_invitation(
+    tx: &mut Transaction<'_, Any>,
+    actor: OperatorId,
+    operation: &str,
+    request_operation_id: Option<OperationId>,
+    invitation_id: OperatorInvitationId,
+    at: TimestampMicros,
+) -> Result<(), PlatformIdentityError> {
+    sqlx::query("INSERT INTO runku_platform_audit (event_id, actor_operator_id, subject_operator_id, operation, outcome, occurred_at_micros, request_operation_id, subject_invitation_id) VALUES ($1, $2, NULL, $3, 'succeeded', $4, $5, $6)")
+        .bind(OperationId::generate().to_string())
+        .bind(actor.to_string())
+        .bind(operation)
+        .bind(at.get())
+        .bind(request_operation_id.map(|id| id.to_string()))
+        .bind(invitation_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
 async fn begin_write(
     pool: &AnyPool,
     backend: PlatformIdentityBackend,
@@ -1142,27 +1562,44 @@ async fn migrate(
     }
     sqlx::query("CREATE TABLE IF NOT EXISTS runku_platform_migrations (version BIGINT PRIMARY KEY, checksum TEXT NOT NULL)")
         .execute(&mut *tx).await.map_err(map_sqlx_error)?;
-    let checksum = schema_checksum();
-    let existing = sqlx::query_scalar::<_, String>(
-        "SELECT checksum FROM runku_platform_migrations WHERE version = $1",
-    )
-    .bind(SCHEMA_VERSION)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    if let Some(existing) = existing {
-        if existing != checksum {
+    let recorded =
+        sqlx::query("SELECT version, checksum FROM runku_platform_migrations ORDER BY version")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    if recorded.len() > usize::try_from(SCHEMA_VERSION).unwrap_or(usize::MAX)
+        || recorded.iter().any(|row| {
+            !row.try_get::<i64, _>("version")
+                .is_ok_and(|version| (1..=SCHEMA_VERSION).contains(&version))
+        })
+    {
+        return Err(PlatformIdentityError::Corruption);
+    }
+    for (version, statements) in [(1_i64, SCHEMA_V1), (2_i64, SCHEMA_V2)] {
+        let checksum = schema_checksum(version, statements);
+        if let Some(row) = recorded
+            .iter()
+            .find(|row| row.try_get::<i64, _>("version").ok() == Some(version))
+        {
+            if text(row, "checksum")? != checksum {
+                return Err(PlatformIdentityError::Corruption);
+            }
+            continue;
+        }
+        if recorded.iter().any(|row| {
+            row.try_get::<i64, _>("version")
+                .is_ok_and(|recorded_version| recorded_version > version)
+        }) {
             return Err(PlatformIdentityError::Corruption);
         }
-    } else {
-        for statement in SCHEMA {
+        for statement in statements {
             sqlx::query(*statement)
                 .execute(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
         }
         sqlx::query("INSERT INTO runku_platform_migrations (version, checksum) VALUES ($1, $2)")
-            .bind(SCHEMA_VERSION)
+            .bind(version)
             .bind(&checksum)
             .execute(&mut *tx)
             .await
@@ -1173,10 +1610,10 @@ async fn migrate(
     tx.commit().await.map_err(|error| map_commit_error(&error))
 }
 
-fn schema_checksum() -> String {
+fn schema_checksum(version: i64, statements: &[&str]) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"runku-platform-identity-schema-v1\0");
-    for statement in SCHEMA {
+    digest.update(format!("runku-platform-identity-schema-v{version}\0").as_bytes());
+    for statement in statements {
         digest.update(statement.as_bytes());
         digest.update([0]);
     }
@@ -1211,6 +1648,15 @@ fn parse_session_status(value: &str) -> Result<SessionStatus, PlatformIdentityEr
     }
 }
 
+fn parse_invitation_status(value: &str) -> Result<InvitationStatus, PlatformIdentityError> {
+    match value {
+        "pending" => Ok(InvitationStatus::Pending),
+        "consumed" => Ok(InvitationStatus::Consumed),
+        "revoked" => Ok(InvitationStatus::Revoked),
+        _ => Err(PlatformIdentityError::Corruption),
+    }
+}
+
 fn parse_operator_id(
     row: &sqlx::any::AnyRow,
     column: &str,
@@ -1238,6 +1684,22 @@ fn timestamp(
     Ok(TimestampMicros::new(value))
 }
 
+fn optional_timestamp(
+    row: &sqlx::any::AnyRow,
+    column: &str,
+) -> Result<Option<TimestampMicros>, PlatformIdentityError> {
+    row.try_get::<Option<i64>, _>(column)
+        .map_err(|_| PlatformIdentityError::Corruption)?
+        .map(|value| {
+            if value < 0 {
+                Err(PlatformIdentityError::Corruption)
+            } else {
+                Ok(TimestampMicros::new(value))
+            }
+        })
+        .transpose()
+}
+
 fn nonnegative_u64(row: &sqlx::any::AnyRow, column: &str) -> Result<u64, PlatformIdentityError> {
     let value: i64 = row
         .try_get(column)
@@ -1250,6 +1712,12 @@ fn decode_digest(bytes: Vec<u8>) -> Result<PlatformDigest, PlatformIdentityError
         .try_into()
         .map_err(|_| PlatformIdentityError::Corruption)?;
     Ok(PlatformDigest::from_bytes(array))
+}
+
+fn decode_sha256(bytes: Vec<u8>) -> Result<[u8; 32], PlatformIdentityError> {
+    bytes
+        .try_into()
+        .map_err(|_| PlatformIdentityError::Corruption)
 }
 
 fn map_constraint_error(error: sqlx::Error) -> PlatformIdentityError {
@@ -1293,5 +1761,61 @@ fn map_sqlx_error(error: sqlx::Error) -> PlatformIdentityError {
         | sqlx::Error::ColumnNotFound(_)
         | sqlx::Error::TypeNotFound { .. } => PlatformIdentityError::Corruption,
         _ => PlatformIdentityError::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn schema_v1_upgrades_append_only_to_invitation_operations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            schema_checksum(1, SCHEMA_V1),
+            "cd094b1d5bb6b8c6995b7d3d09fcb0dc09fa230afa734e4d5dbb6f71ed15be35"
+        );
+        sqlx::any::install_default_drivers();
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("platform-v1.sqlite3");
+        let options =
+            AnyConnectOptions::from_str(&format!("sqlite://{}?mode=rwc", database.display()))?;
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        sqlx::query("CREATE TABLE runku_platform_migrations (version BIGINT PRIMARY KEY, checksum TEXT NOT NULL)")
+            .execute(&pool)
+            .await?;
+        for statement in SCHEMA_V1 {
+            sqlx::query(*statement).execute(&pool).await?;
+        }
+        sqlx::query("INSERT INTO runku_platform_migrations (version, checksum) VALUES (1, $1)")
+            .bind(schema_checksum(1, SCHEMA_V1))
+            .execute(&pool)
+            .await?;
+
+        migrate(&pool, PlatformIdentityBackend::SQLite).await?;
+
+        let versions = sqlx::query_scalar::<_, i64>(
+            "SELECT version FROM runku_platform_migrations ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(versions, vec![1, 2]);
+        let operation_tables = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'runku_operator_invitation_operations'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(operation_tables, 1);
+        let revoked_columns = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('runku_operator_invitations') WHERE name = 'revoked_at_micros'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(revoked_columns, 1);
+        pool.close().await;
+        Ok(())
     }
 }

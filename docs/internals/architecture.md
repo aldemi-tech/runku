@@ -52,9 +52,10 @@ state. Serving uses the last valid snapshot during a temporary management-path o
 availability is not required for every application request.
 
 Platform operator identity is a separate admission boundary for this path. The current source
-composition persists operators, external identity links, scoped capability grants, invitations,
-device sessions, and security audit in PostgreSQL. Application and development credentials cannot
-cross into it. The exposed source Management API covers bootstrap/login/session/invitations and,
+composition persists operators, external identity links, scoped capability grants, reconcilable
+invitation operations, device sessions, and security audit in PostgreSQL. Application and
+development credentials cannot cross into it. The exposed source Management API covers
+bootstrap/login/session/invitation issue-reconcile-revoke and,
 when one Product Environment is attached, capability-scoped Workspace publication, Release and
 Channel lifecycle, status, and Operational Log snapshot/stream operations. It does not yet compose
 every distributed management domain named above.

@@ -30,6 +30,12 @@ peppers and the independent OIDC subject pepper belong in the secret provider an
 backup; loss invalidates credentials or external links, while disclosure requires rotation and
 session/invitation incident response.
 
+Delegated invitation automation binds one canonical non-secret `opn_*` identity to a SHA-256
+fingerprint of the requested operator, exact scope, and expanded capabilities. Exact replay returns
+metadata only; it never reconstructs the bearer. An uncertain create is reconciled by operation ID,
+then an unavailable code is revoked and replaced. Operation lookup and revocation reload current
+`operators:manage` authority for the stored scope, so an Operation ID is never authorization.
+
 Authenticated Product management reloads the operator session and current grants for every
 request. Project/Environment path scope is authorized before the Product adapter is reached.
 Remote log follow rechecks `logs:follow` during the single streaming connection, so session

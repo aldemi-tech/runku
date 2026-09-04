@@ -2,15 +2,16 @@
 
 use std::{sync::Arc, time::Duration};
 
-use runku_core::{OperatorId, OperatorInvitationId, OperatorSessionId};
+use runku_core::{OperationId, OperatorId, OperatorInvitationId, OperatorSessionId};
 use runku_value::TimestampMicros;
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     AccessScope, AccessToken, ConsumedInvitation, DeviceName, ExternalOperatorIdentity,
-    GeneratedInvitationCode, InvitationCode, InvitationKind, NewInvitation, NewOperatorSession,
-    OperatorContext, OperatorGrant, OperatorName, OperatorRole, PlatformCapability,
-    PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository, RefreshToken,
-    RefreshedSession,
+    GeneratedInvitationCode, IdempotentInvitationCreate, InvitationCode, InvitationKind,
+    InvitationStatus, NewInvitation, NewOperatorSession, OperatorContext, OperatorGrant,
+    OperatorInvitation, OperatorName, OperatorRole, PlatformCapability, PlatformIdentityCrypto,
+    PlatformIdentityError, PlatformIdentityRepository, RefreshToken, RefreshedSession,
 };
 
 /// Bounded lifetime policy for operator credentials.
@@ -68,6 +69,20 @@ pub struct LoginResult {
     pub refresh_token: RefreshToken,
     /// Current server-authoritative operator context.
     pub context: OperatorContext,
+}
+
+/// Result of a durable invitation issuance operation.
+#[derive(Debug)]
+pub enum IdempotentInvitationResult {
+    /// A new bearer was committed and is available exactly in this response.
+    Created {
+        /// Non-secret durable invitation metadata.
+        invitation: OperatorInvitation,
+        /// One-time bearer that must never be persisted by Platform Identity.
+        generated: GeneratedInvitationCode,
+    },
+    /// The exact operation was already committed; only non-secret metadata is recoverable.
+    Replayed(OperatorInvitation),
 }
 
 /// High-level bootstrap, invitation, login, refresh, and authorization service.
@@ -210,6 +225,91 @@ impl PlatformIdentityService {
             .create_invitation(actor, &invitation)
             .await?;
         Ok(generated)
+    }
+
+    /// Creates or reconciles a delegated invitation under one canonical operation identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects privilege escalation, operation reuse with different content, invalid input, or
+    /// repository failures. A replay never reconstructs or reveals the invitation bearer.
+    pub async fn create_invitation_idempotent(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+        operator_name: OperatorName,
+        scope: AccessScope,
+        role: OperatorRole,
+        now: TimestampMicros,
+    ) -> Result<IdempotentInvitationResult, PlatformIdentityError> {
+        let capabilities = authorize_invitation(actor, scope, role)?;
+        let request_digest = invitation_request_digest(&operator_name, scope, &capabilities);
+        if let Some(invitation) = self
+            .repository
+            .replay_invitation_operation(actor, operation_id, request_digest)
+            .await?
+        {
+            return Ok(IdempotentInvitationResult::Replayed(invitation));
+        }
+        let id = OperatorInvitationId::generate();
+        let generated = self.crypto.generate_invitation(id)?;
+        let invitation = NewInvitation {
+            id,
+            kind: InvitationKind::Operator,
+            operator_name,
+            grants: vec![OperatorGrant {
+                scope,
+                capabilities,
+            }],
+            created_by: Some(actor.operator.id),
+            created_at: now,
+            expires_at: add(now, self.policy.invitation_ttl)?,
+            digest: generated.digest,
+        };
+        match self
+            .repository
+            .create_invitation_idempotent(actor, operation_id, request_digest, &invitation)
+            .await?
+        {
+            IdempotentInvitationCreate::Created => Ok(IdempotentInvitationResult::Created {
+                invitation: invitation_metadata(&invitation, Some(operation_id))?,
+                generated,
+            }),
+            IdempotentInvitationCreate::Replayed(invitation) => {
+                Ok(IdempotentInvitationResult::Replayed(invitation))
+            }
+        }
+    }
+
+    /// Reconciles one prior invitation issuance operation without returning bearer material.
+    ///
+    /// # Errors
+    ///
+    /// Returns not found, forbidden, availability, or corruption failures.
+    pub async fn invitation_by_operation(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+    ) -> Result<OperatorInvitation, PlatformIdentityError> {
+        self.repository
+            .invitation_by_operation(actor, operation_id)
+            .await
+    }
+
+    /// Irreversibly revokes one pending delegated invitation.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden, not found, conflict after consumption, invalid time, or storage failure.
+    pub async fn revoke_invitation(
+        &self,
+        actor: &OperatorContext,
+        invitation_id: OperatorInvitationId,
+        now: TimestampMicros,
+    ) -> Result<bool, PlatformIdentityError> {
+        self.repository
+            .revoke_invitation(actor, invitation_id, now)
+            .await
     }
 
     /// Exchanges a setup/invitation code for one operator and device session.
@@ -394,4 +494,71 @@ fn add(
         .checked_add(micros)
         .ok_or(PlatformIdentityError::InvalidInput)?;
     Ok(TimestampMicros::new(value))
+}
+
+fn authorize_invitation(
+    actor: &OperatorContext,
+    scope: AccessScope,
+    role: OperatorRole,
+) -> Result<std::collections::BTreeSet<PlatformCapability>, PlatformIdentityError> {
+    actor.authorize(scope, PlatformCapability::OperatorsManage)?;
+    let capabilities = role.capabilities();
+    if capabilities
+        .iter()
+        .any(|capability| actor.authorize(scope, *capability).is_err())
+    {
+        return Err(PlatformIdentityError::Forbidden);
+    }
+    Ok(capabilities)
+}
+
+fn invitation_request_digest(
+    operator_name: &OperatorName,
+    scope: AccessScope,
+    capabilities: &std::collections::BTreeSet<PlatformCapability>,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"runku-platform-invitation-request-v1\0");
+    digest_field(&mut digest, operator_name.as_str());
+    match scope {
+        AccessScope::Installation => digest.update(b"installation\0"),
+        AccessScope::Project(project) => {
+            digest.update(b"project\0");
+            digest_field(&mut digest, &project.to_string());
+        }
+        AccessScope::Environment(environment) => {
+            digest.update(b"environment\0");
+            digest_field(&mut digest, &environment.project_id().to_string());
+            digest_field(&mut digest, &environment.environment_id().to_string());
+        }
+    }
+    for capability in capabilities {
+        digest_field(&mut digest, capability.as_str());
+    }
+    digest.finalize().into()
+}
+
+fn digest_field(digest: &mut Sha256, value: &str) {
+    digest.update(value.as_bytes());
+    digest.update([0]);
+}
+
+fn invitation_metadata(
+    invitation: &NewInvitation,
+    operation_id: Option<OperationId>,
+) -> Result<OperatorInvitation, PlatformIdentityError> {
+    Ok(OperatorInvitation {
+        id: invitation.id,
+        operation_id,
+        operator_name: invitation.operator_name.clone(),
+        grants: invitation.grants.clone(),
+        status: InvitationStatus::Pending,
+        created_by: invitation
+            .created_by
+            .ok_or(PlatformIdentityError::InvalidInput)?,
+        created_at: invitation.created_at,
+        expires_at: invitation.expires_at,
+        consumed_at: None,
+        revoked_at: None,
+    })
 }

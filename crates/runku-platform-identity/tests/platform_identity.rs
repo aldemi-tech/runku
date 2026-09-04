@@ -2,12 +2,12 @@
 
 use std::{str::FromStr as _, sync::Arc};
 
-use runku_core::{EnvironmentId, EnvironmentScope, ProjectId};
+use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_platform_identity::{
-    AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, OperatorName, OperatorRole,
-    PlatformCapability, PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository,
-    PlatformIdentityRepositoryConfig, PlatformIdentityService, SessionTokenPolicy,
-    SqlPlatformIdentityRepository,
+    AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, IdempotentInvitationResult,
+    InvitationStatus, OperatorName, OperatorRole, PlatformCapability, PlatformIdentityCrypto,
+    PlatformIdentityError, PlatformIdentityRepository, PlatformIdentityRepositoryConfig,
+    PlatformIdentityService, SessionTokenPolicy, SqlPlatformIdentityRepository,
 };
 use runku_value::TimestampMicros;
 
@@ -257,6 +257,249 @@ async fn lost_bootstrap_recovery_revokes_the_old_code_and_closes_after_enrollmen
             .await,
         Err(PlatformIdentityError::AlreadyInitialized)
     ));
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn invitation_operations_reconcile_conflict_revoke_and_replace_without_secret_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("invitation-operations.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let service = PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([13; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?;
+    let start = TimestampMicros::new(1_800_000_000_000_000);
+    let bootstrap = match service
+        .initialize_bootstrap(OperatorName::from_str("Owner")?, start)
+        .await?
+    {
+        BootstrapResult::Created(generated) => generated,
+        BootstrapResult::Replayed | BootstrapResult::Complete => {
+            return Err("fresh storage did not create bootstrap".into());
+        }
+    };
+    let owner = service
+        .login_with_invitation(
+            &bootstrap.code,
+            DeviceName::from_str("owner")?,
+            None,
+            TimestampMicros::new(start.get() + 1),
+        )
+        .await?;
+    let scope = AccessScope::Environment(EnvironmentScope::new(
+        ProjectId::generate(),
+        EnvironmentId::generate(),
+    ));
+    let missing_operation = OperationId::generate();
+    assert!(matches!(
+        service
+            .invitation_by_operation(&owner.context, missing_operation)
+            .await,
+        Err(PlatformIdentityError::NotFound)
+    ));
+
+    let operation = OperationId::generate();
+    let created_at = TimestampMicros::new(start.get() + 2);
+    let (invitation_id, code) = match service
+        .create_invitation_idempotent(
+            &owner.context,
+            operation,
+            OperatorName::from_str("Cloud operator")?,
+            scope,
+            OperatorRole::Observer,
+            created_at,
+        )
+        .await?
+    {
+        IdempotentInvitationResult::Created {
+            invitation,
+            generated,
+        } => {
+            assert_eq!(invitation.operation_id, Some(operation));
+            assert_eq!(invitation.status_at(created_at), InvitationStatus::Pending);
+            (invitation.id, generated.code)
+        }
+        IdempotentInvitationResult::Replayed(_) => {
+            return Err("first operation unexpectedly replayed".into());
+        }
+    };
+    match service
+        .create_invitation_idempotent(
+            &owner.context,
+            operation,
+            OperatorName::from_str("Cloud operator")?,
+            scope,
+            OperatorRole::Observer,
+            TimestampMicros::new(start.get() + 3),
+        )
+        .await?
+    {
+        IdempotentInvitationResult::Replayed(invitation) => {
+            assert_eq!(invitation.id, invitation_id);
+            assert_eq!(invitation.operation_id, Some(operation));
+        }
+        IdempotentInvitationResult::Created { .. } => {
+            return Err("exact operation created a second invitation".into());
+        }
+    }
+    assert!(matches!(
+        service
+            .create_invitation_idempotent(
+                &owner.context,
+                operation,
+                OperatorName::from_str("Different request")?,
+                scope,
+                OperatorRole::Observer,
+                TimestampMicros::new(start.get() + 4),
+            )
+            .await,
+        Err(PlatformIdentityError::InvitationOperationReused)
+    ));
+    let reconciled = service
+        .invitation_by_operation(&owner.context, operation)
+        .await?;
+    assert_eq!(reconciled.id, invitation_id);
+
+    let limited_code = service
+        .create_invitation(
+            &owner.context,
+            OperatorName::from_str("Limited observer")?,
+            scope,
+            OperatorRole::Observer,
+            TimestampMicros::new(start.get() + 5),
+        )
+        .await?;
+    let limited = service
+        .login_with_invitation(
+            &limited_code.code,
+            DeviceName::from_str("limited")?,
+            None,
+            TimestampMicros::new(start.get() + 6),
+        )
+        .await?;
+    assert!(matches!(
+        service
+            .invitation_by_operation(&limited.context, operation)
+            .await,
+        Err(PlatformIdentityError::NotFound)
+    ));
+    assert!(matches!(
+        service
+            .revoke_invitation(
+                &limited.context,
+                invitation_id,
+                TimestampMicros::new(start.get() + 7),
+            )
+            .await,
+        Err(PlatformIdentityError::NotFound)
+    ));
+
+    assert!(
+        service
+            .revoke_invitation(
+                &owner.context,
+                invitation_id,
+                TimestampMicros::new(start.get() + 8),
+            )
+            .await?
+    );
+    assert!(
+        !service
+            .revoke_invitation(
+                &owner.context,
+                invitation_id,
+                TimestampMicros::new(start.get() + 9),
+            )
+            .await?
+    );
+    assert!(matches!(
+        service
+            .login_with_invitation(
+                &code,
+                DeviceName::from_str("revoked")?,
+                None,
+                TimestampMicros::new(start.get() + 10),
+            )
+            .await,
+        Err(PlatformIdentityError::Unauthenticated)
+    ));
+    let revoked = service
+        .invitation_by_operation(&owner.context, operation)
+        .await?;
+    assert_eq!(
+        revoked.status_at(TimestampMicros::new(start.get() + 11)),
+        InvitationStatus::Revoked
+    );
+
+    let replacement = service
+        .create_invitation_idempotent(
+            &owner.context,
+            OperationId::generate(),
+            OperatorName::from_str("Cloud operator")?,
+            scope,
+            OperatorRole::Observer,
+            TimestampMicros::new(start.get() + 12),
+        )
+        .await?;
+    assert!(matches!(
+        replacement,
+        IdempotentInvitationResult::Created { .. }
+    ));
+    let concurrent_operation = OperationId::generate();
+    let first = service.create_invitation_idempotent(
+        &owner.context,
+        concurrent_operation,
+        OperatorName::from_str("Concurrent operator")?,
+        scope,
+        OperatorRole::Observer,
+        TimestampMicros::new(start.get() + 13),
+    );
+    let second = service.create_invitation_idempotent(
+        &owner.context,
+        concurrent_operation,
+        OperatorName::from_str("Concurrent operator")?,
+        scope,
+        OperatorRole::Observer,
+        TimestampMicros::new(start.get() + 14),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let (first, second) = (first?, second?);
+    let created_id = match &first {
+        IdempotentInvitationResult::Created { invitation, .. } => Some(invitation.id),
+        IdempotentInvitationResult::Replayed(_) => None,
+    }
+    .or(match &second {
+        IdempotentInvitationResult::Created { invitation, .. } => Some(invitation.id),
+        IdempotentInvitationResult::Replayed(_) => None,
+    })
+    .ok_or("concurrent operation never created an invitation")?;
+    let replayed_id = match (&first, &second) {
+        (
+            IdempotentInvitationResult::Created { .. },
+            IdempotentInvitationResult::Replayed(invitation),
+        )
+        | (
+            IdempotentInvitationResult::Replayed(invitation),
+            IdempotentInvitationResult::Created { .. },
+        ) => invitation.id,
+        _ => return Err("concurrent operation did not produce one create and one replay".into()),
+    };
+    assert_eq!(created_id, replayed_id);
+    let telemetry = repository.telemetry();
+    assert_eq!(telemetry.invitations_created, 4);
+    assert_eq!(telemetry.invitation_replays, 2);
+    assert_eq!(telemetry.invitations_revoked, 1);
     repository.close().await;
     Ok(())
 }

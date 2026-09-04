@@ -118,6 +118,11 @@ authenticates only the configured provider identity and creates a Runku session;
 also requires a scoped single-use invitation. See
 [Platform operator identity](../auth/platform-identity.md#failure-handling).
 
+For `PLATFORM_INVITATION_OPERATION_REUSED`, stop retrying and compare the original and current
+issuance intent. One `opn_*` identifies exactly one operator/scope/capability request. After a lost
+create response, use the invitation-operation GET endpoint; if the code was not durably delivered,
+revoke the returned `opi_*` and create a deliberate replacement with a new Operation ID.
+
 ## Data and Mutation failures
 
 OCC conflict means a document changed after it was read. Re-run business logic from a fresh read;

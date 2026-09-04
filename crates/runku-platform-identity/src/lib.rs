@@ -20,15 +20,18 @@ pub use key::{
 };
 pub use model::{
     AccessScope, DeviceName, ExternalOperatorIdentity, InvitationKind, InvitationStatus, Operator,
-    OperatorContext, OperatorGrant, OperatorName, OperatorRole, OperatorSession, OperatorStatus,
-    PlatformCapability, SessionStatus,
+    OperatorContext, OperatorGrant, OperatorInvitation, OperatorName, OperatorRole,
+    OperatorSession, OperatorStatus, PlatformCapability, SessionStatus,
 };
 pub use repository::{
-    BootstrapCreate, ConsumedInvitation, NewInvitation, NewOperatorSession,
-    PlatformIdentityBackend, PlatformIdentityRepository, PlatformIdentityTelemetrySnapshot,
-    RefreshedSession,
+    BootstrapCreate, ConsumedInvitation, IdempotentInvitationCreate, NewInvitation,
+    NewOperatorSession, PlatformIdentityBackend, PlatformIdentityRepository,
+    PlatformIdentityTelemetrySnapshot, RefreshedSession,
 };
-pub use service::{BootstrapResult, LoginResult, PlatformIdentityService, SessionTokenPolicy};
+pub use service::{
+    BootstrapResult, IdempotentInvitationResult, LoginResult, PlatformIdentityService,
+    SessionTokenPolicy,
+};
 pub use sql::{
     PlatformIdentityRepositoryConfig, PlatformIdentityRepositoryRole, SqlPlatformIdentityRepository,
 };

@@ -23,6 +23,9 @@ pub enum PlatformIdentityError {
     /// Durable state conflicts with the requested operation.
     #[error("platform identity state conflicts")]
     Conflict,
+    /// One invitation operation identity was reused for different requested content.
+    #[error("platform invitation operation identity was reused")]
+    InvitationOperationReused,
     /// The installation already has its initial owner.
     #[error("platform identity bootstrap is already complete")]
     AlreadyInitialized,
@@ -57,6 +60,7 @@ impl PlatformIdentityError {
             Self::Forbidden => "PLATFORM_ACCESS_DENIED",
             Self::NotFound => "PLATFORM_IDENTITY_NOT_FOUND",
             Self::Conflict => "PLATFORM_IDENTITY_CONFLICT",
+            Self::InvitationOperationReused => "PLATFORM_INVITATION_OPERATION_REUSED",
             Self::AlreadyInitialized => "PLATFORM_BOOTSTRAP_COMPLETE",
             Self::Inactive => "PLATFORM_CREDENTIAL_INACTIVE",
             Self::EntropyUnavailable => "PLATFORM_IDENTITY_ENTROPY_UNAVAILABLE",

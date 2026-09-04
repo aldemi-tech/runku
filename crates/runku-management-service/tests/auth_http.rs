@@ -13,7 +13,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use runku_core::{EnvironmentId, EnvironmentScope, ProjectId};
+use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagementHttpConfig, ManagementHttpExposure,
     ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
@@ -475,6 +475,190 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
         )
         .await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn invitation_operation_is_reconcilable_conflict_safe_and_revocable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("invitation-http.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let identity = Arc::new(PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([47; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?);
+    let bootstrap = match identity
+        .initialize_bootstrap(
+            OperatorName::from_str("Initial owner")?,
+            TimestampMicros::new(1_800_000_000_000_000),
+        )
+        .await?
+    {
+        BootstrapResult::Created(generated) => generated,
+        BootstrapResult::Replayed | BootstrapResult::Complete => {
+            return Err("fresh database did not create bootstrap".into());
+        }
+    };
+    let router = build_management_router(
+        ManagementHttpConfig {
+            max_concurrent_requests: 8,
+            exposure: ManagementHttpExposure::LoopbackPlaintext,
+            public_management_endpoint: None,
+        },
+        identity,
+        None,
+    )?;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/exchange")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "code": bootstrap.code.expose(),
+                        "deviceName": "owner-device"
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await?)?;
+    let access = body["accessToken"]
+        .as_str()
+        .ok_or("missing access token")?
+        .to_owned();
+    let operation = OperationId::generate();
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let request = json!({
+        "operatorName": "Cloud operator",
+        "role": "observer",
+        "scope": {
+            "kind": "environment",
+            "projectId": scope.project_id(),
+            "environmentId": scope.environment_id()
+        }
+    });
+    let issue = || {
+        Request::post("/v1/access/invitations")
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", operation.to_string())
+            .body(Body::from(request.to_string()))
+    };
+
+    let response = router.clone().oneshot(issue()?).await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store, max-age=0")
+    );
+    let created: Value = serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await?)?;
+    let invitation_id = created["invitationId"]
+        .as_str()
+        .ok_or("missing invitation id")?
+        .to_owned();
+    let code = created["code"]
+        .as_str()
+        .ok_or("missing one-time code")?
+        .to_owned();
+    assert_eq!(created["operationId"], operation.to_string());
+    assert_eq!(created["secretShownOnce"], true);
+    assert_eq!(created["replayed"], false);
+
+    let response = router.clone().oneshot(issue()?).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replayed: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(replayed["invitationId"], invitation_id);
+    assert_eq!(replayed["secretShownOnce"], false);
+    assert_eq!(replayed["replayed"], true);
+    assert!(replayed.get("code").is_none());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/access/invitation-operations/{operation}"))
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let reconciled: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(reconciled["invitationId"], invitation_id);
+    assert!(reconciled.get("code").is_none());
+
+    let changed = json!({
+        "operatorName": "Different request",
+        "role": "observer",
+        "scope": {
+            "kind": "environment",
+            "projectId": scope.project_id(),
+            "environmentId": scope.environment_id()
+        }
+    });
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/access/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", operation.to_string())
+                .body(Body::from(changed.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let conflict: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024).await?)?;
+    assert_eq!(conflict["code"], "PLATFORM_INVITATION_OPERATION_REUSED");
+
+    for _ in 0..2 {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/v1/access/invitations/{invitation_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/exchange")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"code": code, "deviceName": "revoked"}).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = router
+        .oneshot(
+            Request::post("/v1/access/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", OperationId::generate().to_string())
+                .header("idempotency-key", OperationId::generate().to_string())
+                .body(Body::from(request.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     repository.close().await;
     Ok(())
 }

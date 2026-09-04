@@ -36,7 +36,7 @@ remain separate distribution gates.
 | Compact server | Linux GNU ARM64/x86_64 binary and multi-platform OCI image; one attached Product Environment, Safe V8 profile |
 | Compact deployment | Dedicated Linux host, Compose v2, one active Environment writer, PostgreSQL 16, host TLS proxy, backup/empty restore |
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
-| Platform Identity | Management HTTP v1, native OIDC configuration, authenticated Product lifecycle/log stream, schema v1; no mixed-version or downgrade window |
+| Platform Identity | Management HTTP v1, native OIDC configuration, authenticated Product lifecycle/log stream, schema v2; no mixed-version or downgrade window |
 
 The source line adds optional `runku init --project-id/--environment-id` flags as a compatible CLI
 extension. Existing invocations keep generated IDs. Provisioners that use the extension must require
@@ -60,7 +60,11 @@ Version 0.4.4 gives the two PostgreSQL roles unambiguous canonical configuration
 `RUNKU_IDENTITY_DATABASE_URL` for Platform Identity and `RUNKU_PLATFORM_DATABASE_URL` for Function
 platform data. Their `_FILE` forms contain a path to the same secret, not another connection.
 The 0.4.3 names remain deprecated aliases for the 0.4 line; canonical and legacy sources cannot be
-mixed. No schema or public protocol changed.
+mixed. The same release adds optional `opn_*` idempotency to delegated-invitation creation,
+non-secret operation reconciliation, and idempotent pending-invitation revocation. Platform
+Identity schema v2 appends the operation mapping, revocation time, and audit correlation without
+reinterpreting v1 rows. Product Function/storage protocols remain unchanged; after migration,
+server rollback is unsupported.
 
 Application files are a compatible additive SDK/HTTP surface but introduce new manifest capability
 tags and runtime versions `runku-js-2`, `runku-node-2`, and `runku-hybrid-2`. Version 1 manifests

@@ -3,12 +3,12 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use runku_core::{OperatorId, OperatorInvitationId, OperatorSessionId};
+use runku_core::{OperationId, OperatorId, OperatorInvitationId, OperatorSessionId};
 use runku_value::TimestampMicros;
 
 use crate::{
     DeviceName, ExternalOperatorIdentity, InvitationKind, OperatorContext, OperatorGrant,
-    OperatorName, OperatorSession, PlatformIdentityError, key::PlatformDigest,
+    OperatorInvitation, OperatorName, OperatorSession, PlatformIdentityError, key::PlatformDigest,
 };
 
 /// Physical storage backend selected by composition.
@@ -90,6 +90,15 @@ pub enum BootstrapCreate {
     Replayed,
 }
 
+/// Result of atomically applying one idempotent invitation issuance operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IdempotentInvitationCreate {
+    /// The operation committed a newly generated invitation.
+    Created,
+    /// The exact operation already committed; no bearer can be revealed again.
+    Replayed(OperatorInvitation),
+}
+
 /// Aggregate non-sensitive repository counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PlatformIdentityTelemetrySnapshot {
@@ -97,8 +106,12 @@ pub struct PlatformIdentityTelemetrySnapshot {
     pub bootstraps_created: u64,
     /// Delegated invitations created.
     pub invitations_created: u64,
+    /// Exact delegated invitation operations replayed without revealing bearer material.
+    pub invitation_replays: u64,
     /// Invitations successfully consumed.
     pub invitations_consumed: u64,
+    /// Pending delegated invitations irreversibly revoked.
+    pub invitations_revoked: u64,
     /// Access tokens successfully authenticated.
     pub authentications: u64,
     /// Failed authentication attempts.
@@ -138,6 +151,38 @@ pub trait PlatformIdentityRepository: fmt::Debug + Send + Sync {
         actor: &OperatorContext,
         invitation: &NewInvitation,
     ) -> Result<(), PlatformIdentityError>;
+
+    /// Creates or reconciles one invitation under a durable operation identity.
+    async fn create_invitation_idempotent(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+        request_digest: [u8; 32],
+        invitation: &NewInvitation,
+    ) -> Result<IdempotentInvitationCreate, PlatformIdentityError>;
+
+    /// Checks for an exact committed operation before new bearer generation.
+    async fn replay_invitation_operation(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+        request_digest: [u8; 32],
+    ) -> Result<Option<OperatorInvitation>, PlatformIdentityError>;
+
+    /// Loads non-secret invitation metadata for one committed issuance operation.
+    async fn invitation_by_operation(
+        &self,
+        actor: &OperatorContext,
+        operation_id: OperationId,
+    ) -> Result<OperatorInvitation, PlatformIdentityError>;
+
+    /// Irreversibly revokes one pending delegated invitation.
+    async fn revoke_invitation(
+        &self,
+        actor: &OperatorContext,
+        invitation_id: OperatorInvitationId,
+        now: TimestampMicros,
+    ) -> Result<bool, PlatformIdentityError>;
 
     /// Verifies and consumes an invitation, creating operator, grants, identity, and session in one
     /// transaction.

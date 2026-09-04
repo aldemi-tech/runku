@@ -169,14 +169,52 @@ RUNKU_CONFIG_HOME="$evidence_dir/cli" \
 
 owner_access="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["accessToken"])' "$evidence_dir/cli/credentials-v1.json")"
 printf '%s\n' 'creating a scoped operator invitation'
+alice_operation='opn_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+alice_request='{"operatorName":"alice","role":"operator","scope":{"kind":"installation","projectId":null,"environmentId":null}}'
 curl --fail --silent --show-error \
   --request POST \
   --header "Authorization: Bearer $owner_access" \
+  --header "Idempotency-Key: $alice_operation" \
   --header 'Content-Type: application/json' \
-  --data '{"operatorName":"alice","role":"operator","scope":{"kind":"installation","projectId":null,"environmentId":null}}' \
+  --data "$alice_request" \
   http://127.0.0.1:18220/v1/access/invitations \
   >"$evidence_dir/alice-invitation.json"
 alice_invitation="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["code"])' "$evidence_dir/alice-invitation.json")"
+alice_invitation_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["invitationId"])' "$evidence_dir/alice-invitation.json")"
+
+curl --fail --silent --show-error \
+  --request POST \
+  --header "Authorization: Bearer $owner_access" \
+  --header "Idempotency-Key: $alice_operation" \
+  --header 'Content-Type: application/json' \
+  --data "$alice_request" \
+  http://127.0.0.1:18220/v1/access/invitations \
+  >"$evidence_dir/alice-invitation-replay.json"
+python3 - "$evidence_dir/alice-invitation-replay.json" "$alice_invitation_id" <<'PY'
+import json
+import sys
+
+body = json.load(open(sys.argv[1], encoding="utf-8"))
+assert body["invitationId"] == sys.argv[2]
+assert body["replayed"] is True
+assert body["secretShownOnce"] is False
+assert "code" not in body
+PY
+curl --fail --silent --show-error \
+  --header "Authorization: Bearer $owner_access" \
+  "http://127.0.0.1:18220/v1/access/invitation-operations/$alice_operation" \
+  >"$evidence_dir/alice-invitation-reconciled.json"
+reconciled_invitation_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["invitationId"])' "$evidence_dir/alice-invitation-reconciled.json")"
+[[ "$reconciled_invitation_id" == "$alice_invitation_id" ]]
+operation_conflict_status="$(curl --silent --output "$evidence_dir/alice-operation-conflict.json" --write-out '%{http_code}' \
+  --request POST \
+  --header "Authorization: Bearer $owner_access" \
+  --header "Idempotency-Key: $alice_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"operatorName":"mallory","role":"operator","scope":{"kind":"installation","projectId":null,"environmentId":null}}' \
+  http://127.0.0.1:18220/v1/access/invitations)"
+[[ "$operation_conflict_status" == 409 ]]
+[[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["code"])' "$evidence_dir/alice-operation-conflict.json")" == 'PLATFORM_INVITATION_OPERATION_REUSED' ]]
 
 printf '%s\n' 'obtaining a real Keycloak RS256 access token'
 curl --fail --silent --show-error \
@@ -221,6 +259,44 @@ RUNKU_CONFIG_HOME="$evidence_dir/cli" \
 second_operator="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["operatorId"])' "$evidence_dir/alice-second-login.json")"
 [[ "$alice_operator" == "$second_operator" ]]
 
+printf '%s\n' 'reconciling and revoking an invitation after a simulated lost response'
+lost_operation='opn_01ARZ3NDEKTSV4RRFFQ69G5FAW'
+curl --fail --silent --show-error \
+  --request POST \
+  --header "Authorization: Bearer $owner_access" \
+  --header "Idempotency-Key: $lost_operation" \
+  --header 'Content-Type: application/json' \
+  --data '{"operatorName":"lost-response","role":"observer","scope":{"kind":"installation","projectId":null,"environmentId":null}}' \
+  http://127.0.0.1:18220/v1/access/invitations \
+  >"$evidence_dir/lost-invitation.json"
+lost_code="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["code"])' "$evidence_dir/lost-invitation.json")"
+curl --fail --silent --show-error \
+  --header "Authorization: Bearer $owner_access" \
+  "http://127.0.0.1:18220/v1/access/invitation-operations/$lost_operation" \
+  >"$evidence_dir/lost-invitation-reconciled.json"
+lost_invitation_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["invitationId"])' "$evidence_dir/lost-invitation-reconciled.json")"
+for _ in 1 2; do
+  revoke_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --request DELETE \
+    --header "Authorization: Bearer $owner_access" \
+    "http://127.0.0.1:18220/v1/access/invitations/$lost_invitation_id")"
+  [[ "$revoke_status" == 204 ]]
+done
+lost_code_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "{\"code\":\"$lost_code\",\"deviceName\":\"lost-response\"}" \
+  http://127.0.0.1:18220/v1/auth/exchange)"
+[[ "$lost_code_status" == 401 ]]
+operation_rows="$(docker compose --project-name "$compose_project" --file "$compose_file" exec -T platform-postgres \
+  psql --username runku_platform --dbname runku_platform --tuples-only --no-align \
+  --command "SELECT COUNT(*) FROM runku_operator_invitation_operations WHERE operation_id IN ('$alice_operation', '$lost_operation') AND scope_kind = 'installation' AND project_id IS NULL AND environment_id IS NULL AND length(request_digest) = 32")"
+[[ "$operation_rows" == 2 ]]
+invitation_audit_rows="$(docker compose --project-name "$compose_project" --file "$compose_file" exec -T platform-postgres \
+  psql --username runku_platform --dbname runku_platform --tuples-only --no-align \
+  --command "SELECT COUNT(*) FROM runku_platform_audit WHERE request_operation_id IN ('$alice_operation', '$lost_operation') AND subject_invitation_id IS NOT NULL")"
+[[ "$invitation_audit_rows" == 3 ]]
+
 printf '%s\n' 'verifying replay and tamper rejection'
 reuse_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
   --request POST \
@@ -243,6 +319,9 @@ printf '%s\n' '  lost bootstrap recovery and previous-code revocation: passed'
 printf '%s\n' '  invitation CLI bootstrap: passed'
 printf '%s\n' '  Keycloak RS256 discovery/JWKS verification: passed'
 printf '%s\n' '  invitation-bound OIDC enrollment: passed'
+printf '%s\n' '  idempotent invitation replay and operation conflict: passed'
+printf '%s\n' '  uncertain-response reconciliation and idempotent revocation: passed'
+printf '%s\n' '  explicit scope/request digest constraints and transactional audit: passed'
 printf '%s\n' '  linked OIDC re-login preserves operator identity: passed'
 printf '%s\n' '  single-use invitation replay rejection: passed'
 printf '%s\n' '  tampered external bearer rejection: passed'

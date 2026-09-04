@@ -135,6 +135,12 @@ bootstrap file exists. Restoring identity tables without their matching peppers 
 unable to authenticate; restoring an older identity snapshot may resurrect later-revoked sessions
 or invitations and therefore requires explicit credential reconciliation.
 
+Platform Identity schema v2 includes invitation issuance-operation rows. They must be restored with
+their referenced invitation and security-audit rows. Restoring invitations without their operation
+mapping can make an uncertain create impossible to reconcile; restoring an older operation mapping
+can likewise resurrect metadata for a credential whose later revocation was lost. Reconcile and
+revoke before resuming automated enrollment.
+
 A lost bootstrap file is recoverable only while the database has no operator. The offline
 `runku-server recover-bootstrap` operation revokes any pending bootstrap and writes a replacement;
 it does not repair a missing pepper, an inconsistent partial restore, or lost owner access after

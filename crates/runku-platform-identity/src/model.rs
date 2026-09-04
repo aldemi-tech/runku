@@ -2,7 +2,9 @@
 
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
-use runku_core::{EnvironmentScope, OperatorId, OperatorSessionId, ProjectId};
+use runku_core::{
+    EnvironmentScope, OperationId, OperatorId, OperatorInvitationId, OperatorSessionId, ProjectId,
+};
 use runku_value::TimestampMicros;
 
 use crate::PlatformIdentityError;
@@ -335,7 +337,7 @@ pub enum InvitationKind {
     Operator,
 }
 
-/// Durable invitation lifecycle.
+/// Invitation lifecycle, including the time-derived expired view.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvitationStatus {
     /// May be exchanged exactly once before expiry.
@@ -344,6 +346,45 @@ pub enum InvitationStatus {
     Consumed,
     /// Was irreversibly revoked.
     Revoked,
+    /// Remained unconsumed beyond its absolute expiry.
+    Expired,
+}
+
+/// Non-secret metadata for one delegated operator invitation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorInvitation {
+    /// Stable invitation identity embedded in the one-time bearer.
+    pub id: OperatorInvitationId,
+    /// Durable idempotent operation identity, when automation supplied one.
+    pub operation_id: Option<OperationId>,
+    /// Name assigned if the invitation is consumed.
+    pub operator_name: OperatorName,
+    /// Exact grants assigned if the invitation is consumed.
+    pub grants: Vec<OperatorGrant>,
+    /// Current durable lifecycle state.
+    pub status: InvitationStatus,
+    /// Operator that created the invitation.
+    pub created_by: OperatorId,
+    /// Server-owned creation timestamp.
+    pub created_at: TimestampMicros,
+    /// Absolute single-use expiry.
+    pub expires_at: TimestampMicros,
+    /// Successful consumption time, when consumed.
+    pub consumed_at: Option<TimestampMicros>,
+    /// Irreversible revocation time, when revoked.
+    pub revoked_at: Option<TimestampMicros>,
+}
+
+impl OperatorInvitation {
+    /// Returns the externally visible state at the supplied server time.
+    #[must_use]
+    pub fn status_at(&self, now: TimestampMicros) -> InvitationStatus {
+        if self.status == InvitationStatus::Pending && self.expires_at <= now {
+            InvitationStatus::Expired
+        } else {
+            self.status
+        }
+    }
 }
 
 /// Durable operator session lifecycle.

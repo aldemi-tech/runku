@@ -21,6 +21,11 @@ The current source Management API does not yet expose those counters as a metric
 an audit query endpoint; operators must not treat ordinary logs as a substitute for the durable
 audit table.
 
+Idempotent invitation create/replay and revocation have bounded process counters. Successful
+creates and state-changing revocations also record the non-secret request Operation ID and
+invitation ID in transactional security audit. Exact replays do not append duplicate success
+events, and no code, digest, request body, token, or `Authorization` value is an audit field.
+
 ## Correlation
 
 Requests and nested cross-runtime calls carry request, invocation, Project, Environment, Release or

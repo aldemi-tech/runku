@@ -9,6 +9,8 @@ The source tree implements the local CLI/product process, gateway, runtimes, dat
 repositories, Realtime, scheduling, remote development protocols, PostgreSQL/S3/NATS adapters, Full
 Node isolation adapters, and a PostgreSQL-backed Platform Identity Management API slice with
 first-owner invitation bootstrap, sessions, scoped grants, and optional OIDC.
+Delegated invitation issuance can be reconciled by a durable Operation ID and pending material can
+be revoked without recovering its one-time secret.
 
 The compact `runku-server` distribution composes PostgreSQL-backed Platform Identity and can attach
 one initialized Product Environment through `RUNKU_PRODUCT_ROOT`. The Environment's transactional

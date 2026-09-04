@@ -11,7 +11,8 @@ The current source tree implements the following coherent management slice:
 
 - PostgreSQL 16+ authoritative storage and a SQLite conformance backend;
 - first-owner bootstrap with a server-generated, single-use `rk_inv_v1_*` code;
-- delegated invitations with installation, Project, or Environment scope;
+- delegated invitations with installation, Project, or Environment scope, idempotent issuance
+  operations, non-secret reconciliation, and revocation;
 - short-lived access tokens, rotating refresh tokens, session listing, and revocation;
 - optional external OIDC identity linking using the hardened discovery/JWKS verifier;
 - a versioned HTTP API and `runku login` invitation/OIDC-token flows;
@@ -205,6 +206,7 @@ placeholders and must not be printed:
 curl --fail-with-body \
   --request POST \
   --header "Authorization: Bearer $RUNKU_OPERATOR_ACCESS_TOKEN" \
+  --header "Idempotency-Key: $RUNKU_INVITATION_OPERATION_ID" \
   --header 'Content-Type: application/json' \
   --data '{
     "operatorName": "release-operator",
@@ -218,10 +220,45 @@ curl --fail-with-body \
   https://runku.example.com/v1/access/invitations
 ```
 
-The response contains `code` and `secretShownOnce: true` and has `Cache-Control: no-store,
-max-age=0`. Deliver the code once. It expires after 30 minutes and cannot be recovered, replayed, or
-used after revocation. Retrying an invitation creation after an uncertain response can create more
-than one pending invitation; reconcile audit/state before creating new material.
+`RUNKU_INVITATION_OPERATION_ID` must be a newly generated canonical `opn_*` Operation ID retained
+by the caller as non-secret operation metadata. The first committed response is `201` and contains
+`operationId`, `invitationId`, scope, capabilities, timestamps, `code`, `secretShownOnce: true`, and
+`replayed: false`; it has `Cache-Control: no-store, max-age=0`. Deliver the code once. It expires
+after 30 minutes and cannot be recovered, replayed, or used after revocation.
+
+An exact POST replay with the same operation and request returns `200`, the same non-secret
+metadata, `secretShownOnce: false`, and `replayed: true`; it never includes `code`. Reusing an
+operation ID for different operator, scope, role/capabilities, or other issuance content returns
+`409 PLATFORM_INVITATION_OPERATION_REUSED`.
+
+After an uncertain response, reconcile before producing more bearer material:
+
+```sh
+curl --fail-with-body \
+  --header "Authorization: Bearer $RUNKU_OPERATOR_ACCESS_TOKEN" \
+  "https://runku.example.com/v1/access/invitation-operations/$RUNKU_INVITATION_OPERATION_ID"
+```
+
+`404` proves no committed operation exists at the time of the authoritative read. `200` proves the
+operation committed and returns metadata but never the code. If the caller did not durably deliver
+the original code, revoke the unknown credential and issue a replacement with a new Operation ID:
+
+```sh
+curl --fail-with-body \
+  --request DELETE \
+  --header "Authorization: Bearer $RUNKU_OPERATOR_ACCESS_TOKEN" \
+  "https://runku.example.com/v1/access/invitations/$RUNKU_INVITATION_ID"
+```
+
+Deleting a pending or already revoked invitation returns `204`, so the exact revocation is safe to
+repeat. A consumed invitation returns conflict because revoking its code cannot disable the
+operator/session created by consumption. Lookup and revocation reload current authority and require
+`operators:manage` at every stored invitation scope. Operation IDs are correlation identities, not
+credentials; knowing one never bypasses authorization.
+
+For compatibility, a POST without `Idempotency-Key` retains the previous one-shot behavior. It is
+not reconcilable and must not be used by unattended automation or any workflow that could retry
+after losing the response.
 
 Supported scope shapes are exact:
 
@@ -432,7 +469,9 @@ plus Runku's stricter verifier rules above.
 | `GET /v1/auth/me` | `rk_at_v1_*` bearer | reloads current operator and grants; safe to retry |
 | `GET /v1/auth/sessions` | `rk_at_v1_*` bearer | lists non-secret sessions owned by the operator; safe to retry |
 | `DELETE /v1/auth/sessions/{ops_*}` | `rk_at_v1_*` bearer | revokes own session; another operator requires installation `operators:manage` |
-| `POST /v1/access/invitations` | `rk_at_v1_*` + delegated authority | creates one new secret; uncertain response needs reconciliation |
+| `POST /v1/access/invitations` | `rk_at_v1_*` + delegated authority | with `Idempotency-Key: opn_*`, atomically creates or replays one issuance; code appears only on create |
+| `GET /v1/access/invitation-operations/{opn_*}` | `rk_at_v1_*` + current `operators:manage` at stored scope | reconciles non-secret status; safe to retry |
+| `DELETE /v1/access/invitations/{opi_*}` | `rk_at_v1_*` + current `operators:manage` at stored scope | idempotently revokes pending material; never reopens consumed identity |
 | `POST /v1/projects/{project}/environments/{environment}/workspace/publish` | `releases:publish` | bounded canonical package publication with explicit Workspace CAS |
 | `POST /v1/projects/{project}/environments/{environment}/releases/{release}` | `releases:publish` | validates the candidate and makes it servable |
 | `PUT /v1/projects/{project}/environments/{environment}/channels/{channel}` | `channels:promote` | promotes through exact optional CAS |
@@ -464,6 +503,13 @@ Platform Identity schema v1 owns these PostgreSQL tables:
 - `runku_operator_sessions`;
 - `runku_platform_audit`.
 
+Schema v2 append-only adds `runku_operator_invitation_operations`, a revocation timestamp on
+delegated invitations, and operation/invitation correlation columns plus an index on security
+audit. The operation table stores only the canonical Operation ID, SHA-256 request fingerprint,
+explicit installation/Project/Environment scope, invitation ID, creator, and timestamp. Its check
+constraint rejects incomplete or mixed scope shapes. It never stores the invitation code or its
+raw secret.
+
 Schema versions carry a checksum and fail closed if the recorded version is unknown or its expected
 definition differs. PostgreSQL transactions keep operator, grants, identity link, session, and audit
 changes atomic.
@@ -479,7 +525,9 @@ After restore, start on loopback, verify `/health/ready`, authenticate a designa
 operator, inspect sessions and grants, verify OIDC key retrieval, then admit management traffic.
 An older restore can resurrect a session or invitation that had later been revoked/consumed. As a
 conservative incident response, rotate the peppers or explicitly revoke affected sessions and
-pending invitations once supported by the operator surface.
+pending invitations through the authenticated operator surface. Restore operation IDs with the
+matching invitation and audit rows; losing only the operation table removes safe create
+reconciliation and is not a valid partial restore.
 
 ## Upgrade and rollback
 
@@ -492,10 +540,10 @@ Before upgrading:
 5. start on a restricted listener and verify liveness, readiness, invitation/session, and OIDC;
 6. admit traffic and retain the old binary only within the schema compatibility decision.
 
-Schema v1 initialization is additive for a database without Platform Identity tables. There is no
-published mixed-version or downgrade window. A binary rollback is safe only while it understands
-the exact recorded schema checksum and no later migration was applied. Never drop tables or change
-migration rows to force an older binary to start.
+Schema v1 initialization and the v1-to-v2 invitation-operation migration are additive. There is no
+published mixed-version or downgrade window. After v2 is recorded, move forward; do not use an
+older server as an operational rollback even though the added columns/table do not reinterpret v1
+rows. Never drop tables or change migration rows to force an older binary to start.
 
 ## Failure handling
 
@@ -512,6 +560,7 @@ migration rows to force an older binary to start.
 | `PLATFORM_AUTHENTICATION_FAILED` | malformed, wrong, expired, replayed, or revoked credential | reacquire/refresh; do not weaken authorization |
 | `PLATFORM_ACCESS_DENIED` | valid operator lacks capability at exact scope | change the grant deliberately; do not use an application key |
 | `PLATFORM_IDENTITY_RESULT_UNCERTAIN` | commit may have succeeded | reconcile session/invitation/audit before creating new secret material |
+| `PLATFORM_INVITATION_OPERATION_REUSED` | one `opn_*` was presented with different issuance content | stop; retain both requests as evidence and allocate a new ID only for a deliberate new operation |
 | `PLATFORM_IDENTITY_STORAGE_CORRUPT` | schema/persisted invariant failed | stop writes and restore/investigate; never edit rows ad hoc |
 
 `SERVER_PLATFORM_DATABASE_UNAVAILABLE` is an older stable error code: in this table it means the
@@ -542,7 +591,8 @@ make platform-identity-keycloak-check
 That campaign starts pinned PostgreSQL 16 and Keycloak 26.7.3 on loopback, imports a deterministic
 test realm, obtains a real RS256 token, fetches discovery and JWKS through Runku's bounded local
 OIDC path, enrolls an invited operator through the CLI, logs in again through the linked identity,
-verifies `/me`, and proves invitation replay and token tampering are rejected.
+verifies `/me`, proves idempotent invitation replay/conflict and uncertain-response
+reconcile/revoke behavior, and rejects credential replay and token tampering.
 
 The complete Product campaign is:
 

@@ -15,11 +15,15 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use futures_util::stream;
-use runku_core::{EnvironmentId, EnvironmentScope, OperatorSessionId, ProjectId};
+use runku_core::{
+    EnvironmentId, EnvironmentScope, OperationId, OperatorInvitationId, OperatorSessionId,
+    ProjectId,
+};
 use runku_platform_identity::{
-    AccessScope, AccessToken, DeviceName, ExternalOperatorIdentity, InvitationCode, LoginResult,
-    OperatorContext, OperatorName, OperatorRole, PlatformCapability, PlatformIdentityError,
-    PlatformIdentityService, RefreshToken,
+    AccessScope, AccessToken, DeviceName, ExternalOperatorIdentity, IdempotentInvitationResult,
+    InvitationCode, InvitationStatus, LoginResult, OperatorContext, OperatorInvitation,
+    OperatorName, OperatorRole, PlatformCapability, PlatformIdentityError, PlatformIdentityService,
+    RefreshToken,
 };
 use runku_protocol::DEVELOPMENT_PUBLISH_MAX_BYTES;
 use runku_value::TimestampMicros;
@@ -37,6 +41,7 @@ use crate::{
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
 /// Explicit exposure policy for a plaintext listener.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +148,14 @@ pub fn build_management_router_with_product(
         .route("/v1/auth/sessions", get(sessions))
         .route("/v1/auth/sessions/{session_id}", delete(revoke_session))
         .route("/v1/access/invitations", post(invite))
+        .route(
+            "/v1/access/invitations/{invitation_id}",
+            delete(revoke_invitation),
+        )
+        .route(
+            "/v1/access/invitation-operations/{operation_id}",
+            get(invitation_operation),
+        )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/workspace/publish",
             post(product_publish).layer(DefaultBodyLimit::max(DEVELOPMENT_PUBLISH_MAX_BYTES)),
@@ -807,6 +820,34 @@ struct InvitationResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct InvitationOperationResponse {
+    operation_id: String,
+    invitation_id: String,
+    operator_name: String,
+    scope: ScopeResponse,
+    capabilities: Vec<&'static str>,
+    status: &'static str,
+    created_by: String,
+    created_at_micros: i64,
+    expires_at_micros: i64,
+    consumed_at_micros: Option<i64>,
+    revoked_at_micros: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    secret_shown_once: bool,
+    replayed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeResponse {
+    kind: &'static str,
+    project_id: Option<String>,
+    environment_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SessionResponse {
     session_id: String,
     device_name: String,
@@ -994,6 +1035,9 @@ async fn invite(
     headers: HeaderMap,
     Json(request): Json<InviteRequest>,
 ) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
     let actor = match authenticate(&state, &headers).await {
         Ok(context) => context,
         Err(error) => return failure(error),
@@ -1013,9 +1057,37 @@ async fn invite(
         Ok(scope) => scope,
         Err(error) => return failure(error),
     };
+    let operation_id = match optional_invitation_operation(&headers) {
+        Ok(operation_id) => operation_id,
+        Err(error) => return failure(error),
+    };
+    let timestamp = now();
+    if let Some(operation_id) = operation_id {
+        return match state
+            .identity
+            .create_invitation_idempotent(&actor, operation_id, name, scope, role, timestamp)
+            .await
+        {
+            Ok(IdempotentInvitationResult::Created {
+                invitation,
+                generated,
+            }) => invitation_operation_json(
+                StatusCode::CREATED,
+                &invitation,
+                timestamp,
+                Some(generated.code.expose().to_owned()),
+                true,
+                false,
+            ),
+            Ok(IdempotentInvitationResult::Replayed(invitation)) => {
+                invitation_operation_json(StatusCode::OK, &invitation, timestamp, None, false, true)
+            }
+            Err(error) => failure(error),
+        };
+    }
     match state
         .identity
-        .create_invitation(&actor, name, scope, role, now())
+        .create_invitation(&actor, name, scope, role, timestamp)
         .await
     {
         Ok(generated) => json(
@@ -1027,6 +1099,144 @@ async fn invite(
             true,
         ),
         Err(error) => failure(error),
+    }
+}
+
+async fn invitation_operation(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(operation_id): Path<String>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let actor = match authenticate(&state, &headers).await {
+        Ok(context) => context,
+        Err(error) => return failure(error),
+    };
+    let Ok(operation_id) = operation_id.parse::<OperationId>() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let timestamp = now();
+    match state
+        .identity
+        .invitation_by_operation(&actor, operation_id)
+        .await
+    {
+        Ok(invitation) => {
+            invitation_operation_json(StatusCode::OK, &invitation, timestamp, None, false, true)
+        }
+        Err(error) => failure(error),
+    }
+}
+
+async fn revoke_invitation(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(invitation_id): Path<String>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let actor = match authenticate(&state, &headers).await {
+        Ok(context) => context,
+        Err(error) => return failure(error),
+    };
+    let Ok(invitation_id) = invitation_id.parse::<OperatorInvitationId>() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    match state
+        .identity
+        .revoke_invitation(&actor, invitation_id, now())
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => failure(error),
+    }
+}
+
+fn optional_invitation_operation(
+    headers: &HeaderMap,
+) -> Result<Option<OperationId>, PlatformIdentityError> {
+    let values = headers
+        .get_all(IDEMPOTENCY_KEY_HEADER)
+        .iter()
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [] => Ok(None),
+        [value] => value
+            .to_str()
+            .map_err(|_| PlatformIdentityError::InvalidInput)?
+            .parse::<OperationId>()
+            .map(Some)
+            .map_err(|_| PlatformIdentityError::InvalidInput),
+        _ => Err(PlatformIdentityError::InvalidInput),
+    }
+}
+
+fn invitation_operation_json(
+    status: StatusCode,
+    invitation: &OperatorInvitation,
+    timestamp: TimestampMicros,
+    code: Option<String>,
+    secret_shown_once: bool,
+    replayed: bool,
+) -> Response {
+    let Some(operation_id) = invitation.operation_id else {
+        return failure(PlatformIdentityError::Corruption);
+    };
+    let [grant] = invitation.grants.as_slice() else {
+        return failure(PlatformIdentityError::Corruption);
+    };
+    let response = InvitationOperationResponse {
+        operation_id: operation_id.to_string(),
+        invitation_id: invitation.id.to_string(),
+        operator_name: invitation.operator_name.to_string(),
+        scope: scope_response(grant.scope),
+        capabilities: grant
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect(),
+        status: invitation_status(invitation.status_at(timestamp)),
+        created_by: invitation.created_by.to_string(),
+        created_at_micros: invitation.created_at.get(),
+        expires_at_micros: invitation.expires_at.get(),
+        consumed_at_micros: invitation.consumed_at.map(TimestampMicros::get),
+        revoked_at_micros: invitation.revoked_at.map(TimestampMicros::get),
+        code,
+        secret_shown_once,
+        replayed,
+    };
+    json(status, &response, true)
+}
+
+fn scope_response(scope: AccessScope) -> ScopeResponse {
+    match scope {
+        AccessScope::Installation => ScopeResponse {
+            kind: "installation",
+            project_id: None,
+            environment_id: None,
+        },
+        AccessScope::Project(project) => ScopeResponse {
+            kind: "project",
+            project_id: Some(project.to_string()),
+            environment_id: None,
+        },
+        AccessScope::Environment(environment) => ScopeResponse {
+            kind: "environment",
+            project_id: Some(environment.project_id().to_string()),
+            environment_id: Some(environment.environment_id().to_string()),
+        },
+    }
+}
+
+const fn invitation_status(status: InvitationStatus) -> &'static str {
+    match status {
+        InvitationStatus::Pending => "pending",
+        InvitationStatus::Consumed => "consumed",
+        InvitationStatus::Revoked => "revoked",
+        InvitationStatus::Expired => "expired",
     }
 }
 
@@ -1121,7 +1331,9 @@ fn failure(error: PlatformIdentityError) -> Response {
             StatusCode::FORBIDDEN
         }
         PlatformIdentityError::NotFound => StatusCode::NOT_FOUND,
-        PlatformIdentityError::Conflict => StatusCode::CONFLICT,
+        PlatformIdentityError::Conflict | PlatformIdentityError::InvitationOperationReused => {
+            StatusCode::CONFLICT
+        }
         PlatformIdentityError::Unavailable | PlatformIdentityError::EntropyUnavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }

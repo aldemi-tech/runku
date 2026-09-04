@@ -4,6 +4,15 @@ All notable changes are documented in this file.
 
 ## 0.4.4 - 2026-09-03
 
+### Added
+
+- Delegated Platform Identity invitations now accept a canonical `opn_*` `Idempotency-Key` for
+  durable issuance, expose a non-secret operation lookup, and support idempotent pending-invitation
+  revocation. Exact replay returns the original metadata without reconstructing the one-time code;
+  reuse with different content fails as `PLATFORM_INVITATION_OPERATION_REUSED`.
+- Platform Identity schema v2 appends invitation-operation correlation, revocation timestamps, and
+  invitation-specific security-audit references without changing the checksum of schema v1.
+
 ### Changed
 
 - `RUNKU_IDENTITY_DATABASE_URL`/`_FILE` are now the canonical names for the PostgreSQL database
@@ -19,15 +28,20 @@ All notable changes are documented in this file.
 - Configuring a canonical and deprecated alias for the same database role fails closed, even when
   the values are equal. Direct and `_FILE` forms remain mutually exclusive and secret values remain
   bounded, one-line, non-symlinked, and absent from diagnostics.
+- Automation can now reconcile a lost invitation response before creating more bearer material.
+  Runku continues to persist only the invitation digest: replay and lookup never reveal the code,
+  and a lost code must be revoked and replaced under a new operation identity.
 
 ### Compatibility and rollback
 
 - `RUNKU_DATABASE_URL`/`_FILE` and `RUNKU_PRODUCT_DATABASE_URL`/`_FILE` remain accepted as
   deprecated aliases for the 0.4 line. Existing deployments can upgrade without changing their
   persisted databases, but should move to one canonical name per role before a future removal.
-- Public Product protocols, Function semantics, database schemas, and stored data are unchanged.
-  Existing database-related stable error codes are retained for compatibility even where their
-  older `PLATFORM` or `PRODUCT` wording predates the clearer configuration names.
+- Public Product protocols, Function semantics, and stored Product data are unchanged. Platform
+  Identity schema v2 is a forward-only additive migration; an older binary is not a supported
+  rollback after migration. Existing database-related stable error codes are retained for
+  compatibility even where their older `PLATFORM` or `PRODUCT` wording predates the clearer
+  configuration names.
 
 ## 0.4.3 - 2026-09-03
 
