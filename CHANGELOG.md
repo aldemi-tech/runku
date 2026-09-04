@@ -15,6 +15,8 @@ All notable changes are documented in this file.
 
 ### Changed
 
+- Release staging gives native CLI runners enough bounded time to upload artifacts after a cold
+  build, including the slower macOS Intel runner.
 - `RUNKU_IDENTITY_DATABASE_URL`/`_FILE` are now the canonical names for the PostgreSQL database
   that owns Platform Identity operators, grants, sessions, invitations, and audit.
 - `RUNKU_PLATFORM_DATABASE_URL`/`_FILE` are now the canonical names for the optional

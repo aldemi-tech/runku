@@ -142,7 +142,7 @@ jobs:
             duckdb_sha256: 8375eb1fcf2212e8a0817950354815d4dde9dd383c2d9fa7b8975b71e278c1bd
     runs-on: ${{ matrix.runner }}
     name: cli-binaries (${{ matrix.target }})
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
