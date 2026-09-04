@@ -19,7 +19,7 @@ Runku is currently pre-release.
 | Complete SQLite-backed local development process | Implemented and test-covered |
 | Safe V8, local Full Node, HTTP, WebSocket, scheduling, identity, logs | Implemented and test-covered |
 | Environment-scoped application files | Filesystem implemented/tested; S3-compatible adapter has MinIO conformance; byte-store backup remains operator-owned |
-| PostgreSQL, S3-compatible artifacts, NATS execution queue | Implemented as adapters with conformance gates; server composition can select a scope-bound Product PostgreSQL logical store |
+| PostgreSQL, S3-compatible artifacts, NATS execution queue | Implemented as adapters with conformance gates; server composition can select a scope-bound Function platform PostgreSQL logical store |
 | Remote Workspace protocols and services | Implemented as libraries and integration gates |
 | Platform operator bootstrap, sessions, scoped invitations, browser OIDC, and remote lifecycle/logs | Implemented in source with a full PostgreSQL + browser + Product lifecycle campaign |
 | Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
@@ -277,7 +277,7 @@ For a consistent local backup:
 5. run `runku doctor` before serving traffic.
 
 See [Backup and recovery](docs/operations/backup-and-recovery.md) for scope, verification, and
-limitations. An optional server Product PostgreSQL profile has an exact Environment binding and a
+limitations. An optional server Function platform PostgreSQL profile has an exact Environment binding and a
 coordinated database/Product-root recovery contract. The compact Docker package coordinates its
 Platform Identity PostgreSQL and Product/Platform filesystem
 state. External S3 and NATS recovery remains an installation-owned HA procedure and must not be

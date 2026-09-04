@@ -2,6 +2,33 @@
 
 All notable changes are documented in this file.
 
+## 0.4.4 - 2026-09-03
+
+### Changed
+
+- `RUNKU_IDENTITY_DATABASE_URL`/`_FILE` are now the canonical names for the PostgreSQL database
+  that owns Platform Identity operators, grants, sessions, invitations, and audit.
+- `RUNKU_PLATFORM_DATABASE_URL`/`_FILE` are now the canonical names for the optional
+  Environment-scoped PostgreSQL logical store used by Functions.
+- Public deployment examples, conformance campaigns, and operator documentation use the canonical
+  names and explicitly explain that `_FILE` points to a file containing the same secret URL.
+
+### Security
+
+- PostgreSQL URL validation now requires both a host and an explicit database name before startup.
+- Configuring a canonical and deprecated alias for the same database role fails closed, even when
+  the values are equal. Direct and `_FILE` forms remain mutually exclusive and secret values remain
+  bounded, one-line, non-symlinked, and absent from diagnostics.
+
+### Compatibility and rollback
+
+- `RUNKU_DATABASE_URL`/`_FILE` and `RUNKU_PRODUCT_DATABASE_URL`/`_FILE` remain accepted as
+  deprecated aliases for the 0.4 line. Existing deployments can upgrade without changing their
+  persisted databases, but should move to one canonical name per role before a future removal.
+- Public Product protocols, Function semantics, database schemas, and stored data are unchanged.
+  Existing database-related stable error codes are retained for compatibility even where their
+  older `PLATFORM` or `PRODUCT` wording predates the clearer configuration names.
+
 ## 0.4.3 - 2026-09-03
 
 ### Added

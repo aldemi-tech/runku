@@ -70,6 +70,9 @@ Prepare secrets and persistent directories without starting a server:
 `configure` creates one random PostgreSQL password, the matching connection URL, and one 256-bit
 Platform Identity pepper as `0600` files. It never replaces an existing secret and rejects a
 partial set. No secret is placed in `.env`, a command argument, or the container environment.
+The package mounts its existing `database-url` file through
+`RUNKU_IDENTITY_DATABASE_URL_FILE=/run/secrets/database-url`; `_FILE` names the mounted path, not a
+different database.
 
 Initialize the Product repositories, run configuration/migration preflight, and start:
 

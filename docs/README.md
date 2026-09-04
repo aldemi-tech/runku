@@ -66,8 +66,8 @@ Read the support boundary before designing infrastructure:
    installation, administration, HA, security, recovery, upgrades, and release artifacts.
 3. [Docker standalone installation](../deployments/docker/README.md): exact compact-profile install,
    TLS boundary, secrets, backup, restore, upgrade, and removal procedure.
-4. [Environment-scoped Product PostgreSQL](self-hosting/product-postgresql.md): optional
-   transactional Product database, exact scope binding, secrets, readiness, and recovery boundary.
+4. [Environment-scoped Function platform PostgreSQL](self-hosting/product-postgresql.md): optional
+   transactional Function database, exact scope binding, secrets, readiness, and recovery boundary.
 5. [Administration](operations/administration.md): daily checks, lifecycle operations, credentials,
    retention, capacity, maintenance windows, and incident workflow.
 6. [Authenticated remote lifecycle](operations/remote-lifecycle.md): exact server/CLI workflow,

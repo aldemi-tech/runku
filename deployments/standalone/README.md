@@ -16,7 +16,7 @@ daemon. Full Node remains optional.
 Internet ─► TLS proxy ─► runku-server serve ─► Platform Identity PostgreSQL
                            │
                            ├─ Product root: repositories and SQLite logical store by default
-                           ├─ optional Product PostgreSQL: transactional logical store
+                           ├─ optional Function platform PostgreSQL: transactional logical store
                            └─ Product root: immutable Parquet log history
 ```
 
@@ -36,8 +36,8 @@ must preserve the same listener, UID, filesystem, secret-file, probe, backup, an
   absolute `RUNKU_PRODUCT_ROOT` for the initialized Environment;
 - persist the entire Product root, including `.runku/observability.sqlite3` and
   `.runku/observability-archive/`;
-- inject `RUNKU_PLATFORM_IDENTITY_PEPPER_FILE`, `RUNKU_DATABASE_URL_FILE`, optional
-  `RUNKU_PRODUCT_DATABASE_URL_FILE`, and optional OIDC/storage
+- inject `RUNKU_PLATFORM_IDENTITY_PEPPER_FILE`, `RUNKU_IDENTITY_DATABASE_URL_FILE`, optional
+  `RUNKU_PLATFORM_DATABASE_URL_FILE`, and optional OIDC/storage
   credentials from root-controlled secret files or an equivalent secret provider;
 - run `runku-server check` before restart, `runku-server migrate` in a serialized maintenance step,
   and only then `runku-server serve`;
@@ -47,7 +47,7 @@ must preserve the same listener, UID, filesystem, secret-file, probe, backup, an
 
 The full configuration and lifecycle are in
 [Platform operator identity](../../docs/auth/platform-identity.md),
-[Environment-scoped Product PostgreSQL](../../docs/self-hosting/product-postgresql.md),
+[Environment-scoped Function platform PostgreSQL](../../docs/self-hosting/product-postgresql.md),
 [Authenticated remote lifecycle](../../docs/operations/remote-lifecycle.md), and
 [Operational Log storage](../../docs/operations/operational-logs.md).
 

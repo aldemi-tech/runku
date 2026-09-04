@@ -23,7 +23,7 @@ ephemeral container filesystem.
 Configure the Management server with PostgreSQL-backed Platform Identity and the Product root:
 
 ```sh
-export RUNKU_DATABASE_URL='postgres://runku_management:REDACTED@postgres.example/runku'
+export RUNKU_IDENTITY_DATABASE_URL='postgres://runku_management:REDACTED@postgres.example/runku_identity'
 export RUNKU_PLATFORM_IDENTITY_PEPPER='REDACTED_URL_SAFE_BASE64_32_BYTES'
 export RUNKU_STATE_DIRECTORY='/var/lib/runku/platform'
 export RUNKU_PRODUCT_ROOT='/var/lib/runku/product'

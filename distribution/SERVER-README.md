@@ -3,7 +3,7 @@
 This archive contains the Linux `runku-server` binary for the compact Runku Self-Hosted profile.
 It composes PostgreSQL-backed Platform Identity and one explicitly attached Product Environment.
 That Environment can optionally use a separate exact-scope PostgreSQL database for transactional
-Function data through `RUNKU_PRODUCT_DATABASE_URL_FILE`.
+Function data through `RUNKU_PLATFORM_DATABASE_URL_FILE`.
 The matching OCI image additionally includes the same-version `runku` CLI for controlled init-job
 and diagnostic use.
 

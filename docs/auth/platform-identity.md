@@ -75,7 +75,7 @@ The result is URL-safe base64 without padding. Supply it without placing it in a
 argument:
 
 ```sh
-export RUNKU_DATABASE_URL='postgres://runku_management:REDACTED@postgres.example/runku'
+export RUNKU_IDENTITY_DATABASE_URL='postgres://runku_management:REDACTED@postgres.example/runku_identity'
 export RUNKU_PLATFORM_IDENTITY_PEPPER='REDACTED_URL_SAFE_BASE64_32_BYTES'
 export RUNKU_STATE_DIRECTORY='/var/lib/runku'
 export RUNKU_MANAGEMENT_LISTEN='127.0.0.1:3220'
@@ -94,9 +94,9 @@ Configuration is strict:
 
 | Variable | Required | Contract |
 |---|---:|---|
-| `RUNKU_DATABASE_URL` | one source | `postgres://` or `postgresql://`; sensitive |
+| `RUNKU_IDENTITY_DATABASE_URL` | one source | Platform Identity PostgreSQL URL with host and one database path for operators, grants, sessions, invitations, and audit; sensitive |
 | `RUNKU_PLATFORM_IDENTITY_PEPPER` | one source | URL-safe base64, exactly 32 decoded bytes; sensitive |
-| `RUNKU_DATABASE_URL_FILE` | alternative | absolute one-line regular non-symlink file; mutually exclusive with direct URL |
+| `RUNKU_IDENTITY_DATABASE_URL_FILE` | alternative | path to a file containing the same Identity URL; absolute, one-line, regular, non-symlinked |
 | `RUNKU_PLATFORM_IDENTITY_PEPPER_FILE` | alternative | absolute one-line regular non-symlink file; mutually exclusive with direct pepper |
 | `RUNKU_STATE_DIRECTORY` | yes | absolute path other than `/`; holds bootstrap material |
 | `RUNKU_MANAGEMENT_LISTEN` | no | defaults to `127.0.0.1:3220` |
@@ -104,22 +104,30 @@ Configuration is strict:
 | `RUNKU_PUBLIC_MANAGEMENT_URL` | no | canonical public HTTPS Management origin returned by login discovery; literal-loopback HTTP is local-only |
 | `RUNKU_PLATFORM_OIDC_CONFIG` | no | absolute path to a strict JSON file, at most 64 KiB |
 | `RUNKU_PRODUCT_ROOT` | no | absolute initialized Product Environment root exposed by authenticated lifecycle routes |
-| `RUNKU_PRODUCT_DATABASE_URL` | no | optional Environment-scoped Product PostgreSQL DSN; sensitive; requires Product root |
-| `RUNKU_PRODUCT_DATABASE_URL_FILE` | alternative | absolute one-line regular non-symlink file; mutually exclusive with direct Product URL |
+| `RUNKU_PLATFORM_DATABASE_URL` | no | optional Environment-scoped PostgreSQL URL for Function documents, indexes, outbox, and schedules; sensitive; requires Product root |
+| `RUNKU_PLATFORM_DATABASE_URL_FILE` | alternative | path to a file containing the same Function platform URL; absolute, one-line, regular, non-symlinked |
 | `RUNKU_PRODUCT_ALLOWED_ORIGINS` | no | up to 64 exact comma-separated browser origins; requires Product root |
 | `RUNKU_PRODUCT_AUTH_CONFIG` | no | Product-root-relative JWT descriptor without parent traversal; requires Product root |
 
-Exactly one direct or `_FILE` source is required for each database/pepper secret. Secret files are
-bounded to 64 KiB and one canonical line; missing, empty, oversized, symlinked, multiline, or
-conflicting inputs fail before a connection. Unknown OIDC fields, malformed secrets, unsafe database
-schemes, relative state/config paths, and a
+`RUNKU_IDENTITY_DATABASE_URL` is the database connection string itself. Its `_FILE` alternative is
+not another database: its value is only an absolute filesystem path, and Runku reads the connection
+string from that file. Use exactly one of those two forms. The same rule applies to the optional
+Function platform database and to the pepper. Secret files are bounded to 64 KiB and one canonical
+line; missing, empty, oversized, symlinked, multiline, or conflicting inputs fail before a
+connection. Unknown OIDC fields, malformed secrets, unsafe database schemes, relative state/config
+paths, and a
 non-loopback plaintext listener fail before readiness. `RUNKU_MANAGEMENT_TLS_TERMINATED=true` is an
 assertion by the operator; Runku cannot verify the reverse proxy. Restrict the backend listener and
 configure exact trusted-proxy behavior at the deployment boundary.
 
-The Product database is independent of Platform Identity and has its own exact Environment binding,
-readiness, least-privilege credential, and coordinated recovery contract. See
-[Environment-scoped Product PostgreSQL](../self-hosting/product-postgresql.md).
+The Function platform database is independent of Platform Identity and has its own exact
+Environment binding, readiness, least-privilege credential, and coordinated recovery contract. See
+[Environment-scoped Function platform PostgreSQL](../self-hosting/product-postgresql.md).
+
+Version 0.4.4 still accepts the deprecated `RUNKU_DATABASE_URL` and
+`RUNKU_PRODUCT_DATABASE_URL` names, including their `_FILE` forms, for transition. Do not configure
+a canonical and legacy name for the same role at once; even equal values fail closed as
+`SERVER_SECRET_CONFIGURATION_CONFLICT`.
 
 ## Enroll the initial owner
 
@@ -494,8 +502,9 @@ migration rows to force an older binary to start.
 | Signal | Meaning | Safe response |
 |---|---|---|
 | `SERVER_CONFIGURATION_MISSING` | a required environment variable is absent/empty | fix configuration; no durable change occurred |
+| `SERVER_DATABASE_URL_INVALID` | the Identity URL has an unsupported scheme, no host, or no database name | correct the Identity secret source; no connection was attempted |
 | `SERVER_OIDC_CONFIG_INVALID` | unsafe JSON, issuer/origin/algorithm/pepper policy | reject startup; correct config without broadening trust |
-| `SERVER_PLATFORM_DATABASE_UNAVAILABLE` | connect, version, schema, or migration check failed | preserve logs; verify dependency/schema before retry |
+| `SERVER_PLATFORM_DATABASE_UNAVAILABLE` | the Identity database connect, version, schema, or migration check failed | preserve logs; verify dependency/schema before retry |
 | `SERVER_BOOTSTRAP_FILE_MISSING` | database has a pending bootstrap but protected file is absent | stop; preserve evidence, then restore the matching set or run the explicit recovery operation |
 | `SERVER_BOOTSTRAP_RECOVERY_CONFIRMATION_INVALID` | the offline replacement phrase is missing or wrong | verify the intended installation and rerun with the exact documented confirmation |
 | `SERVER_BOOTSTRAP_ALREADY_COMPLETE` | recovery was attempted after an operator exists | use an existing owner session or normal scoped operator invitation; bootstrap cannot reopen |
@@ -504,6 +513,10 @@ migration rows to force an older binary to start.
 | `PLATFORM_ACCESS_DENIED` | valid operator lacks capability at exact scope | change the grant deliberately; do not use an application key |
 | `PLATFORM_IDENTITY_RESULT_UNCERTAIN` | commit may have succeeded | reconcile session/invitation/audit before creating new secret material |
 | `PLATFORM_IDENTITY_STORAGE_CORRUPT` | schema/persisted invariant failed | stop writes and restore/investigate; never edit rows ad hoc |
+
+`SERVER_PLATFORM_DATABASE_UNAVAILABLE` is an older stable error code: in this table it means the
+database selected by `RUNKU_IDENTITY_DATABASE_URL`, not the Function platform database. The code is
+preserved in 0.4.4 so existing monitoring does not silently break.
 
 Do not log request bodies, Authorization headers, codes, tokens, peppers, DSNs, raw external
 subjects, or configuration file contents. Audit records intentionally retain IDs, operation,

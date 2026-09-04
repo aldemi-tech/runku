@@ -72,7 +72,7 @@ authoritative application state.
 |---|---|
 | `runku-local` | Local layout, stores, publish/lifecycle, daemon composition, doctor/logs/keys |
 | `runku-cli` | Strict parser, stable help/errors/exits, command orchestration |
-| `runku-server` | Platform Identity plus one optional authenticated Product Environment, with SQLite default or scope-bound Product PostgreSQL logical store; not yet the distributed package |
+| `runku-server` | Platform Identity plus one optional authenticated Product Environment, with SQLite default or scope-bound Function platform PostgreSQL logical store; not yet the distributed package |
 | `packages/server` | Declarative TypeScript SDK consumed statically by the builder |
 | `packages/client` | Public HTTP/Realtime client and generated-registry typed view |
 | `protocol/` | Compatibility fixtures; existing vectors are immutable contracts |

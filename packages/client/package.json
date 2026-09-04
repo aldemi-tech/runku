@@ -1,6 +1,6 @@
 {
   "name": "@runku/client",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Typed browser and server client for Runku Public Protocol v1",
   "type": "module",
   "license": "Apache-2.0",

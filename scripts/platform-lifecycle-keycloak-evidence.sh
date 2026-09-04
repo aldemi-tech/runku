@@ -127,7 +127,7 @@ environment_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
 foreign_project="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["projectId"])' "$evidence_dir/foreign-init.json")"
 foreign_environment="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["environmentId"])' "$evidence_dir/foreign-init.json")"
 
-RUNKU_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
+RUNKU_IDENTITY_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
 RUNKU_PLATFORM_IDENTITY_PEPPER="$identity_pepper" \
 RUNKU_STATE_DIRECTORY="$evidence_dir/state" \
 RUNKU_MANAGEMENT_LISTEN='127.0.0.1:18220' \
@@ -277,7 +277,7 @@ printf '%s\n' 'restarting the server and proving persisted Channel serving recov
 kill "$server_pid"
 wait "$server_pid"
 server_pid=""
-RUNKU_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
+RUNKU_IDENTITY_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
 RUNKU_PLATFORM_IDENTITY_PEPPER="$identity_pepper" \
 RUNKU_STATE_DIRECTORY="$evidence_dir/state" \
 RUNKU_MANAGEMENT_LISTEN='127.0.0.1:18220' \

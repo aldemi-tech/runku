@@ -42,8 +42,8 @@ pub struct ProductAdapter {
 
 /// Validated server-owned configuration for one Product adapter.
 pub struct ProductAdapterConfig {
-    /// Optional secret PostgreSQL DSN for Environment-scoped Product document state.
-    pub product_database_url: Option<Zeroizing<String>>,
+    /// Optional secret PostgreSQL DSN for Environment-scoped Function platform data.
+    pub platform_database_url: Option<Zeroizing<String>>,
     /// Optional historical Operational Log archive.
     pub log_archive: Option<LogArchive>,
     /// Optional replicated Operational Log journal.
@@ -78,7 +78,7 @@ impl ProductAdapter {
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?
             .0;
-        let data_store = match config.product_database_url.as_ref() {
+        let data_store = match config.platform_database_url.as_ref() {
             Some(url) => Some(std::sync::Arc::new(
                 PostgresStore::connect_scoped(
                     url.as_str(),
@@ -156,7 +156,7 @@ impl ProductAdapter {
     }
 }
 
-pub async fn migrate_product_database(
+pub async fn migrate_platform_database(
     root: &std::path::Path,
     url: &str,
 ) -> Result<(), &'static str> {

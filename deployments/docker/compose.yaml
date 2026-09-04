@@ -77,7 +77,7 @@ services:
     user: "${RUNKU_UID:?Set RUNKU_UID}:${RUNKU_GID:?Set RUNKU_GID}"
     network_mode: host
     environment:
-      RUNKU_DATABASE_URL_FILE: /run/secrets/database-url
+      RUNKU_IDENTITY_DATABASE_URL_FILE: /run/secrets/database-url
       RUNKU_PLATFORM_IDENTITY_PEPPER_FILE: /run/secrets/platform-pepper
       RUNKU_STATE_DIRECTORY: /var/lib/runku/platform
       RUNKU_PRODUCT_ROOT: /var/lib/runku/product

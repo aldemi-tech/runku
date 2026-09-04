@@ -108,7 +108,7 @@ printf '%s\n' 'building Runku server and CLI'
 cargo build --quiet --package runku-server --package runku-cli
 
 start_runku_server() {
-  RUNKU_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
+  RUNKU_IDENTITY_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
   RUNKU_PLATFORM_IDENTITY_PEPPER="$identity_pepper" \
   RUNKU_STATE_DIRECTORY="$evidence_dir/state" \
   RUNKU_MANAGEMENT_LISTEN='127.0.0.1:18220' \
@@ -139,7 +139,7 @@ kill "$server_pid"
 wait "$server_pid" || true
 server_pid=""
 rm -- "$evidence_dir/state/bootstrap/initial-owner.code"
-RUNKU_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
+RUNKU_IDENTITY_DATABASE_URL='postgres://runku_platform:runku_platform_test@127.0.0.1:15432/runku_platform' \
 RUNKU_PLATFORM_IDENTITY_PEPPER="$identity_pepper" \
 RUNKU_STATE_DIRECTORY="$evidence_dir/state" \
 RUNKU_MANAGEMENT_LISTEN='127.0.0.1:18220' \

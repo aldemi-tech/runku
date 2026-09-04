@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
-use crate::product::{ProductAdapter, ProductAdapterConfig, migrate_product_database};
+use crate::product::{ProductAdapter, ProductAdapterConfig, migrate_platform_database};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3220";
 const BOOTSTRAP_RECOVERY_CONFIRMATION: &str = "replace-lost-initial-owner-code";
@@ -103,7 +103,7 @@ async fn run() -> Result<(), &'static str> {
     }
     let repository = Arc::new(
         SqlPlatformIdentityRepository::connect_postgres(
-            &config.database_url,
+            &config.identity_database_url,
             PlatformIdentityRepositoryConfig::AUTHORITATIVE,
         )
         .await
@@ -112,9 +112,9 @@ async fn run() -> Result<(), &'static str> {
     if command == "migrate" {
         if let (Some(root), Some(url)) = (
             config.product_root.as_deref(),
-            config.product_database_url.as_ref(),
+            config.platform_database_url.as_ref(),
         ) {
-            migrate_product_database(root, url.as_str()).await?;
+            migrate_platform_database(root, url.as_str()).await?;
         }
         repository.close().await;
         println!("migrations applied");
@@ -150,7 +150,7 @@ async fn run() -> Result<(), &'static str> {
             Box::pin(ProductAdapter::open(
                 root.clone(),
                 ProductAdapterConfig {
-                    product_database_url: config.product_database_url.clone(),
+                    platform_database_url: config.platform_database_url.clone(),
                     log_archive: config.log_archive.clone(),
                     log_journal: log_journal.clone(),
                     allowed_origins: config.product_allowed_origins.clone(),
@@ -205,7 +205,7 @@ async fn run_logs_worker_command() -> Result<(), &'static str> {
 }
 
 struct ServerConfig {
-    database_url: String,
+    identity_database_url: String,
     pepper: [u8; 32],
     state_directory: PathBuf,
     listen: SocketAddr,
@@ -213,7 +213,7 @@ struct ServerConfig {
     public_management_endpoint: Option<String>,
     oidc: Option<OidcConfig>,
     product_root: Option<PathBuf>,
-    product_database_url: Option<Zeroizing<String>>,
+    platform_database_url: Option<Zeroizing<String>>,
     product_allowed_origins: BTreeSet<CorsOrigin>,
     product_auth_config: Option<PathBuf>,
     log_archive: Option<LogArchive>,
@@ -246,9 +246,10 @@ impl ServerFileStorage {
 impl ServerConfig {
     #[allow(clippy::too_many_lines)]
     fn load() -> Result<Self, &'static str> {
-        let database_url = required_secret("RUNKU_DATABASE_URL")?;
-        let platform_database_target =
-            postgres_database_target(&database_url).map_err(|()| "SERVER_DATABASE_URL_INVALID")?;
+        let identity_database_url =
+            required_secret_alias("RUNKU_IDENTITY_DATABASE_URL", "RUNKU_DATABASE_URL")?;
+        let identity_database_target = postgres_database_target(&identity_database_url)
+            .map_err(|()| "SERVER_DATABASE_URL_INVALID")?;
         let encoded = required_secret("RUNKU_PLATFORM_IDENTITY_PEPPER")?;
         let decoded = URL_SAFE_NO_PAD
             .decode(encoded)
@@ -300,17 +301,18 @@ impl ServerConfig {
                 }
             })
             .transpose()?;
-        let product_database_url = optional_secret("RUNKU_PRODUCT_DATABASE_URL")?
-            .map(|value| {
-                let target = postgres_database_target(&value)
-                    .map_err(|()| "SERVER_PRODUCT_DATABASE_URL_INVALID")?;
-                if target == platform_database_target {
-                    return Err("SERVER_PRODUCT_DATABASE_NOT_ISOLATED");
-                }
-                Ok(Zeroizing::new(value))
-            })
-            .transpose()?;
-        if product_database_url.is_some() && product_root.is_none() {
+        let platform_database_url =
+            optional_secret_alias("RUNKU_PLATFORM_DATABASE_URL", "RUNKU_PRODUCT_DATABASE_URL")?
+                .map(|value| {
+                    let target = postgres_database_target(&value)
+                        .map_err(|()| "SERVER_PRODUCT_DATABASE_URL_INVALID")?;
+                    if target == identity_database_target {
+                        return Err("SERVER_PRODUCT_DATABASE_NOT_ISOLATED");
+                    }
+                    Ok(Zeroizing::new(value))
+                })
+                .transpose()?;
+        if platform_database_url.is_some() && product_root.is_none() {
             return Err("SERVER_PRODUCT_DATABASE_WITHOUT_PRODUCT_ROOT");
         }
         let product_allowed_origins = load_product_allowed_origins()?;
@@ -353,7 +355,7 @@ impl ServerConfig {
             return Err("SERVER_FILE_USAGE_WITHOUT_PRODUCT_ROOT");
         }
         Ok(Self {
-            database_url,
+            identity_database_url,
             pepper,
             state_directory,
             listen,
@@ -361,7 +363,7 @@ impl ServerConfig {
             public_management_endpoint,
             oidc,
             product_root,
-            product_database_url,
+            platform_database_url,
             product_allowed_origins,
             product_auth_config,
             log_archive,
@@ -855,12 +857,19 @@ fn validate_public_management_endpoint(value: &str) -> Result<(), &'static str> 
 
 fn postgres_database_target(value: &str) -> Result<String, ()> {
     let url = url::Url::parse(value).map_err(|_| ())?;
-    if !matches!(url.scheme(), "postgres" | "postgresql") || url.fragment().is_some() {
+    let host = url.host_str().map(str::to_ascii_lowercase);
+    let host = host.as_deref().map(|value| value.trim_end_matches('.'));
+    let database = url.path().strip_prefix('/');
+    if !matches!(url.scheme(), "postgres" | "postgresql")
+        || host.is_none_or(str::is_empty)
+        || database.is_none_or(|value| value.is_empty() || value.contains('/'))
+        || url.fragment().is_some()
+    {
         return Err(());
     }
     Ok(format!(
         "{}:{}{}",
-        url.host_str().unwrap_or_default().to_ascii_lowercase(),
+        host.unwrap_or_default(),
         url.port().unwrap_or(5432),
         url.path()
     ))
@@ -1171,6 +1180,25 @@ fn required_secret(name: &str) -> Result<String, &'static str> {
     }
 }
 
+fn required_secret_alias(canonical: &str, legacy: &str) -> Result<String, &'static str> {
+    optional_secret_alias(canonical, legacy)?.ok_or("SERVER_CONFIGURATION_MISSING")
+}
+
+fn optional_secret_alias(canonical: &str, legacy: &str) -> Result<Option<String>, &'static str> {
+    select_secret_alias(optional_secret(canonical)?, optional_secret(legacy)?)
+}
+
+fn select_secret_alias(
+    canonical: Option<String>,
+    legacy: Option<String>,
+) -> Result<Option<String>, &'static str> {
+    match (canonical, legacy) {
+        (Some(_), Some(_)) => Err("SERVER_SECRET_CONFIGURATION_CONFLICT"),
+        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn optional_secret(name: &str) -> Result<Option<String>, &'static str> {
     let direct = match env::var(name) {
         Ok(value) => Some(value),
@@ -1303,6 +1331,31 @@ mod tests {
             postgres_database_target("postgres://product:b@db.example/product")
         );
         assert!(postgres_database_target("https://db.example/product").is_err());
+        assert!(postgres_database_target("postgres:///product").is_err());
+        assert!(postgres_database_target("postgres://db.example").is_err());
+        assert!(postgres_database_target("postgres://db.example/").is_err());
+        assert!(postgres_database_target("postgres://db.example/path/extra").is_err());
+        assert_eq!(
+            postgres_database_target("postgres://a:x@db.example./product"),
+            postgres_database_target("postgres://b:y@db.example/product")
+        );
+    }
+
+    #[test]
+    fn canonical_database_secret_aliases_are_exclusive_and_legacy_compatible() {
+        assert_eq!(
+            select_secret_alias(Some("canonical".to_owned()), None),
+            Ok(Some("canonical".to_owned()))
+        );
+        assert_eq!(
+            select_secret_alias(None, Some("legacy".to_owned())),
+            Ok(Some("legacy".to_owned()))
+        );
+        assert_eq!(select_secret_alias(None, None), Ok(None));
+        assert_eq!(
+            select_secret_alias(Some("canonical".to_owned()), Some("legacy".to_owned())),
+            Err("SERVER_SECRET_CONFIGURATION_CONFLICT")
+        );
     }
 
     #[cfg(unix)]
