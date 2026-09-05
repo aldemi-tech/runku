@@ -89,6 +89,13 @@ that profile is rejected rather than silently dropping the capability. File meta
 generated S3 key layout `v1/projects/{project}/environments/{environment}/files/{file}` are durable;
 future changes require expand/migrate/contract and rollback documentation.
 
+The source line also contains a standalone Environment lifecycle domain and repository. Its schema
+v1 creates only new `runku_environments`, `runku_environment_operations`, and
+`runku_environment_schema_migrations` tables; it does not reinterpret existing Product rows or
+change a wire protocol. Migrations are ordered and checksum-protected. The repository is not yet
+attached to the compact server or Management API, so adopting it in another composition requires a
+coordinated backup and rollback decision for that composition.
+
 ## Change rules
 
 Additive fields require old/new reader tests and safe defaults. Auth, retry, ordering, limits,

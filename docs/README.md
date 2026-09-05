@@ -29,6 +29,8 @@ Read in this order:
    Action, typed client, Realtime subscription, and scheduled operation.
 3. [Platform model](concepts/platform-model.md): Project, Environment, Release, Channel, Workspace,
    identity, and code pinning.
+   [Environment lifecycle](concepts/environment-lifecycle.md) documents the standalone registry
+   library and its current integration limit.
 4. [Functions and runtimes](functions/functions-and-runtimes.md): declarations, capabilities, Safe
    V8, Full Node, nested calls, HTTPS, scheduling, and failure semantics.
 5. [Application file storage](functions/file-storage.md): Action APIs, streamed HTTP transfer,
@@ -90,6 +92,8 @@ reading order because it records the product invariants and definition of done.
 
 - [System architecture](internals/architecture.md): component and trust boundaries, serving/data/
   runtime/management paths, consistency, scaling, and failure containment.
+- [Environment lifecycle](concepts/environment-lifecycle.md): revisioned desired/observed state,
+  idempotency, repository conformance, recovery, and current composition limit.
 - [Repository map](internals/repository-map.md): crate ownership, dependency direction, tests,
   generated artifacts, and where to implement a change.
 - [Evolving Runku](development/evolving-runku.md): contract classification, versioning, migrations,

@@ -16,6 +16,8 @@ domain contracts toward adapters and process composition.
 | `runku-data-sqlite` | Local implementation |
 | `runku-data-postgres` | PostgreSQL implementation, distributed-oriented behavior, and optional atomic exact-Environment database binding |
 | `runku-schema` | Schema/index catalog and maintenance rules |
+| `runku-environments` | Environment configuration, desired/observed lifecycle, commands, repository contract, service |
+| `runku-environment-repository` | Checksum-migrated SQLite/PostgreSQL Environment registry adapters and conformance |
 
 Pure crates must not depend on SQL, HTTP, runtime, filesystem, or deployment frameworks.
 

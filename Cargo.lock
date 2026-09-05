@@ -3556,6 +3556,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "runku-environment-repository"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "runku-core",
+ "runku-environments",
+ "runku-value",
+ "sha2 0.11.0",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "ulid",
+]
+
+[[package]]
+name = "runku-environments"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "runku-core",
+ "runku-value",
+ "sha2 0.11.0",
+ "thiserror",
+ "tokio",
+ "ulid",
+]
+
+[[package]]
 name = "runku-execution"
 version = "0.1.0"
 dependencies = [

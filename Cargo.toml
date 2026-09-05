@@ -12,6 +12,8 @@ members = [
     "crates/runku-development-access",
     "crates/runku-development-client",
     "crates/runku-development-service",
+    "crates/runku-environment-repository",
+    "crates/runku-environments",
     "crates/runku-execution",
     "crates/runku-execution-queue",
     "crates/runku-file-storage",

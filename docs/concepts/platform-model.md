@@ -11,6 +11,9 @@ application keyrings, Releases, Channels, Workspaces, schedules, and operational
 
 Environment identity is included in every storage, cache, artifact, realtime, and invocation key.
 Production protection is enforced by the server rather than inferred from SDK configuration.
+The standalone [Environment lifecycle registry](environment-lifecycle.md) defines revisioned
+Product records and materializer observations; its Management/server integration remains a
+separate source-line step.
 
 ## Release
 
