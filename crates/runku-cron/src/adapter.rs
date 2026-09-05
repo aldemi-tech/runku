@@ -24,13 +24,16 @@ use crate::{
     model::definitions,
 };
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MAX_CLAIM: u32 = 1_000;
-const SCHEMA: &[&str] = &[
+const SCHEMA_V1: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS runku_cron_environments (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, repository_revision BIGINT NOT NULL, PRIMARY KEY(project_id, environment_id))",
     "CREATE TABLE IF NOT EXISTS runku_cron_activations (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, cron_name TEXT NOT NULL, activation_revision BIGINT NOT NULL, pinned_code TEXT NOT NULL, release_id TEXT NOT NULL, schedule TEXT NOT NULL, function_name TEXT NOT NULL, args_bytes BYTEA NOT NULL, next_tick_micros BIGINT NOT NULL, lease_generation BIGINT NOT NULL, lease_owner TEXT NULL, lease_until_micros BIGINT NULL, updated_at_micros BIGINT NOT NULL, PRIMARY KEY(project_id, environment_id, cron_name), FOREIGN KEY(project_id, environment_id) REFERENCES runku_cron_environments(project_id, environment_id) ON DELETE CASCADE)",
     "CREATE INDEX IF NOT EXISTS runku_cron_due ON runku_cron_activations(project_id, environment_id, next_tick_micros, lease_until_micros, cron_name)",
     "CREATE TABLE IF NOT EXISTS runku_cron_operations (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, operation_id TEXT NOT NULL, command_digest BYTEA NOT NULL, repository_revision BIGINT NOT NULL, active_definitions BIGINT NOT NULL, created_at_micros BIGINT NOT NULL, PRIMARY KEY(project_id, environment_id, operation_id), FOREIGN KEY(project_id, environment_id) REFERENCES runku_cron_environments(project_id, environment_id) ON DELETE CASCADE)",
+];
+const SCHEMA_V2: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS runku_cron_disabled_definitions (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, cron_name TEXT NOT NULL, updated_revision BIGINT NOT NULL, updated_at_micros BIGINT NOT NULL, PRIMARY KEY(project_id, environment_id, cron_name), FOREIGN KEY(project_id, environment_id) REFERENCES runku_cron_environments(project_id, environment_id) ON DELETE CASCADE)",
 ];
 
 /// Operational repository role, independent from Environment purpose.
@@ -261,6 +264,38 @@ impl CronRepository for SqlCronRepository {
         result
     }
 
+    async fn operation(
+        &self,
+        context: CronContext,
+        operation_id: OperationId,
+    ) -> Result<Option<CronCommandResult>, CronError> {
+        self.validate_context(context)?;
+        let row = sqlx::query(
+            "SELECT repository_revision, active_definitions FROM runku_cron_operations \
+             WHERE project_id = $1 AND environment_id = $2 AND operation_id = $3",
+        )
+        .bind(context.scope.project_id().to_string())
+        .bind(context.scope.environment_id().to_string())
+        .bind(operation_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        row.map(|row| {
+            Ok(CronCommandResult {
+                repository_revision: positive_u64(
+                    row.try_get("repository_revision")
+                        .map_err(|_| CronError::Corruption)?,
+                )?,
+                active_definitions: nonnegative_u32(
+                    row.try_get("active_definitions")
+                        .map_err(|_| CronError::Corruption)?,
+                )?,
+                replayed: true,
+            })
+        })
+        .transpose()
+    }
+
     async fn claim_due(
         &self,
         context: CronContext,
@@ -378,34 +413,106 @@ async fn apply_inner(
         return rollback(transaction, CronError::Conflict).await;
     }
     let next = current.checked_add(1).ok_or(CronError::LimitExceeded)?;
-    sqlx::query("DELETE FROM runku_cron_activations WHERE project_id = $1 AND environment_id = $2")
-        .bind(&project)
-        .bind(&environment)
-        .execute(&mut *transaction)
-        .await
-        .map_err(map_sqlx_error)?;
-    let mut count = 0_u32;
-    if let (
-        CronCommand::ActivateManifest {
-            pinned_code,
-            activated_at,
-            ..
-        },
-        Some(manifest),
-    ) = (command, manifest)
-    {
-        for definition in definitions(manifest) {
-            let next_tick = definition
-                .schedule
-                .next_after(*activated_at)
-                .map_err(|_| CronError::InvalidManifest)?;
-            let args =
-                encode_stored_value(&definition.args).map_err(|_| CronError::InvalidManifest)?;
-            sqlx::query("INSERT INTO runku_cron_activations(project_id, environment_id, cron_name, activation_revision, pinned_code, release_id, schedule, function_name, args_bytes, next_tick_micros, lease_generation, lease_owner, lease_until_micros, updated_at_micros) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,NULL,NULL,$11)")
-                .bind(&project).bind(&environment).bind(definition.name.as_str()).bind(next).bind(pinned_code.to_string()).bind(manifest.release_id.to_string()).bind(definition.schedule.as_str()).bind(definition.function.as_str()).bind(args).bind(next_tick.get()).bind(activated_at.get()).execute(&mut *transaction).await.map_err(map_sqlx_error)?;
-            count = count.checked_add(1).ok_or(CronError::LimitExceeded)?;
+    match (command, manifest) {
+        (
+            CronCommand::ActivateManifest {
+                pinned_code,
+                activated_at,
+                ..
+            },
+            Some(manifest),
+        ) => {
+            delete_all(&mut transaction, &project, &environment).await?;
+            for definition in definitions(manifest) {
+                let disabled = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runku_cron_disabled_definitions WHERE project_id = $1 AND environment_id = $2 AND cron_name = $3")
+                    .bind(&project)
+                    .bind(&environment)
+                    .bind(definition.name.as_str())
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                if disabled != 0 {
+                    continue;
+                }
+                insert_activation(
+                    &mut transaction,
+                    &project,
+                    &environment,
+                    next,
+                    *pinned_code,
+                    manifest.release_id,
+                    definition,
+                    *activated_at,
+                )
+                .await?;
+            }
         }
+        (CronCommand::DeactivateAll { .. }, None) => {
+            delete_all(&mut transaction, &project, &environment).await?;
+        }
+        (
+            CronCommand::SetDefinition {
+                pinned_code,
+                name,
+                enabled,
+                changed_at,
+                ..
+            },
+            Some(manifest),
+        ) => {
+            sqlx::query("DELETE FROM runku_cron_activations WHERE project_id = $1 AND environment_id = $2 AND cron_name = $3")
+                .bind(&project)
+                .bind(&environment)
+                .bind(name.as_str())
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx_error)?;
+            if *enabled {
+                sqlx::query("DELETE FROM runku_cron_disabled_definitions WHERE project_id = $1 AND environment_id = $2 AND cron_name = $3")
+                    .bind(&project)
+                    .bind(&environment)
+                    .bind(name.as_str())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                let definition = definitions(manifest)
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                    .ok_or(CronError::InvalidManifest)?;
+                insert_activation(
+                    &mut transaction,
+                    &project,
+                    &environment,
+                    next,
+                    *pinned_code,
+                    manifest.release_id,
+                    definition,
+                    *changed_at,
+                )
+                .await?;
+            } else {
+                sqlx::query("INSERT INTO runku_cron_disabled_definitions(project_id, environment_id, cron_name, updated_revision, updated_at_micros) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(project_id, environment_id, cron_name) DO UPDATE SET updated_revision = excluded.updated_revision, updated_at_micros = excluded.updated_at_micros")
+                    .bind(&project)
+                    .bind(&environment)
+                    .bind(name.as_str())
+                    .bind(next)
+                    .bind(changed_at.get())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            }
+        }
+        _ => return rollback(transaction, CronError::Corruption).await,
     }
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM runku_cron_activations WHERE project_id = $1 AND environment_id = $2",
+    )
+    .bind(&project)
+    .bind(&environment)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(map_sqlx_error)
+    .and_then(nonnegative_u32)?;
     sqlx::query("UPDATE runku_cron_environments SET repository_revision = $1 WHERE project_id = $2 AND environment_id = $3").bind(next).bind(&project).bind(&environment).execute(&mut *transaction).await.map_err(map_sqlx_error)?;
     sqlx::query("INSERT INTO runku_cron_operations(project_id, environment_id, operation_id, command_digest, repository_revision, active_definitions, created_at_micros) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(&project).bind(&environment).bind(operation_id.to_string()).bind(digest.to_vec()).bind(next).bind(i64::from(count)).bind(command_time(command)).execute(&mut *transaction).await.map_err(map_sqlx_error)?;
     transaction
@@ -417,6 +524,54 @@ async fn apply_inner(
         active_definitions: count,
         replayed: false,
     })
+}
+
+async fn delete_all(
+    transaction: &mut Transaction<'_, Any>,
+    project: &str,
+    environment: &str,
+) -> Result<(), CronError> {
+    sqlx::query("DELETE FROM runku_cron_activations WHERE project_id = $1 AND environment_id = $2")
+        .bind(project)
+        .bind(environment)
+        .execute(&mut **transaction)
+        .await
+        .map(|_| ())
+        .map_err(map_sqlx_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_activation(
+    transaction: &mut Transaction<'_, Any>,
+    project: &str,
+    environment: &str,
+    revision: i64,
+    pinned_code: runku_core::PinnedCode,
+    release_id: runku_core::ReleaseId,
+    definition: &runku_releases::CronDefinition,
+    changed_at: TimestampMicros,
+) -> Result<(), CronError> {
+    let next_tick = definition
+        .schedule
+        .next_after(changed_at)
+        .map_err(|_| CronError::InvalidManifest)?;
+    let args = encode_stored_value(&definition.args).map_err(|_| CronError::InvalidManifest)?;
+    sqlx::query("INSERT INTO runku_cron_activations(project_id, environment_id, cron_name, activation_revision, pinned_code, release_id, schedule, function_name, args_bytes, next_tick_micros, lease_generation, lease_owner, lease_until_micros, updated_at_micros) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,NULL,NULL,$11)")
+        .bind(project)
+        .bind(environment)
+        .bind(definition.name.as_str())
+        .bind(revision)
+        .bind(pinned_code.to_string())
+        .bind(release_id.to_string())
+        .bind(definition.schedule.as_str())
+        .bind(definition.function.as_str())
+        .bind(args)
+        .bind(next_tick.get())
+        .bind(changed_at.get())
+        .execute(&mut **transaction)
+        .await
+        .map(|_| ())
+        .map_err(map_sqlx_error)
 }
 
 async fn snapshot_inner(
@@ -439,10 +594,20 @@ async fn snapshot_inner(
         .iter()
         .map(decode_activation)
         .collect::<Result<Vec<_>, _>>()?;
+    let disabled_definitions = sqlx::query_scalar::<_, String>("SELECT cron_name FROM runku_cron_disabled_definitions WHERE project_id = $1 AND environment_id = $2 ORDER BY cron_name")
+        .bind(&project)
+        .bind(&environment)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?
+        .into_iter()
+        .map(|name| name.parse().map_err(|_| CronError::Corruption))
+        .collect::<Result<Vec<_>, _>>()?;
     transaction.rollback().await.map_err(map_sqlx_error)?;
     let snapshot = CronSnapshot {
         repository_revision: nonnegative_u64(revision)?,
         activations,
+        disabled_definitions,
     };
     snapshot.validate()?;
     Ok(snapshot)
@@ -543,6 +708,7 @@ const fn command_time(command: &CronCommand) -> i64 {
     match command {
         CronCommand::ActivateManifest { activated_at, .. } => activated_at.get(),
         CronCommand::DeactivateAll { deactivated_at, .. } => deactivated_at.get(),
+        CronCommand::SetDefinition { changed_at, .. } => changed_at.get(),
     }
 }
 async fn rollback<T>(transaction: Transaction<'_, Any>, error: CronError) -> Result<T, CronError> {
@@ -584,7 +750,7 @@ async fn migrate(pool: &AnyPool, backend: CronBackend) -> Result<(), CronError> 
             .map_err(map_sqlx_error)?;
     match version {
         None => {
-            for statement in SCHEMA {
+            for statement in SCHEMA_V1.iter().chain(SCHEMA_V2) {
                 transaction
                     .execute(*statement)
                     .await
@@ -596,8 +762,21 @@ async fn migrate(pool: &AnyPool, backend: CronBackend) -> Result<(), CronError> 
                 .await
                 .map_err(map_sqlx_error)?;
         }
+        Some(1) => {
+            for statement in SCHEMA_V2 {
+                transaction
+                    .execute(*statement)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            }
+            sqlx::query("UPDATE runku_cron_schema SET version = $1 WHERE singleton = 1")
+                .bind(SCHEMA_VERSION)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
         Some(SCHEMA_VERSION) => {
-            for statement in SCHEMA {
+            for statement in SCHEMA_V1.iter().chain(SCHEMA_V2) {
                 transaction
                     .execute(*statement)
                     .await

@@ -11,10 +11,12 @@ use async_trait::async_trait;
 use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_document_schema};
 use runku_core::{
     ApplicationClientId, ChannelName, CodeTarget, CredentialId, DocumentId, EnvironmentScope,
-    FunctionName, OperationId, OperatorId, OutboxEventId, ReleaseId, ScheduledInvocationId,
-    TableId,
+    FunctionName, OperationId, OperatorId, OutboxEventId, PinnedCode, ReleaseId,
+    ScheduledInvocationId, TableId,
 };
-use runku_cron::{CronContext, CronError, CronRepository, CronRepositoryConfig, SqlCronRepository};
+use runku_cron::{
+    CronCommand, CronContext, CronError, CronRepository, CronRepositoryConfig, SqlCronRepository,
+};
 use runku_data::{
     CommitBatch, DocumentMutation, ExpectedRevision, IndexRange, LogicalStore, OutboxAppend,
     ScheduleStatus, ScheduledInvocationRecord, StoreError,
@@ -50,8 +52,9 @@ use runku_management_service::{
     ManagementBucketCreate, ManagementBucketLifecycle, ManagementBucketPage, ManagementBucketQuota,
     ManagementBucketResult, ManagementBucketUpdate, ManagementCatalogQuery,
     ManagementCreatedApplicationClient, ManagementCreatedApplicationCredential,
-    ManagementCronCatalog, ManagementCronEntry, ManagementCronQuery, ManagementDataDeleteRequest,
-    ManagementDataDocument, ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
+    ManagementCronActivationResult, ManagementCronActivationSet, ManagementCronCatalog,
+    ManagementCronEntry, ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataDocument,
+    ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
     ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementEnvironment,
     ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
     ManagementEnvironmentOperation, ManagementEnvironmentResult, ManagementEnvironmentUpdate,
@@ -80,7 +83,7 @@ use runku_observability::{
 use runku_protocol::{WireValueV1, decode_development_publish_request_v1};
 use runku_releases::{
     ArtifactFormat, AuthPolicy, Capability, FunctionType, FunctionVisibility, RuntimeClass,
-    Sha256Digest, decode_node_esm_bundle, decode_safe_esm_bundle,
+    Sha256Digest, decode_node_esm_bundle, decode_safe_esm_bundle, encode_release_manifest,
 };
 use runku_schema::{SchemaCatalog, decode_schema_catalog};
 use runku_serving::{
@@ -784,6 +787,59 @@ impl ManagementProduct for ProductAdapter {
             target: catalog.target,
             activation_revision: snapshot.repository_revision,
             crons,
+        })
+    }
+
+    async fn cron_activation_set(
+        &self,
+        name: &str,
+        operation_id: OperationId,
+        request: &ManagementCronActivationSet,
+    ) -> Result<ManagementCronActivationResult, ManagementProductError> {
+        let name = name.parse().map_err(|_| ManagementProductError::Invalid)?;
+        let catalog = self.effective_catalog(&request.target).await?;
+        let pinned_code = catalog
+            .target
+            .resolved
+            .parse::<PinnedCode>()
+            .map_err(|_| ManagementProductError::Corruption)?;
+        let command = CronCommand::SetDefinition {
+            expected_revision: request.expected_revision,
+            pinned_code,
+            manifest_bytes: encode_release_manifest(&catalog.manifest)
+                .map_err(|_| ManagementProductError::Corruption)?,
+            name,
+            enabled: request.enabled,
+            changed_at: parse_timestamp(&request.changed_at_micros)?,
+        };
+        let result = self
+            .cron
+            .apply(self.cron_context, operation_id, &command)
+            .await
+            .map_err(map_cron)?;
+        Ok(ManagementCronActivationResult {
+            operation_id: operation_id.to_string(),
+            repository_revision: result.repository_revision,
+            active_definitions: result.active_definitions,
+            replayed: result.replayed,
+        })
+    }
+
+    async fn cron_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementCronActivationResult, ManagementProductError> {
+        let result = self
+            .cron
+            .operation(self.cron_context, operation_id)
+            .await
+            .map_err(map_cron)?
+            .ok_or(ManagementProductError::NotFound)?;
+        Ok(ManagementCronActivationResult {
+            operation_id: operation_id.to_string(),
+            repository_revision: result.repository_revision,
+            active_definitions: result.active_definitions,
+            replayed: true,
         })
     }
 
@@ -2882,6 +2938,50 @@ export const hourly = cron({
             crons.crons[0].active_pinned_code,
             Some(format!("dev_revision:{}", published.revision_id))
         );
+        let disable_operation = OperationId::generate();
+        let disabled = product
+            .cron_activation_set(
+                "crons.hourly",
+                disable_operation,
+                &ManagementCronActivationSet {
+                    target: target.clone(),
+                    expected_revision: crons.activation_revision,
+                    enabled: false,
+                    changed_at_micros: "1800000000000200".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(disabled.active_definitions, 0);
+        assert!(!disabled.replayed);
+        assert!(
+            product
+                .cron_activation_set(
+                    "crons.hourly",
+                    disable_operation,
+                    &ManagementCronActivationSet {
+                        target: target.clone(),
+                        expected_revision: crons.activation_revision,
+                        enabled: false,
+                        changed_at_micros: "1800000000000200".to_owned(),
+                    },
+                )
+                .await?
+                .replayed
+        );
+        assert_eq!(
+            product
+                .cron_operation(disable_operation)
+                .await?
+                .repository_revision,
+            disabled.repository_revision
+        );
+        let crons = product
+            .crons(&ManagementCronQuery {
+                target: target.clone(),
+            })
+            .await?;
+        assert!(!crons.crons[0].enabled);
+        assert_eq!(crons.activation_revision, disabled.repository_revision);
 
         let scheduled_id = ScheduledInvocationId::generate();
         let mut batch = CommitBatch::new(product.scope, OperationId::generate());

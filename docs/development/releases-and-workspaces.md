@@ -33,7 +33,7 @@ Workspace targets and development synchronization in production Environments.
 Scheduled invocations pin the exact Release or Dev Revision that created them. A later Channel move
 does not change pending work. Cron activation similarly materializes work from a versioned manifest.
 
-The authenticated Management API exposes two read-only console projections:
+The authenticated Management API exposes console-safe Cron control and Scheduled history:
 
 - `GET /v1/projects/{project}/environments/{environment}/crons?target=...` resolves the target once,
   verifies its artifact, returns code-owned declarations, and correlates each declaration with the
@@ -41,11 +41,17 @@ The authenticated Management API exposes two read-only console projections:
 - `GET /v1/projects/{project}/environments/{environment}/scheduled?limit=...&after=...` returns at
   most 200 records in stable Scheduled Invocation ID order. It requires `schedules:read`, exposes
   canonical arguments and bounded error codes, and deliberately omits worker/lease identity.
+- `PUT /v1/projects/{project}/environments/{environment}/crons/{name}/activation` requires
+  `cron:activate`, `Idempotency-Key: opn_*`, the exact current activation revision, a verified code
+  target, and a caller-pinned timestamp. It changes only the enabled state of a declaration already
+  present in that immutable target. `GET .../cron-operations/{opn_*}` recovers a successful result
+  after an uncertain response under `cron:read`.
 
 These reads use the same Cron repository and logical store as the running local process. The
-Management API does not create, edit, retry, or cancel Scheduled work. Per-declaration Cron
-enable/disable remains a separate state-model change; the current publish path still atomically
-activates the complete manifest.
+Management API does not create or edit code-owned Cron declarations, nor retry or cancel Scheduled
+work. A disabled declaration is stored as durable operator intent: restart and manifest
+reconciliation preserve it, while an explicit enable removes that override. Publishing still
+atomically reconciles every other declaration from the exact manifest.
 
 ## Remote publication safety
 

@@ -32,9 +32,43 @@ use runku_releases::{
     encode_release_manifest,
 };
 use runku_value::{CanonicalValue, TimestampMicros};
+use sqlx::{Executor as _, any::AnyPoolOptions};
 use tempfile::tempdir;
 
 const MINUTE: i64 = 60_000_000;
+
+#[tokio::test]
+async fn sqlite_v1_schema_migrates_additively_and_preserves_activation()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("cron-v1.sqlite3");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let context = local_context();
+    let repository =
+        SqlCronRepository::connect_sqlite(&url, CronRepositoryConfig::LOCAL, context).await?;
+    repository.close().await;
+
+    sqlx::any::install_default_drivers();
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
+    pool.execute("DROP TABLE runku_cron_disabled_definitions")
+        .await?;
+    pool.execute("UPDATE runku_cron_schema SET version = 1 WHERE singleton = 1")
+        .await?;
+    pool.close().await;
+
+    let repository =
+        SqlCronRepository::connect_sqlite(&url, CronRepositoryConfig::LOCAL, context).await?;
+    let command = activation_command(context, ReleaseId::generate(), 0, 0)?;
+    repository
+        .apply(context, OperationId::generate(), &command)
+        .await?;
+    assert_eq!(repository.snapshot(context).await?.activations.len(), 1);
+    repository.close().await;
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_reopen_replay_recovery_two_workers_and_execution() -> Result<(), Box<dyn Error>> {
@@ -76,7 +110,9 @@ async fn sqlite_reopen_replay_recovery_two_workers_and_execution() -> Result<(),
     repository.close().await;
     let reopened =
         SqlCronRepository::connect_sqlite(&cron_url, CronRepositoryConfig::LOCAL, context).await?;
-    assert_eq!(reopened.snapshot(context).await?.repository_revision, 3);
+    let reopened_snapshot = reopened.snapshot(context).await?;
+    assert_eq!(reopened_snapshot.repository_revision, 5);
+    assert!(reopened_snapshot.disabled_definitions.is_empty());
     reopened.close().await;
     Ok(())
 }
@@ -140,6 +176,87 @@ async fn run_conformance(
     assert_eq!(
         repository.apply(context, operation, &divergent).await,
         Err(CronError::Conflict)
+    );
+    assert_eq!(
+        repository
+            .operation(context, operation)
+            .await?
+            .ok_or("cron operation missing")?
+            .repository_revision,
+        1
+    );
+    let CronCommand::ActivateManifest {
+        pinned_code,
+        manifest_bytes,
+        ..
+    } = activate.clone()
+    else {
+        return Err("activation command changed shape".into());
+    };
+    let disable_operation = OperationId::generate();
+    let disabled = repository
+        .apply(
+            context,
+            disable_operation,
+            &CronCommand::SetDefinition {
+                expected_revision: 1,
+                pinned_code,
+                manifest_bytes: manifest_bytes.clone(),
+                name: "minute".parse()?,
+                enabled: false,
+                changed_at: TimestampMicros::new(1),
+            },
+        )
+        .await?;
+    assert_eq!(
+        (disabled.repository_revision, disabled.active_definitions),
+        (2, 0)
+    );
+    assert_eq!(
+        repository.snapshot(context).await?.disabled_definitions,
+        vec!["minute".parse()?]
+    );
+    assert!(
+        repository
+            .apply(
+                context,
+                disable_operation,
+                &CronCommand::SetDefinition {
+                    expected_revision: 1,
+                    pinned_code,
+                    manifest_bytes: manifest_bytes.clone(),
+                    name: "minute".parse()?,
+                    enabled: false,
+                    changed_at: TimestampMicros::new(1),
+                },
+            )
+            .await?
+            .replayed
+    );
+    let enabled = repository
+        .apply(
+            context,
+            OperationId::generate(),
+            &CronCommand::SetDefinition {
+                expected_revision: 2,
+                pinned_code,
+                manifest_bytes,
+                name: "minute".parse()?,
+                enabled: true,
+                changed_at: TimestampMicros::new(0),
+            },
+        )
+        .await?;
+    assert_eq!(
+        (enabled.repository_revision, enabled.active_definitions),
+        (3, 1)
+    );
+    assert!(
+        repository
+            .snapshot(context)
+            .await?
+            .disabled_definitions
+            .is_empty()
     );
 
     let config = CronMaterializerConfig {
@@ -212,7 +329,7 @@ async fn run_conformance(
     );
 
     let deactivate = CronCommand::DeactivateAll {
-        expected_revision: 1,
+        expected_revision: 3,
         deactivated_at: TimestampMicros::new(4 * MINUTE),
     };
     assert_eq!(
@@ -231,7 +348,7 @@ async fn run_conformance(
     );
 
     let release_two = ReleaseId::generate();
-    let reactivate = activation_command(context, release_two, 2, 4 * MINUTE)?;
+    let reactivate = activation_command(context, release_two, 4, 4 * MINUTE)?;
     repository
         .apply(context, OperationId::generate(), &reactivate)
         .await?;
@@ -243,8 +360,8 @@ async fn run_conformance(
         1
     );
     let snapshot = repository.snapshot(context).await?;
-    assert_eq!(snapshot.repository_revision, 3);
-    assert_eq!(snapshot.activations[0].activation_revision, 3);
+    assert_eq!(snapshot.repository_revision, 5);
+    assert_eq!(snapshot.activations[0].activation_revision, 5);
     assert_eq!(
         snapshot.activations[0].pinned_code,
         PinnedCode::Release(release_two)
@@ -363,6 +480,14 @@ impl CronRepository for FailCompletionOnce {
 
     async fn snapshot(&self, context: CronContext) -> Result<CronSnapshot, CronError> {
         self.inner.snapshot(context).await
+    }
+
+    async fn operation(
+        &self,
+        context: CronContext,
+        operation_id: OperationId,
+    ) -> Result<Option<CronCommandResult>, CronError> {
+        self.inner.operation(context, operation_id).await
     }
 
     async fn claim_due(

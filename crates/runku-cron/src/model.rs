@@ -97,6 +97,8 @@ pub struct CronSnapshot {
     pub repository_revision: u64,
     /// Enabled activations in strict name order.
     pub activations: Vec<CronActivation>,
+    /// Code-owned declarations explicitly disabled by an operator, in strict name order.
+    pub disabled_definitions: Vec<CronName>,
 }
 
 impl CronSnapshot {
@@ -115,6 +117,18 @@ impl CronSnapshot {
                 return Err(CronError::Corruption);
             }
             previous = Some(&activation.name);
+        }
+        let mut previous: Option<&CronName> = None;
+        for name in &self.disabled_definitions {
+            if previous.is_some_and(|previous| previous >= name)
+                || self
+                    .activations
+                    .iter()
+                    .any(|activation| activation.name == *name)
+            {
+                return Err(CronError::Corruption);
+            }
+            previous = Some(name);
         }
         Ok(())
     }
@@ -140,6 +154,21 @@ pub enum CronCommand {
         expected_revision: u64,
         /// Trusted audit timestamp.
         deactivated_at: TimestampMicros,
+    },
+    /// Enables or disables one declaration from an exact manifest without editing code-owned data.
+    SetDefinition {
+        /// Required current repository revision.
+        expected_revision: u64,
+        /// Release or Dev Revision that owns the declaration.
+        pinned_code: PinnedCode,
+        /// Exact canonical Release Manifest bytes.
+        manifest_bytes: Vec<u8>,
+        /// Exact code-owned Cron name.
+        name: CronName,
+        /// Desired activation state.
+        enabled: bool,
+        /// Trusted change timestamp; a newly enabled first tick is strictly later.
+        changed_at: TimestampMicros,
     },
 }
 
@@ -180,6 +209,32 @@ impl CronCommand {
                 }
                 Ok(None)
             }
+            Self::SetDefinition {
+                pinned_code,
+                manifest_bytes,
+                name,
+                changed_at,
+                ..
+            } => {
+                if changed_at.get() < 0 {
+                    return Err(CronError::InvalidInput);
+                }
+                let manifest = decode_release_manifest(manifest_bytes)
+                    .map_err(|_| CronError::InvalidManifest)?;
+                let canonical =
+                    encode_release_manifest(&manifest).map_err(|_| CronError::InvalidManifest)?;
+                if canonical != *manifest_bytes
+                    || manifest.project_id != context.scope.project_id()
+                    || matches!(pinned_code, PinnedCode::Release(id) if *id != manifest.release_id)
+                    || !manifest
+                        .cron_definitions
+                        .iter()
+                        .any(|definition| definition.name == *name)
+                {
+                    return Err(CronError::InvalidManifest);
+                }
+                Ok(Some(manifest))
+            }
         }
     }
 
@@ -191,6 +246,9 @@ impl CronCommand {
                 expected_revision, ..
             }
             | Self::DeactivateAll {
+                expected_revision, ..
+            }
+            | Self::SetDefinition {
                 expected_revision, ..
             } => *expected_revision,
         }
@@ -224,6 +282,22 @@ impl CronCommand {
             Self::DeactivateAll { deactivated_at, .. } => {
                 digest.update([2]);
                 digest.update(deactivated_at.get().to_be_bytes());
+            }
+            Self::SetDefinition {
+                pinned_code,
+                manifest_bytes,
+                name,
+                enabled,
+                changed_at,
+                ..
+            } => {
+                digest.update([3]);
+                digest.update(pinned_code.to_string().as_bytes());
+                digest.update([0]);
+                digest.update(name.as_str().as_bytes());
+                digest.update([u8::from(*enabled)]);
+                digest.update(changed_at.get().to_be_bytes());
+                digest.update(manifest_bytes);
             }
         }
         Ok(digest.finalize().into())
@@ -283,6 +357,13 @@ pub trait CronRepository: Send + Sync {
 
     /// Loads one coherent status snapshot.
     async fn snapshot(&self, context: CronContext) -> Result<CronSnapshot, CronError>;
+
+    /// Looks up one successful command result by exact scope and operation identity.
+    async fn operation(
+        &self,
+        context: CronContext,
+        operation_id: OperationId,
+    ) -> Result<Option<CronCommandResult>, CronError>;
 
     /// Claims due/expired activations in deterministic tick/name order.
     async fn claim_due(

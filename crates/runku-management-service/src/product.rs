@@ -689,6 +689,34 @@ pub struct ManagementCronCatalog {
     pub crons: Vec<ManagementCronEntry>,
 }
 
+/// Per-declaration Cron activation replacement.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCronActivationSet {
+    /// Exact code target containing the immutable declaration.
+    pub target: String,
+    /// Required current activation repository revision.
+    pub expected_revision: u64,
+    /// Desired enabled state.
+    pub enabled: bool,
+    /// Caller-pinned canonical decimal change timestamp for exact replay.
+    pub changed_at_micros: String,
+}
+
+/// Result of one idempotent Cron activation command.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCronActivationResult {
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// Repository revision produced by the original command.
+    pub repository_revision: u64,
+    /// Number of enabled declarations after the command.
+    pub active_definitions: u32,
+    /// Whether the immutable prior result was replayed.
+    pub replayed: bool,
+}
+
 /// One non-secret Scheduled Invocation projection.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1336,6 +1364,26 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         query: &ManagementCronQuery,
     ) -> Result<ManagementCronCatalog, ManagementProductError> {
         let _ = query;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Enables or disables one exact code-owned Cron declaration using CAS.
+    async fn cron_activation_set(
+        &self,
+        name: &str,
+        operation_id: OperationId,
+        request: &ManagementCronActivationSet,
+    ) -> Result<ManagementCronActivationResult, ManagementProductError> {
+        let _ = (name, operation_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Looks up one successful Cron activation command after uncertainty.
+    async fn cron_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementCronActivationResult, ManagementProductError> {
+        let _ = operation_id;
         Err(ManagementProductError::NotFound)
     }
 

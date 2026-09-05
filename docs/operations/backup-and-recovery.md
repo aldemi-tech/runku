@@ -19,7 +19,7 @@ Release routing, credentials, schedules, and artifact references.
 | Releases/Channels | `.runku/releases.sqlite3` | PostgreSQL/release repository | Authoritative |
 | Workspaces/Dev Revisions | `.runku/development.sqlite3` | PostgreSQL/development repository | Authoritative when development is retained |
 | Application Clients/keys | `.runku/identity.sqlite3` + pepper | Identity repository + key protection | Authoritative and sensitive |
-| Cron activation/cursors | `.runku/cron.sqlite3` | PostgreSQL | Authoritative for exact scheduling behavior |
+| Cron activation/cursors/operator disable intent | `.runku/cron.sqlite3` | PostgreSQL | Authoritative for exact scheduling behavior; schema v2 disable overrides must be restored with activations |
 | Operational logs/export checkpoints | `.runku/observability.sqlite3` + `.runku/observability-archive/` | hot Product store + filesystem/S3 Parquet; optional NATS journal | Operational evidence; retention policy applies |
 | Platform operators/grants/sessions/invitations/audit | not part of local application state | PostgreSQL Platform Identity schema | Authoritative and sensitive |
 | Platform credential/OIDC peppers | not part of local application state | Secret provider + coordinated recovery manifest | Authoritative cryptographic material |

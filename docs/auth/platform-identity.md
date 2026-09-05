@@ -524,6 +524,8 @@ plus Runku's stricter verifier rules above.
 | Bucket/key lists, bucket get, and storage-operation lookup | `storage:read` | reads provider-independent logical storage metadata only |
 | Bucket create/replace/archive and storage-key issue/rotate/revoke | `storage:manage` + `Idempotency-Key: opn_*` | applies exact-scope CAS/idempotency; Product key secrets appear once |
 | `GET .../crons?target=...` | `cron:read` | reads code-owned declarations plus current durable activation without exposing leases |
+| `PUT .../crons/{name}/activation` | `cron:activate` + `Idempotency-Key: opn_*` | enables/disables an exact immutable declaration using repository CAS; operator disable intent survives restart and manifest reconciliation |
+| `GET .../cron-operations/{opn_*}` | `cron:read` | reconciles one successful non-secret activation result after uncertainty |
 | `GET .../scheduled?limit=...&after=...` | `schedules:read` | reads bounded durable queue/history in stable ID order without worker identity |
 | `GET .../functions` and `GET .../schema/tables` | `releases:read` | reads a bounded catalog from one verified effective artifact |
 | `POST .../data/query` and `GET .../data/documents/{table}/{document}` | `data:read` | reads logical documents through the canonical store and schema |

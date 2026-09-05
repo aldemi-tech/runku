@@ -422,11 +422,16 @@ pub(crate) fn cron_matches(
     pinned: PinnedCode,
     manifest: &runku_releases::ReleaseManifestV1,
 ) -> bool {
-    snapshot.activations.len() == manifest.cron_definitions.len()
+    let expected = manifest
+        .cron_definitions
+        .iter()
+        .filter(|definition| !snapshot.disabled_definitions.contains(&definition.name))
+        .collect::<Vec<_>>();
+    snapshot.activations.len() == expected.len()
         && snapshot
             .activations
             .iter()
-            .zip(&manifest.cron_definitions)
+            .zip(expected)
             .all(|(activation, definition)| {
                 activation.name == definition.name
                     && activation.pinned_code == pinned
@@ -891,6 +896,33 @@ mod tests {
         assert_eq!(repaired.repository_revision, 3);
         assert_eq!(repaired.activations.len(), 1);
 
+        repository
+            .apply(
+                context,
+                OperationId::generate(),
+                &CronCommand::SetDefinition {
+                    expected_revision: 3,
+                    pinned_code: runku_core::PinnedCode::DevRevision(published.revision_id),
+                    manifest_bytes: with_cron.manifest_bytes.clone(),
+                    name: "minute".parse()?,
+                    enabled: false,
+                    changed_at: TimestampMicros::new(31),
+                },
+            )
+            .await?;
+        repository.close().await;
+        let repository = SqlCronRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", paths.cron_database.display()),
+            CronRepositoryConfig::LOCAL,
+            context,
+        )
+        .await?;
+        reconcile_cron_head(&state, &paths).await?;
+        let disabled = repository.snapshot(context).await?;
+        assert_eq!(disabled.repository_revision, 4);
+        assert!(disabled.activations.is_empty());
+        assert_eq!(disabled.disabled_definitions, vec!["minute".parse()?]);
+
         assert!(
             publish_local(
                 directory.path(),
@@ -902,7 +934,7 @@ mod tests {
             .await?
             .replayed
         );
-        assert_eq!(repository.snapshot(context).await?.repository_revision, 3);
+        assert_eq!(repository.snapshot(context).await?.repository_revision, 4);
 
         let without_cron = package(state.project_id, 26, false)?;
         publish_local(

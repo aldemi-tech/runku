@@ -39,12 +39,12 @@ use zeroize::Zeroizing;
 use crate::{
     ManagementApplicationClientCreate, ManagementApplicationCredentialCreate,
     ManagementApplicationCredentialRotate, ManagementBucketArchive, ManagementBucketCreate,
-    ManagementBucketUpdate, ManagementCatalogQuery, ManagementCronQuery,
-    ManagementDataDeleteRequest, ManagementDataInsertRequest, ManagementDataQuery,
-    ManagementDataReplaceRequest, ManagementEnvironmentCreate, ManagementEnvironmentUpdate,
-    ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    ManagementServingPolicySet, ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
-    ManagementStorageAccessKeyRotate, OidcClientConfiguration,
+    ManagementBucketUpdate, ManagementCatalogQuery, ManagementCronActivationSet,
+    ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataInsertRequest,
+    ManagementDataQuery, ManagementDataReplaceRequest, ManagementEnvironmentCreate,
+    ManagementEnvironmentUpdate, ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct,
+    ManagementProductError, ManagementServingPolicySet, ManagementStorageAccessKeyIssue,
+    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -307,6 +307,14 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/crons",
             get(product_crons),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/crons/{cron_name}/activation",
+            put(product_cron_activation_set),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/cron-operations/{operation_id}",
+            get(product_cron_operation),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/scheduled",
@@ -1476,6 +1484,69 @@ async fn product_crons(
         Err(response) => return *response,
     };
     match product.crons(&query).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_cron_activation_set(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, cron_name)): Path<(String, String, String)>,
+    Json(request): Json<ManagementCronActivationSet>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CronActivate,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .cron_activation_set(&cron_name, operation_id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_cron_operation(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, operation)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let Ok(operation_id) = operation.parse::<OperationId>() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CronRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.cron_operation(operation_id).await {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }

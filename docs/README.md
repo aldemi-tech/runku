@@ -104,6 +104,8 @@ reading order because it records the product invariants and definition of done.
 - [Logical Object Storage](concepts/object-storage.md): revisioned buckets, scoped Product access
   keys, authenticated Management API/server composition, SQL conformance, recovery, and the
   current provider/data-plane integration limit.
+- [Releases and Workspaces](development/releases-and-workspaces.md): immutable code targets,
+  durable per-declaration Cron activation, Scheduled history, CAS/idempotency, and recovery.
 - [Repository map](internals/repository-map.md): crate ownership, dependency direction, tests,
   generated artifacts, and where to implement a change.
 - [Evolving Runku](development/evolving-runku.md): contract classification, versioning, migrations,

@@ -17,7 +17,8 @@ use axum::{
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementApplicationClientList,
-    ManagementBucketPage, ManagementCronCatalog, ManagementCronQuery, ManagementDataDocument,
+    ManagementBucketPage, ManagementCronActivationResult, ManagementCronActivationSet,
+    ManagementCronCatalog, ManagementCronQuery, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataWriteResult, ManagementEnvironment,
     ManagementEnvironmentConfiguration, ManagementHttpConfig, ManagementHttpExposure,
     ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
@@ -58,6 +59,7 @@ struct DataProbeProduct {
     storage_reads: AtomicUsize,
     environment_reads: AtomicUsize,
     cron_reads: AtomicUsize,
+    cron_writes: AtomicUsize,
     scheduled_reads: AtomicUsize,
 }
 
@@ -128,6 +130,21 @@ impl ManagementProduct for DataProbeProduct {
             version: 1,
             scheduled: Vec::new(),
             next: None,
+        })
+    }
+
+    async fn cron_activation_set(
+        &self,
+        _name: &str,
+        operation_id: OperationId,
+        request: &ManagementCronActivationSet,
+    ) -> Result<ManagementCronActivationResult, ManagementProductError> {
+        self.cron_writes.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementCronActivationResult {
+            operation_id: operation_id.to_string(),
+            repository_revision: request.expected_revision + 1,
+            active_definitions: u32::from(request.enabled),
+            replayed: false,
         })
     }
 
@@ -742,6 +759,26 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_005),
         )
         .await?;
+    let automation_manager = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "automation-manager".to_owned(),
+            },
+            OperatorName::from_str("Automation manager")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([
+                    PlatformCapability::CronRead,
+                    PlatformCapability::CronActivate,
+                ]),
+            }],
+            DeviceName::from_str("automation manager device")?,
+            TimestampMicros::new(1_900_000_000_000_006),
+        )
+        .await?;
     let product = Arc::new(DataProbeProduct {
         scope,
         reads: AtomicUsize::new(0),
@@ -750,6 +787,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         storage_reads: AtomicUsize::new(0),
         environment_reads: AtomicUsize::new(0),
         cron_reads: AtomicUsize::new(0),
+        cron_writes: AtomicUsize::new(0),
         scheduled_reads: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
@@ -797,6 +835,11 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     );
     let scheduled_path = format!(
         "/v1/projects/{}/environments/{}/scheduled?limit=10",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let cron_activation_path = format!(
+        "/v1/projects/{}/environments/{}/crons/crons.hourly/activation",
         scope.project_id(),
         scope.environment_id()
     );
@@ -919,6 +962,34 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         )
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
+    let activation = |access: &str| {
+        Request::put(&cron_activation_path)
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", OperationId::generate().to_string())
+            .body(Body::from(
+                json!({
+                    "target":"workspace:local",
+                    "expectedRevision":0,
+                    "enabled":false,
+                    "changedAtMicros":"1900000000000007"
+                })
+                .to_string(),
+            ))
+    };
+    let response = router
+        .clone()
+        .oneshot(activation(automation_access)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.cron_writes.load(Ordering::SeqCst), 0);
+    let automation_manager_access = automation_manager.login.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(activation(automation_manager_access)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.cron_writes.load(Ordering::SeqCst), 1);
     let response = router
         .oneshot(
             Request::get(&scheduled_path)
