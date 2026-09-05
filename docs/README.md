@@ -31,6 +31,8 @@ Read in this order:
    identity, and code pinning.
    [Environment lifecycle](concepts/environment-lifecycle.md) documents the standalone registry
    library and its current integration limit.
+   [Serving policy](concepts/serving-policy.md) documents revisioned atomic/gradual Release weights
+   and the compatibility gate; request routing remains a separate integration slice.
 4. [Functions and runtimes](functions/functions-and-runtimes.md): declarations, capabilities, Safe
    V8, Full Node, nested calls, HTTPS, scheduling, and failure semantics.
 5. [Application file storage](functions/file-storage.md): Action APIs, streamed HTTP transfer,
@@ -94,6 +96,8 @@ reading order because it records the product invariants and definition of done.
   runtime/management paths, consistency, scaling, and failure containment.
 - [Environment lifecycle](concepts/environment-lifecycle.md): revisioned desired/observed state,
   idempotency, repository conformance, recovery, and current composition limit.
+- [Serving policy](concepts/serving-policy.md): weighted Release intent, canonical compatibility
+  evidence, desired/observed state, audit, recovery, and deferred runtime selection.
 - [Repository map](internals/repository-map.md): crate ownership, dependency direction, tests,
   generated artifacts, and where to implement a change.
 - [Evolving Runku](development/evolving-runku.md): contract classification, versioning, migrations,

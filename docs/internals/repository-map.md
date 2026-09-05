@@ -27,6 +27,8 @@ Pure crates must not depend on SQL, HTTP, runtime, filesystem, or deployment fra
 |---|---|
 | `runku-releases` | Canonical manifests, artifacts, runtime descriptors, lifecycle values |
 | `runku-release-repository` | Durable Release/Channel repository and adapters |
+| `runku-serving` | Environment-wide weighted serving policy, canonical Release compatibility evidence, desired/observed lifecycle, operation and audit contracts |
+| `runku-serving-repository` | Checksum-migrated SQLite/PostgreSQL serving-policy, operation-journal, and audit adapters |
 | `runku-artifact-s3` | S3-compatible immutable artifact store |
 | `runku-file-storage` | Environment-scoped file metadata, quotas, transfer grants, filesystem/S3 object adapters |
 | `runku-compatibility` | Contract/schema/runtime compatibility reports |

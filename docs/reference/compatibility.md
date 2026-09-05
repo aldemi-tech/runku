@@ -96,6 +96,14 @@ change a wire protocol. Migrations are ordered and checksum-protected. The repos
 attached to the compact server or Management API, so adopting it in another composition requires a
 coordinated backup and rollback decision for that composition.
 
+The standalone serving-policy registry is another compatible additive source-line capability. Its
+schema v1 adds only namespaced policy, weighted-Release, operation, audit, and migration tables.
+Each policy stores canonical schema, logical-index, and Cron-declaration hashes derived from
+validated Release Manifest v1 values. Multiple Releases fail closed unless all three hashes are
+byte-identical. The registry is not attached to Channel/request routing; a future composition must
+define runtime selection, `EnvironmentDefault`, the effective write contract, mixed-version
+behavior, and coordinated backup/rollback before it changes traffic.
+
 ## Change rules
 
 Additive fields require old/new reader tests and safe defaults. Auth, retry, ordering, limits,

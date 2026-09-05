@@ -1,0 +1,26 @@
+[package]
+name = "runku-serving-repository"
+version = "0.1.0"
+description = "Durable SQLite/PostgreSQL weighted serving policy adapters for Runku"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+runku-core = { path = "../runku-core" }
+runku-releases = { path = "../runku-releases" }
+runku-serving = { path = "../runku-serving" }
+runku-value = { path = "../runku-value" }
+sha2.workspace = true
+sqlx = { workspace = true, features = ["any", "postgres", "sqlite-bundled", "runtime-tokio", "tls-rustls"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+ulid.workspace = true
+
+[lints]
+workspace = true

@@ -18,6 +18,10 @@ and digest.
 Promotion changes a Channel pointer after compatibility and readiness checks. Rollback selects a
 previous immutable Release; it does not rebuild source.
 
+The source line also includes a standalone [weighted serving-policy registry](../concepts/serving-policy.md).
+It records atomic/gradual desired intent and observations but is not yet connected to Channel or
+request routing. Therefore it must not be described as changing live traffic.
+
 ## Shared data
 
 Workspaces and Releases in one Environment intentionally operate over the same data. This supports

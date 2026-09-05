@@ -27,6 +27,10 @@ A Channel is a mutable pointer to a Release. It provides controlled promotion an
 rebuilding artifacts. The resolved Release is pinned for the duration of a request, subscription,
 or scheduled invocation.
 
+The standalone [serving-policy registry](serving-policy.md) models an Environment-wide atomic or
+weighted desired Release set. It does not yet replace Channel resolution or select a Release for a
+request; that integration must preserve exact request and durable-work pinning.
+
 ## Workspace and Dev Revision
 
 A Workspace is a mutable development target. Each accepted source snapshot produces an immutable

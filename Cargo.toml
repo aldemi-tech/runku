@@ -37,6 +37,8 @@ members = [
     "crates/runku-realtime",
     "crates/runku-runtime",
     "crates/runku-schema",
+    "crates/runku-serving",
+    "crates/runku-serving-repository",
     "crates/runku-value",
 ]
 resolver = "3"
