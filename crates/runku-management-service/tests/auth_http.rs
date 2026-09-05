@@ -16,9 +16,9 @@ use axum::{
 };
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
-    ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementDataDocument,
-    ManagementDataInsertRequest, ManagementDataWriteResult, ManagementHttpConfig,
-    ManagementHttpExposure, ManagementLogArchiveStatus, ManagementLogPage,
+    ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementApplicationClientList,
+    ManagementDataDocument, ManagementDataInsertRequest, ManagementDataWriteResult,
+    ManagementHttpConfig, ManagementHttpExposure, ManagementLogArchiveStatus, ManagementLogPage,
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
     ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
     ManagementWorkspacePublish, OidcClientConfiguration, build_management_router,
@@ -52,6 +52,7 @@ struct DataProbeProduct {
     scope: EnvironmentScope,
     reads: AtomicUsize,
     writes: AtomicUsize,
+    credential_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -62,6 +63,17 @@ impl ManagementProduct for DataProbeProduct {
 
     async fn health(&self) -> Result<(), ManagementProductError> {
         Ok(())
+    }
+
+    async fn application_clients(
+        &self,
+    ) -> Result<ManagementApplicationClientList, ManagementProductError> {
+        self.credential_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementApplicationClientList {
+            version: 1,
+            configuration_revision: 1,
+            clients: Vec::new(),
+        })
     }
 
     async fn publish(
@@ -580,10 +592,28 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
             TimestampMicros::new(1_900_000_000_000_001),
         )
         .await?;
+    let credential_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "credential-reader".to_owned(),
+            },
+            OperatorName::from_str("Credential reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::CredentialsRead]),
+            }],
+            DeviceName::from_str("credential reader device")?,
+            TimestampMicros::new(1_900_000_000_000_002),
+        )
+        .await?;
     let product = Arc::new(DataProbeProduct {
         scope,
         reads: AtomicUsize::new(0),
         writes: AtomicUsize::new(0),
+        credential_reads: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -605,6 +635,11 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
     );
     let insert_path = format!(
         "/v1/projects/{}/environments/{}/data/documents/notes",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let credential_path = format!(
+        "/v1/projects/{}/environments/{}/application-clients",
         scope.project_id(),
         scope.environment_id()
     );
@@ -632,6 +667,16 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(product.reads.load(Ordering::SeqCst), 0);
     assert_eq!(product.writes.load(Ordering::SeqCst), 0);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&credential_path)
+                .header(header::AUTHORIZATION, format!("Bearer {manager_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.credential_reads.load(Ordering::SeqCst), 0);
 
     let reader_access = data_reader.login.access_token.expose();
     let response = router
@@ -644,9 +689,20 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(product.reads.load(Ordering::SeqCst), 1);
-    let response = router.oneshot(insert(reader_access)?).await?;
+    let response = router.clone().oneshot(insert(reader_access)?).await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(product.writes.load(Ordering::SeqCst), 0);
+
+    let credential_access = credential_reader.login.access_token.expose();
+    let response = router
+        .oneshot(
+            Request::get(&credential_path)
+                .header(header::AUTHORIZATION, format!("Bearer {credential_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.credential_reads.load(Ordering::SeqCst), 1);
 
     repository.close().await;
     Ok(())
