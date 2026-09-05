@@ -31,7 +31,7 @@ use runku_environments::{
 };
 use runku_execution::{document_write_set_payload, plan_document_index_mutations};
 use runku_file_storage::{FileObjectStore, FileStorageLimits, FileUsageSink};
-use runku_gateway::CorsOrigin;
+use runku_gateway::{CorsOrigin, EnvironmentServingPercentile, EnvironmentServingResolver};
 use runku_identity::{
     ApplicationClient, ApplicationClientName, ApplicationClientStatus, ApplicationScope,
     ClientKind, CredentialKind, CredentialLabel, CredentialLifecycleResult, CredentialStatus,
@@ -82,8 +82,9 @@ use runku_observability::{
 };
 use runku_protocol::{WireValueV1, decode_development_publish_request_v1};
 use runku_releases::{
-    ArtifactFormat, AuthPolicy, Capability, FunctionType, FunctionVisibility, RuntimeClass,
-    Sha256Digest, decode_node_esm_bundle, decode_safe_esm_bundle, encode_release_manifest,
+    ArtifactFormat, AuthPolicy, Capability, FunctionType, FunctionVisibility, ReleaseError,
+    RuntimeClass, Sha256Digest, decode_node_esm_bundle, decode_safe_esm_bundle,
+    encode_release_manifest,
 };
 use runku_schema::{SchemaCatalog, decode_schema_catalog};
 use runku_serving::{
@@ -111,6 +112,38 @@ pub struct ProductAdapter {
     cron_context: CronContext,
     serving: ServingPolicyService,
     storage: ObjectStorageService,
+}
+
+#[derive(Clone, Debug)]
+struct ProductEnvironmentServingResolver {
+    scope: EnvironmentScope,
+    service: ServingPolicyService,
+}
+
+#[async_trait]
+impl EnvironmentServingResolver for ProductEnvironmentServingResolver {
+    async fn resolve(
+        &self,
+        scope: EnvironmentScope,
+        percentile: EnvironmentServingPercentile,
+    ) -> Result<ReleaseId, ReleaseError> {
+        if scope != self.scope {
+            return Err(ReleaseError::InvalidSnapshot);
+        }
+        let record = self
+            .service
+            .get(scope)
+            .await
+            .map_err(map_serving_to_release)?
+            .ok_or(ReleaseError::EnvironmentServingPolicyMissing)?;
+        if !record.is_converged() {
+            return Err(ReleaseError::EnvironmentServingPolicyNotReady);
+        }
+        record
+            .desired_policy
+            .select_percentile(percentile.get())
+            .map_err(map_serving_to_release)
+    }
 }
 
 /// Validated server-owned configuration for one Product adapter.
@@ -201,6 +234,12 @@ impl ProductAdapter {
         let storage_digest_key = derive_local_object_storage_digest_key(&root)
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let serving = ServingPolicyService::new(Arc::new(serving_repository));
+        let environment_serving_resolver: Arc<dyn EnvironmentServingResolver> =
+            Arc::new(ProductEnvironmentServingResolver {
+                scope: state.scope(),
+                service: serving.clone(),
+            });
         let adapter = Self {
             root,
             scope: state.scope(),
@@ -211,6 +250,7 @@ impl ProductAdapter {
                 auth_config: config.auth_config,
                 file_object_store: config.file_object_store,
                 data_store: Some(Arc::clone(&data_store)),
+                environment_serving_resolver: Some(environment_serving_resolver),
                 file_storage_limits: config.file_storage_limits,
                 file_usage_sink: config.file_usage_sink,
                 file_usage_interval: config.file_usage_interval,
@@ -222,7 +262,7 @@ impl ProductAdapter {
             environments: EnvironmentService::new(Arc::new(environment_repository)),
             cron: Arc::new(cron_repository),
             cron_context,
-            serving: ServingPolicyService::new(Arc::new(serving_repository)),
+            serving,
             storage: ObjectStorageService::new(
                 Arc::new(storage_repository),
                 SecretDigestKey::new(storage_digest_key),
@@ -279,10 +319,30 @@ impl ProductAdapter {
         let target = requested
             .parse::<CodeTarget>()
             .map_err(|_| ManagementProductError::Invalid)?;
+        let resolution_target = if target == CodeTarget::EnvironmentDefault {
+            let record = self
+                .serving
+                .get(self.scope)
+                .await
+                .map_err(map_serving)?
+                .filter(ServingPolicyRecord::is_converged)
+                .ok_or(ManagementProductError::Unavailable)?;
+            CodeTarget::Release(
+                record
+                    .desired_policy
+                    .select_percentile(0)
+                    .map_err(map_serving)?,
+            )
+        } else {
+            target.clone()
+        };
         let manager = LocalReleaseManager::open(&self.root)
             .await
             .map_err(map_release)?;
-        let resolution = manager.resolve_code(&target).await.map_err(map_release)?;
+        let resolution = manager
+            .resolve_code(&resolution_target)
+            .await
+            .map_err(map_release)?;
         decode_effective_catalog(&target, resolution)
     }
 
@@ -943,15 +1003,41 @@ impl ManagementProduct for ProductAdapter {
             )
             .await
             .map_err(map_serving)?;
-        let record = self
+        let pending = self
             .serving
             .get(self.scope)
             .await
             .map_err(map_serving)?
             .ok_or(ManagementProductError::Corruption)?;
-        if record.policy_revision != result.operation.policy_revision {
+        if pending.policy_revision != result.operation.policy_revision {
             return Err(ManagementProductError::Corruption);
         }
+        if !pending.is_converged() {
+            match self
+                .serving
+                .materialize(
+                    self.scope,
+                    OperationId::generate(),
+                    result.operation.policy_revision,
+                    runku_serving::ServingMaterializationOutcome::Ready,
+                    changed_at,
+                )
+                .await
+            {
+                Ok(_) | Err(ServingPolicyError::Conflict | ServingPolicyError::ResultUncertain) => {
+                }
+                Err(error) => return Err(map_serving(error)),
+            }
+        }
+        let record = self
+            .serving
+            .get(self.scope)
+            .await
+            .map_err(map_serving)?
+            .filter(|record| {
+                record.policy_revision == result.operation.policy_revision && record.is_converged()
+            })
+            .ok_or(ManagementProductError::ResultUncertain)?;
         Ok(ManagementServingPolicyResult {
             policy: management_serving_policy(&record),
             operation_id: result.operation.operation_id.to_string(),
@@ -2682,6 +2768,25 @@ const fn map_serving(error: ServingPolicyError) -> ManagementProductError {
     }
 }
 
+const fn map_serving_to_release(error: ServingPolicyError) -> ReleaseError {
+    match error {
+        ServingPolicyError::Busy => ReleaseError::Busy,
+        ServingPolicyError::Unavailable | ServingPolicyError::ResultUncertain => {
+            ReleaseError::Unavailable
+        }
+        ServingPolicyError::LimitExceeded => ReleaseError::LimitExceeded,
+        ServingPolicyError::NotFound => ReleaseError::EnvironmentServingPolicyMissing,
+        ServingPolicyError::InvalidInput
+        | ServingPolicyError::IncompatibleContracts
+        | ServingPolicyError::Conflict
+        | ServingPolicyError::OperationIdReused
+        | ServingPolicyError::Corruption
+        | ServingPolicyError::Unsupported
+        | ServingPolicyError::ProductionBackendUnsupported
+        | ServingPolicyError::Internal => ReleaseError::Corruption,
+    }
+}
+
 const fn map_environment(error: EnvironmentError) -> ManagementProductError {
     match error {
         EnvironmentError::InvalidInput | EnvironmentError::LimitExceeded => {
@@ -3401,7 +3506,7 @@ export const hourly = cron({
             expected_revision: None,
             mode: "atomic".to_owned(),
             releases: vec![ManagementServingRelease {
-                release_id,
+                release_id: release_id.clone(),
                 weight_percent: 100,
             }],
             changed_at_micros: "1800000000000100".to_owned(),
@@ -3412,9 +3517,32 @@ export const hourly = cron({
             .serving_policy_set(operation_id, actor, &request)
             .await?;
         assert_eq!(first.policy.policy_revision, 1);
-        assert_eq!(first.policy.observed_state, "pending");
-        assert!(!first.policy.converged);
+        assert_eq!(first.policy.observed_state, "ready");
+        assert!(first.policy.converged);
         assert!(!first.replayed);
+        assert_eq!(
+            product
+                .process_config
+                .environment_serving_resolver
+                .as_ref()
+                .ok_or("missing Environment serving resolver")?
+                .resolve(
+                    product.scope,
+                    EnvironmentServingPercentile::from_operation(operation_id),
+                )
+                .await?
+                .to_string(),
+            first.policy.releases[0].release_id
+        );
+        let catalog = product
+            .functions(&ManagementCatalogQuery {
+                target: "environment:default".to_owned(),
+                after: None,
+                limit: 10,
+            })
+            .await?;
+        assert_eq!(catalog.target.requested, "environment:default");
+        assert_eq!(catalog.target.resolved, format!("release:{}", release_id));
         let replay = product
             .serving_policy_set(operation_id, actor, &request)
             .await?;

@@ -62,6 +62,12 @@ pub enum ReleaseError {
     /// No default Channel is configured for an explicitly defaulted route.
     #[error("default channel is not configured")]
     DefaultChannelMissing,
+    /// No Environment serving policy is configured for the default target.
+    #[error("environment serving policy is not configured")]
+    EnvironmentServingPolicyMissing,
+    /// The configured Environment serving policy is not converged and cannot receive traffic.
+    #[error("environment serving policy is not ready")]
+    EnvironmentServingPolicyNotReady,
     /// Stable Release routing cannot resolve a Development Workspace.
     #[error("workspace target requires the development resolver")]
     WorkspaceUnsupported,
@@ -100,6 +106,8 @@ impl ReleaseError {
             Self::ReleaseRetired => "RELEASE_RETIRED",
             Self::ChannelNotFound => "CHANNEL_NOT_FOUND",
             Self::DefaultChannelMissing => "DEFAULT_CHANNEL_MISSING",
+            Self::EnvironmentServingPolicyMissing => "ENVIRONMENT_SERVING_POLICY_MISSING",
+            Self::EnvironmentServingPolicyNotReady => "ENVIRONMENT_SERVING_POLICY_NOT_READY",
             Self::WorkspaceUnsupported => "WORKSPACE_ROUTER_UNSUPPORTED",
             Self::OperationIdReused => "RELEASE_OPERATION_ID_REUSED",
             Self::RepositoryConflict => "RELEASE_REPOSITORY_CONFLICT",
@@ -112,7 +120,11 @@ impl ReleaseError {
     pub const fn retryable(self) -> bool {
         matches!(
             self,
-            Self::Busy | Self::Unavailable | Self::RepositoryConflict | Self::ResultUncertain
+            Self::Busy
+                | Self::Unavailable
+                | Self::RepositoryConflict
+                | Self::ResultUncertain
+                | Self::EnvironmentServingPolicyNotReady
         )
     }
 }

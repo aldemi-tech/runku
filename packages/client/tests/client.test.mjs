@@ -292,6 +292,16 @@ test("Abort, response limits, malformed envelopes, and config fail closed", asyn
     target: "workspace:local",
     applicationKey: PUBLISHABLE_KEY,
   }));
+  assert.doesNotThrow(() => new RunkuClient({
+    baseUrl: "https://api.example",
+    target: "environment:default",
+    applicationKey: PUBLISHABLE_KEY,
+  }));
+  assert.throws(() => new RunkuClient({
+    baseUrl: "https://api.example",
+    target: "environment:stable",
+    applicationKey: PUBLISHABLE_KEY,
+  }));
   assert.throws(() => new RunkuClient({ baseUrl: "https://api.example", target: "latest" }));
   assert.throws(() => new RunkuClient({
     baseUrl: "https://api.example",

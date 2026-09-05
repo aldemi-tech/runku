@@ -23,9 +23,9 @@ No realtime notification is visible before commit.
 
 The authenticated Management API exposes a logical Data Admin boundary for an operator console;
 it never accepts SQL, physical table names, index bytes, or caller-supplied index mutations. Every
-request names an explicit `release:`, `channel:`, or `workspace:` code target. Runku resolves that
-target once, verifies the effective artifact, and uses its exact schema and logical indexes for the
-whole operation.
+request names `environment:default` or an explicit `release:`, `channel:`, or `workspace:` code
+target. Runku resolves that target once, verifies the effective artifact, and uses its exact schema
+and logical indexes for the whole operation.
 
 `data:read` authorizes exact document reads and bounded logical-index queries. `data:write`
 authorizes insert, replace, and delete. Neither capability is implied by `environments:manage`, and

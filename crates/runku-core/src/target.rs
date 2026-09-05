@@ -192,6 +192,8 @@ impl ParseChannelNameError {
 /// Selects the code to execute independently from the Environment that owns data.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CodeTarget {
+    /// The Environment's currently converged serving policy.
+    EnvironmentDefault,
     /// An immutable durable Release.
     Release(ReleaseId),
     /// An intentionally moving traffic Channel.
@@ -274,7 +276,10 @@ impl CodeTarget {
     /// Returns whether resolving this target requires reading a mutable pointer.
     #[must_use]
     pub const fn is_moving(&self) -> bool {
-        matches!(self, Self::Channel(_) | Self::Workspace(_))
+        matches!(
+            self,
+            Self::EnvironmentDefault | Self::Channel(_) | Self::Workspace(_)
+        )
     }
 
     /// Returns whether this target represents interactive development.
@@ -287,6 +292,7 @@ impl CodeTarget {
 impl fmt::Display for CodeTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EnvironmentDefault => formatter.write_str("environment:default"),
             Self::Release(release) => write!(formatter, "release:{release}"),
             Self::Channel(channel) => write!(formatter, "channel:{channel}"),
             Self::Workspace(workspace) => write!(formatter, "workspace:{workspace}"),
@@ -302,6 +308,8 @@ impl FromStr for CodeTarget {
             .split_once(':')
             .ok_or(ParseCodeTargetError::MissingKindSeparator)?;
         match kind {
+            "environment" if reference == "default" => Ok(Self::EnvironmentDefault),
+            "environment" => Err(ParseCodeTargetError::InvalidEnvironment),
             "release" => reference
                 .parse()
                 .map(Self::Release)
@@ -347,6 +355,9 @@ pub enum ParseCodeTargetError {
     /// The target kind is not part of the closed protocol union.
     #[error("code target kind is unsupported")]
     UnknownKind,
+    /// The Environment target is not the canonical `environment:default` selector.
+    #[error("environment target must be 'environment:default'")]
+    InvalidEnvironment,
     /// The Release identifier is invalid.
     #[error("release target is invalid: {0}")]
     InvalidRelease(ParseResourceIdError),
@@ -365,6 +376,7 @@ impl ParseCodeTargetError {
         match self {
             Self::MissingKindSeparator => "CODE_TARGET_FORMAT_INVALID",
             Self::UnknownKind => "CODE_TARGET_KIND_UNSUPPORTED",
+            Self::InvalidEnvironment => "CODE_TARGET_ENVIRONMENT_INVALID",
             Self::InvalidRelease(_) => "CODE_TARGET_RELEASE_INVALID",
             Self::InvalidChannel(_) => "CODE_TARGET_CHANNEL_INVALID",
             Self::InvalidWorkspace(_) => "CODE_TARGET_WORKSPACE_INVALID",
@@ -435,6 +447,7 @@ mod tests {
     #[test]
     fn every_target_round_trips() -> Result<(), Box<dyn Error>> {
         for wire in [
+            "environment:default".to_owned(),
             format!("release:{RELEASE}"),
             "channel:stable".to_owned(),
             "workspace:dev/manuel/bug-241".to_owned(),
@@ -534,6 +547,11 @@ mod tests {
                 "unknown:value",
                 ParseCodeTargetError::UnknownKind,
                 "CODE_TARGET_KIND_UNSUPPORTED",
+            ),
+            (
+                "environment:stable",
+                ParseCodeTargetError::InvalidEnvironment,
+                "CODE_TARGET_ENVIRONMENT_INVALID",
             ),
             (
                 "channel:Stable",

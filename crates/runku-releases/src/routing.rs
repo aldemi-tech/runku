@@ -335,6 +335,9 @@ impl ReleaseRouter {
     /// Returns stable not-found/servable/retired/workspace errors.
     pub fn resolve(&self, target: &CodeTarget) -> Result<EffectiveRelease, ReleaseError> {
         let release_id = match target {
+            CodeTarget::EnvironmentDefault => {
+                return Err(ReleaseError::EnvironmentServingPolicyMissing);
+            }
             CodeTarget::Release(release_id) => *release_id,
             CodeTarget::Channel(channel) => *self
                 .snapshot

@@ -18,9 +18,10 @@ pub use router::{
     build_router_with_realtime_and_files, serve,
 };
 pub use service::{
-    ArtifactCacheTelemetrySnapshot, DevelopmentCatalog, GatewayClock, PrincipalVerificationError,
-    PrincipalVerifier, ProductInvocationConfig, ProductInvocationService, ServingCatalog,
-    ServingRefresh, SystemGatewayClock,
+    ArtifactCacheTelemetrySnapshot, DevelopmentCatalog, EnvironmentServingPercentile,
+    EnvironmentServingResolver, GatewayClock, PrincipalVerificationError, PrincipalVerifier,
+    ProductInvocationConfig, ProductInvocationService, ServingCatalog, ServingRefresh,
+    SystemGatewayClock,
 };
 pub use websocket::{
     REALTIME_SUBPROTOCOL, RealtimeGateway, RealtimeGatewayConfig, RealtimeGatewayTelemetrySnapshot,

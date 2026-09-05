@@ -99,6 +99,12 @@ Management binaries that recognize the same catalog. The post-0.4.5 source line 
 durable disabled-definition intent. After that migration, an older binary must not serve the same
 Cron repository. Declaration editing and Scheduled retry/cancel remain outside this contract.
 
+The post-0.4.5 Code Target grammar adds the exact `environment:default` value. Older SDKs reject it
+locally and older gateways reject it during decoding; explicit `release:`, `channel:`, and
+`workspace:` targets are unchanged. A default target is serveable only with an exactly converged
+weighted policy. Mutation routing is derived from `OperationId`, so the same logical retry cannot
+select a different Release.
+
 Version 0.4.4 gives the two PostgreSQL roles unambiguous canonical configuration names:
 `RUNKU_IDENTITY_DATABASE_URL` for Platform Identity and `RUNKU_PLATFORM_DATABASE_URL` for Function
 platform data. Their `_FILE` forms contain a path to the same secret, not another connection.

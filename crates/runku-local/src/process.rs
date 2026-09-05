@@ -31,10 +31,10 @@ use runku_execution::{
 };
 use runku_file_storage::{FileObjectStore, FileStorageLimits, FileStorageService, FileUsageSink};
 use runku_gateway::{
-    CorsOrigin, DevelopmentCatalog, GatewayClock, GatewayHttpConfig, PrincipalVerificationError,
-    PrincipalVerifier, ProductInvocationConfig, ProductInvocationService, RealtimeGateway,
-    RealtimeGatewayConfig, ServingCatalog, SystemGatewayClock,
-    build_router_with_realtime_and_files,
+    CorsOrigin, DevelopmentCatalog, EnvironmentServingResolver, GatewayClock, GatewayHttpConfig,
+    PrincipalVerificationError, PrincipalVerifier, ProductInvocationConfig,
+    ProductInvocationService, RealtimeGateway, RealtimeGatewayConfig, ServingCatalog,
+    SystemGatewayClock, build_router_with_realtime_and_files,
 };
 use runku_identity::{ApplicationCredentialResolver, KeyringCrypto, PrincipalEvidence};
 use runku_identity_provider::JwtProviderManager;
@@ -87,6 +87,8 @@ pub struct LocalProcessConfig {
     /// Networked server profiles use this boundary to inject a scope-bound PostgreSQL adapter
     /// without changing Function or lifecycle semantics.
     pub data_store: Option<Arc<dyn LogicalStore>>,
+    /// Optional Environment default-policy resolver for production-style traffic selection.
+    pub environment_serving_resolver: Option<Arc<dyn EnvironmentServingResolver>>,
     /// Environment, per-file, Action-memory, concurrency, and grant limits.
     pub file_storage_limits: FileStorageLimits,
     /// Optional at-least-once sink for authoritative application-file usage events.
@@ -109,6 +111,7 @@ impl Default for LocalProcessConfig {
             log_journal: None,
             file_object_store: None,
             data_store: None,
+            environment_serving_resolver: None,
             file_storage_limits: FileStorageLimits::DEFAULT,
             file_usage_sink: None,
             file_usage_interval: Duration::from_secs(5),
@@ -132,6 +135,13 @@ impl fmt::Debug for LocalProcessConfig {
             .field(
                 "data_store_backend",
                 &self.data_store.as_ref().map(|store| store.backend()),
+            )
+            .field(
+                "environment_serving_resolver",
+                &self
+                    .environment_serving_resolver
+                    .as_ref()
+                    .map(|_| "configured"),
             )
             .field("file_storage_limits", &self.file_storage_limits)
             .field(
@@ -564,32 +574,34 @@ impl LocalProcess {
             )
             .map_err(|_| LocalProcessError::InvalidConfiguration)?,
         );
-        let service = Arc::new(
-            ProductInvocationService::new(
-                ProductInvocationConfig {
-                    scope: state.scope(),
-                    execution_timeout: Duration::from_secs(30),
-                    max_cached_artifact_bytes: 256 * 1024 * 1024,
-                },
-                Arc::clone(&serving),
-                Arc::clone(&release_boundary),
-                artifact_boundary,
-                identity_boundary,
-                crypto,
-                principals,
-                clock,
-                query,
-                mutation,
-                action,
-                None,
-            )
-            .map_err(|_| LocalProcessError::Composition)?
-            .with_full_node_runtime(local_node)
-            .with_file_storage(files.clone())
-            .with_development_catalog(Arc::clone(&development_catalog))
-            .map_err(|_| LocalProcessError::Composition)?
-            .with_operational_logs(log_boundary),
-        );
+        let mut service = ProductInvocationService::new(
+            ProductInvocationConfig {
+                scope: state.scope(),
+                execution_timeout: Duration::from_secs(30),
+                max_cached_artifact_bytes: 256 * 1024 * 1024,
+            },
+            Arc::clone(&serving),
+            Arc::clone(&release_boundary),
+            artifact_boundary,
+            identity_boundary,
+            crypto,
+            principals,
+            clock,
+            query,
+            mutation,
+            action,
+            None,
+        )
+        .map_err(|_| LocalProcessError::Composition)?
+        .with_full_node_runtime(local_node)
+        .with_file_storage(files.clone())
+        .with_development_catalog(Arc::clone(&development_catalog))
+        .map_err(|_| LocalProcessError::Composition)?
+        .with_operational_logs(log_boundary);
+        if let Some(resolver) = config.environment_serving_resolver.clone() {
+            service = service.with_environment_serving_resolver(resolver);
+        }
+        let service = Arc::new(service);
         let registry = SubscriptionRegistry::new(RegistryConfig::PRODUCTION)
             .map_err(|_| LocalProcessError::Composition)?;
         let realtime = RealtimeGateway::new(

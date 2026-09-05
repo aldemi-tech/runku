@@ -6,7 +6,7 @@ const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345678
 const textEncoder = new TextEncoder();
 const ULID_PATTERN = "[0-7][0-9A-HJKMNP-TV-Z]{25}";
 
-export type CodeTarget = `release:rel_${string}` | `channel:${string}` | `workspace:${string}`;
+export type CodeTarget = "environment:default" | `release:rel_${string}` | `channel:${string}` | `workspace:${string}`;
 
 export class RunkuTimestamp {
   readonly micros: bigint;
@@ -1317,12 +1317,15 @@ function validateBaseUrl(input: string): string {
 
 function validateTarget(input: CodeTarget): CodeTarget {
   const bytes = textEncoder.encode(input).byteLength;
+  const validEnvironment = input === "environment:default";
   const validRelease = new RegExp(`^release:rel_${ULID_PATTERN}$`).test(input);
   const validChannel = /^channel:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(input) && bytes <= 71;
   const workspace = input.startsWith("workspace:") ? input.slice(10) : "";
   const validWorkspace = workspace.length > 0 && textEncoder.encode(workspace).byteLength <= 100
     && workspace.split("/").every((part) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(part));
-  if (!validRelease && !validChannel && !validWorkspace) throw new TypeError("target is not canonical");
+  if (!validEnvironment && !validRelease && !validChannel && !validWorkspace) {
+    throw new TypeError("target is not canonical");
+  }
   return input;
 }
 

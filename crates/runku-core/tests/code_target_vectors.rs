@@ -29,6 +29,7 @@ fn code_target_golden_vectors_match_protocol_v1() -> Result<(), Box<dyn Error>> 
         let target = CodeTarget::from_str(&vector.wire)?;
         assert_eq!(target.to_string(), vector.wire);
         let actual_kind = match target {
+            CodeTarget::EnvironmentDefault => "environment",
             CodeTarget::Release(_) => "release",
             CodeTarget::Channel(_) => "channel",
             CodeTarget::Workspace(_) => "workspace",

@@ -380,6 +380,7 @@ impl LocalReleaseManager {
         target: &CodeTarget,
     ) -> Result<LocalCodeResolution, LocalReleaseError> {
         let (serving_revision, pinned_code, manifest) = match target {
+            CodeTarget::EnvironmentDefault => return Err(LocalReleaseError::InvalidRequest),
             CodeTarget::Release(_) | CodeTarget::Channel(_) => {
                 let snapshot = self.snapshot().await?;
                 let effective = ReleaseRouter::new(snapshot)
@@ -742,15 +743,17 @@ fn operation_from_digest(digest: [u8; 32]) -> OperationId {
 
 fn map_repository(error: ReleaseError) -> LocalReleaseError {
     match error {
-        ReleaseError::ReleaseNotFound | ReleaseError::ChannelNotFound | ReleaseError::NotFound => {
-            LocalReleaseError::NotFound
-        }
+        ReleaseError::ReleaseNotFound
+        | ReleaseError::ChannelNotFound
+        | ReleaseError::EnvironmentServingPolicyMissing
+        | ReleaseError::NotFound => LocalReleaseError::NotFound,
         ReleaseError::RepositoryConflict
         | ReleaseError::OperationIdReused
         | ReleaseError::InvalidTransition => LocalReleaseError::Conflict,
-        ReleaseError::Unavailable | ReleaseError::ResultUncertain | ReleaseError::Busy => {
-            LocalReleaseError::Unavailable
-        }
+        ReleaseError::Unavailable
+        | ReleaseError::ResultUncertain
+        | ReleaseError::Busy
+        | ReleaseError::EnvironmentServingPolicyNotReady => LocalReleaseError::Unavailable,
         ReleaseError::Corruption | ReleaseError::InvalidSnapshot => LocalReleaseError::Corruption,
         ReleaseError::InvalidManifest
         | ReleaseError::InvalidArtifact

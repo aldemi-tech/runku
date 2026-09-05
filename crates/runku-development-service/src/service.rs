@@ -961,11 +961,14 @@ fn map_release(error: ReleaseError) -> DevelopmentServiceError {
         ReleaseError::NotFound
         | ReleaseError::ReleaseNotFound
         | ReleaseError::ChannelNotFound
-        | ReleaseError::DefaultChannelMissing => DevelopmentServiceError::NotFound,
+        | ReleaseError::DefaultChannelMissing
+        | ReleaseError::EnvironmentServingPolicyMissing => DevelopmentServiceError::NotFound,
         ReleaseError::OperationIdReused | ReleaseError::RepositoryConflict => {
             DevelopmentServiceError::Conflict
         }
-        ReleaseError::Busy | ReleaseError::Unavailable => DevelopmentServiceError::Unavailable,
+        ReleaseError::Busy
+        | ReleaseError::Unavailable
+        | ReleaseError::EnvironmentServingPolicyNotReady => DevelopmentServiceError::Unavailable,
         ReleaseError::ResultUncertain => DevelopmentServiceError::ResultUncertain,
         ReleaseError::Corruption | ReleaseError::InvalidSnapshot => {
             DevelopmentServiceError::Corruption

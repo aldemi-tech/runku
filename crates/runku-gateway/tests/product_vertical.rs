@@ -35,9 +35,10 @@ use runku_execution_queue::{
     InMemoryExecutionControlPlane, InMemoryExecutionQueue,
 };
 use runku_gateway::{
-    DevelopmentCatalog, GatewayClock, GatewayHttpConfig, PrincipalVerificationError,
-    PrincipalVerifier, ProductInvocationConfig, ProductInvocationService, RealtimeGateway,
-    RealtimeGatewayConfig, ServingCatalog, build_router, build_router_with_realtime, serve,
+    DevelopmentCatalog, EnvironmentServingPercentile, EnvironmentServingResolver, GatewayClock,
+    GatewayHttpConfig, PrincipalVerificationError, PrincipalVerifier, ProductInvocationConfig,
+    ProductInvocationService, RealtimeGateway, RealtimeGatewayConfig, ServingCatalog, build_router,
+    build_router_with_realtime, serve,
 };
 use runku_identity::{
     ApplicationClient, ApplicationClientStatus, ApplicationCredential,
@@ -106,6 +107,26 @@ struct FixedSchedulerClock;
 impl SchedulerClock for FixedSchedulerClock {
     fn now(&self) -> Result<TimestampMicros, ScheduledWorkerError> {
         Ok(TimestampMicros::new(NOW + 1))
+    }
+}
+
+#[derive(Debug)]
+struct FixedEnvironmentServingResolver {
+    scope: EnvironmentScope,
+    release_id: ReleaseId,
+}
+
+#[async_trait]
+impl EnvironmentServingResolver for FixedEnvironmentServingResolver {
+    async fn resolve(
+        &self,
+        scope: EnvironmentScope,
+        _percentile: EnvironmentServingPercentile,
+    ) -> Result<ReleaseId, runku_releases::ReleaseError> {
+        if scope != self.scope {
+            return Err(runku_releases::ReleaseError::InvalidSnapshot);
+        }
+        Ok(self.release_id)
     }
 }
 
@@ -544,6 +565,31 @@ async fn serving_catalog_refresh_is_explicit_and_monotonic() -> Result<(), Box<d
         system.catalog.refresh().await?,
         runku_gateway::ServingRefresh::Unchanged { revision: 7 }
     ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environment_default_resolves_one_explicit_release_before_execution()
+-> Result<(), Box<dyn Error>> {
+    let system = setup().await?;
+    let call = QueryCallV1 {
+        target: CodeTarget::EnvironmentDefault,
+        function: "queries.me".parse()?,
+        arguments: CanonicalValue::Null,
+    };
+    let mut request = json_post("/v1/query", encode_query_call_v1(&call)?)?;
+    request
+        .headers_mut()
+        .insert(header::AUTHORIZATION, "Bearer valid-user-token".parse()?);
+    request
+        .headers_mut()
+        .insert("x-runku-key", system.service_key.parse()?);
+    let response = system.router.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        decode_success_v1(&response_body(response).await?)?.release_id,
+        system.release_id
+    );
     Ok(())
 }
 
@@ -1836,7 +1882,11 @@ async fn setup() -> Result<TestSystem, Box<dyn Error>> {
         .map_err(|_| TestFailure("product invocation composition failed"))?
         .with_full_node_runtime(Arc::new(queued_node))
         .with_development_catalog(Arc::clone(&development_catalog))
-        .map_err(|_| TestFailure("development catalog composition failed"))?,
+        .map_err(|_| TestFailure("development catalog composition failed"))?
+        .with_environment_serving_resolver(Arc::new(FixedEnvironmentServingResolver {
+            scope,
+            release_id,
+        })),
     );
     let router = build_router(
         GatewayHttpConfig {

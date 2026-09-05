@@ -518,7 +518,7 @@ plus Runku's stricter verifier rules above.
 | `GET .../environments/{environment}` and `GET .../environment-operations/{opn_*}` | `environments:read` | reads portable desired/observed configuration or reconciles an uncertain lifecycle operation |
 | `POST` or `PUT .../environments/{environment}` | `environments:manage` + `Idempotency-Key: opn_*` | creates the exact configured scope or replaces its complete configuration using CAS |
 | `GET .../serving-policy` and `GET .../serving-policy-operations/{opn_*}` | `releases:read` | reads desired/observed rollout state or reconciles an uncertain operation |
-| `PUT .../serving-policy` | `channels:promote` + `Idempotency-Key: opn_*` | replaces the complete compatible desired policy using exact CAS; remains pending until serving-path materialization |
+| `PUT .../serving-policy` | `channels:promote` + `Idempotency-Key: opn_*` | replaces the complete compatible desired policy using exact CAS and materializes it for `environment:default` serving |
 | `GET .../application-clients` and credential lists/reveal | `credentials:read` | reads non-secret identity metadata or re-derives a verified publishable key |
 | Application Client/credential create, rotate, revoke, and delete routes | `credentials:manage` | manages exact-scope Product credentials; confidential material is returned once |
 | Bucket/key lists, bucket get, and storage-operation lookup | `storage:read` | reads provider-independent logical storage metadata only |

@@ -240,6 +240,28 @@ impl ServingPolicy {
         &self.releases
     }
 
+    /// Selects exactly one Release for a deterministic percentile in `0..100`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an out-of-range percentile or corrupt policy weights.
+    pub fn select_percentile(&self, percentile: u8) -> Result<ReleaseId, ServingPolicyError> {
+        self.validate()?;
+        if percentile >= 100 {
+            return Err(ServingPolicyError::InvalidInput);
+        }
+        let mut upper = 0_u16;
+        for release in &self.releases {
+            upper = upper
+                .checked_add(u16::from(release.weight_percent))
+                .ok_or(ServingPolicyError::LimitExceeded)?;
+            if u16::from(percentile) < upper {
+                return Ok(release.release_id);
+            }
+        }
+        Err(ServingPolicyError::Corruption)
+    }
+
     /// Canonical digest of the complete desired policy and compatibility evidence.
     #[must_use]
     pub fn digest(&self) -> Sha256Digest {
@@ -1030,6 +1052,14 @@ mod tests {
         )?;
         assert_eq!(left, right);
         assert_eq!(left.digest(), right.digest());
+        assert_eq!(left.select_percentile(0)?, first.release_id);
+        assert_eq!(left.select_percentile(39)?, first.release_id);
+        assert_eq!(left.select_percentile(40)?, second.release_id);
+        assert_eq!(left.select_percentile(99)?, second.release_id);
+        assert_eq!(
+            left.select_percentile(100),
+            Err(ServingPolicyError::InvalidInput)
+        );
         Ok(())
     }
 

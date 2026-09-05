@@ -1,9 +1,9 @@
 # Weighted serving policy
 
 An Environment may need an atomic Release cutover or a controlled gradual rollout without making
-provider placement part of Product semantics. The standalone serving-policy registry records that
-desired intent, its serving-path observation, idempotent operation results, and an immutable audit
-trail. It does not route requests in the current source line.
+provider placement part of Product semantics. The serving-policy registry records desired intent,
+its serving-path observation, idempotent operation results, and an immutable audit trail. The
+Product gateway consumes a converged policy through the explicit `environment:default` code target.
 
 ## Current status and boundary
 
@@ -17,16 +17,18 @@ The following provider-independent library behavior is implemented and test-cove
 - exact policy reads, trusted materializer observations, uncertain-operation lookup, and bounded
   audit pagination are available through Rust APIs.
 
-The compact server now opens this registry from the Product root and the authenticated Management
+The compact server opens this registry from the Product root and the authenticated Management
 API exposes exact-scope read, idempotent CAS replacement, and operation lookup. Replacement derives
 all compatibility evidence by loading each requested servable Release through the Environment's
 Release authority; clients cannot submit hashes. `releases:read` authorizes policy and operation
 reads, while `channels:promote` authorizes replacement and the verified operator is the audit actor.
 
-The Gateway, CLI, and Channel router do not yet select traffic from this registry. Writing `desired`
-state therefore remains `pending` and does not change live traffic. Runtime Release selection,
-`EnvironmentDefault`, materializer observation, and the effective write contract are explicitly
-deferred to the serving-path integration slice.
+After persistence, the compact server records a trusted ready observation only after every Release
+was resolved and verified through the same authority used by the runtime. Queries and Actions map
+their request identity to a deterministic percentile; Realtime uses its subscription identity and
+then pins the selected Release for all reruns. Mutations use `OperationId`, so transport retries and
+uncertain-result reconciliation select the same Release. Explicit Release, Channel, and Workspace
+targets preserve their existing semantics and never consult this policy.
 
 ## Policy contract
 
@@ -115,7 +117,7 @@ operation/audit, Release metadata/artifacts, Environment records, Cron activatio
 subordinate Product data at a verified recovery point. An older binary that does not understand an
 adopted serving authority must not resume writes after rollback.
 
-## Security and deferred serving semantics
+## Security and serving semantics
 
 - Scope is included in every key, command digest, lookup, audit query, and SQL predicate.
 - Hash equality is compatibility evidence, not Release ownership, lifecycle, artifact integrity,
@@ -123,12 +125,13 @@ adopted serving authority must not resume writes after rollback.
   boundary.
 - Telemetry contains only aggregate counters and pool gauges; it never labels Projects,
   Environments, Releases, operations, or policy digests.
-- The registry makes no random or sticky selection and exports no hot-path route. The next slice
-  must define a deterministic bounded selection input while pinning one exact Release for each
-  request, subscription, nested call, scheduled invocation, and Cron activation.
-- The next slice must also define `EnvironmentDefault` and an effective write contract before any
-  weighted policy becomes serveable. Unknown or incompatible combinations must fail closed rather
-  than falling back to a Release or `latest` target.
+- `environment:default` requires a configured, exactly converged policy. Missing, pending, failed,
+  unknown, or incompatible state fails closed; it never falls back to a Channel, Release, or
+  `latest` target.
+- Selection is an integral percentile over canonical Release-ID order. Every root invocation pins
+  one exact Release before auth/execution; nested calls and Scheduled work inherit that pin.
+- Mutation selection derives from the idempotent operation identity rather than transport request
+  identity, preventing a retry from crossing Release weights.
 
 ## Evidence
 

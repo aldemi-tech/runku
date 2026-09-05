@@ -11,7 +11,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use runku_core::{CodeTarget, EnvironmentScope, InvocationId, OperationId, PinnedCode};
+use runku_core::{
+    CodeTarget, EnvironmentScope, InvocationId, OperationId, PinnedCode, ReleaseId, RequestId,
+    SubscriptionId,
+};
 use runku_data::{ScheduledInvocationRecord, StoreError};
 use runku_development::{
     DevelopmentContext, DevelopmentError, DevelopmentRepository, DevelopmentResolution,
@@ -80,6 +83,51 @@ pub enum ServingRefresh {
         /// Revision that was already current.
         revision: u64,
     },
+}
+
+/// Stable weighted-policy percentile derived from an invocation identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnvironmentServingPercentile(u8);
+
+impl EnvironmentServingPercentile {
+    fn from_ulid(value: ulid::Ulid) -> Self {
+        Self(u8::try_from(u128::from(value) % 100).unwrap_or(0))
+    }
+
+    /// Derives a retry-stable percentile from a Mutation operation identity.
+    #[must_use]
+    pub fn from_operation(value: OperationId) -> Self {
+        Self::from_ulid(value.as_ulid())
+    }
+
+    /// Derives a request-scoped percentile for a Query or Action.
+    #[must_use]
+    pub fn from_request(value: RequestId) -> Self {
+        Self::from_ulid(value.as_ulid())
+    }
+
+    /// Derives a subscription-scoped percentile pinned for every Realtime rerun.
+    #[must_use]
+    pub fn from_subscription(value: SubscriptionId) -> Self {
+        Self::from_ulid(value.as_ulid())
+    }
+
+    /// Returns the canonical percentile in `0..100`.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// Resolves the Environment's converged default serving policy without exposing provider state.
+#[async_trait]
+pub trait EnvironmentServingResolver: fmt::Debug + Send + Sync {
+    /// Selects one exact Release for the supplied retry-stable percentile.
+    async fn resolve(
+        &self,
+        scope: EnvironmentScope,
+        percentile: EnvironmentServingPercentile,
+    ) -> Result<ReleaseId, ReleaseError>;
 }
 
 /// Process-local atomically replaced serving view for one trusted Environment scope.
@@ -549,6 +597,7 @@ pub struct ProductInvocationService {
     config: ProductInvocationConfig,
     catalog: Arc<ServingCatalog>,
     development: Option<Arc<DevelopmentCatalog>>,
+    environment_serving: Option<Arc<dyn EnvironmentServingResolver>>,
     releases: Arc<dyn ReleaseRepository>,
     artifacts: ArtifactCache,
     credentials: Arc<dyn ApplicationCredentialResolver>,
@@ -570,6 +619,10 @@ impl fmt::Debug for ProductInvocationService {
             .field("scope", &self.config.scope)
             .field("catalog", &self.catalog)
             .field("development_configured", &self.development.is_some())
+            .field(
+                "environment_serving_configured",
+                &self.environment_serving.is_some(),
+            )
             .field("release_backend", &self.releases.backend())
             .field("query", &self.query)
             .field("mutation", &self.mutation)
@@ -618,6 +671,7 @@ impl ProductInvocationService {
             config,
             catalog,
             development: None,
+            environment_serving: None,
             releases,
             artifacts: ArtifactCache::new(artifacts, config.max_cached_artifact_bytes),
             credentials,
@@ -652,6 +706,16 @@ impl ProductInvocationService {
         }
         self.development = Some(catalog);
         Ok(self)
+    }
+
+    /// Attaches the Environment default-policy resolver used only by `environment:default`.
+    #[must_use]
+    pub fn with_environment_serving_resolver(
+        mut self,
+        resolver: Arc<dyn EnvironmentServingResolver>,
+    ) -> Self {
+        self.environment_serving = Some(resolver);
+        self
     }
 
     /// Attaches Product Base operational logs to HTTP, Realtime, scheduled, and nested
@@ -689,8 +753,31 @@ impl ProductInvocationService {
         self.artifacts.telemetry()
     }
 
-    async fn resolve_code(&self, target: &CodeTarget) -> Result<ResolvedCode, GatewayFailure> {
+    async fn resolve_code(
+        &self,
+        target: &CodeTarget,
+        percentile: EnvironmentServingPercentile,
+    ) -> Result<ResolvedCode, GatewayFailure> {
         let (effective, manifest, pinned_code) = match target {
+            CodeTarget::EnvironmentDefault => {
+                let resolver = self
+                    .environment_serving
+                    .as_ref()
+                    .ok_or_else(|| map_release(ReleaseError::EnvironmentServingPolicyMissing))?;
+                let release_id = resolver
+                    .resolve(self.config.scope, percentile)
+                    .await
+                    .map_err(map_release)?;
+                let target = CodeTarget::Release(release_id);
+                let effective = self.catalog.resolve(&target).map_err(map_release)?;
+                let manifest = self
+                    .releases
+                    .manifest(self.config.scope, effective.release_id)
+                    .await
+                    .map_err(map_release)?;
+                validate_effective_manifest(&effective, &manifest, self.full_node.as_deref())?;
+                (effective, manifest, PinnedCode::Release(release_id))
+            }
             CodeTarget::Workspace(workspace) => {
                 let catalog = self.development.as_ref().ok_or_else(|| {
                     failure(ErrorClassV1::NotFound, "WORKSPACE_NOT_CONFIGURED", false)
@@ -956,7 +1043,11 @@ impl ProductInvocationService {
                 FunctionType::Action,
             ),
         };
-        let resolved = self.resolve_code(&target).await?;
+        let percentile = operation.map_or_else(
+            || EnvironmentServingPercentile::from_request(context.request_id),
+            EnvironmentServingPercentile::from_operation,
+        );
+        let resolved = self.resolve_code(&target, percentile).await?;
         let function = resolved
             .manifest
             .functions
@@ -1048,7 +1139,12 @@ impl RealtimeQueryService for ProductInvocationService {
         function_name: runku_core::FunctionName,
         arguments: runku_value::CanonicalValue,
     ) -> Result<RealtimePreparedSubscription, GatewayFailure> {
-        let resolved = self.resolve_code(&target).await?;
+        let resolved = self
+            .resolve_code(
+                &target,
+                EnvironmentServingPercentile::from_subscription(context.subscription_id),
+            )
+            .await?;
         let function = resolved
             .manifest
             .functions
@@ -1361,7 +1457,9 @@ fn map_release(error: ReleaseError) -> GatewayFailure {
         }
         ReleaseError::WorkspaceUnsupported
         | ReleaseError::DefaultChannelMissing
+        | ReleaseError::EnvironmentServingPolicyMissing
         | ReleaseError::ReleaseNotServable => ErrorClassV1::NotFound,
+        ReleaseError::EnvironmentServingPolicyNotReady => ErrorClassV1::Unavailable,
         ReleaseError::InvalidManifest
         | ReleaseError::InvalidArtifact
         | ReleaseError::Unsupported

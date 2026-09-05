@@ -28,8 +28,8 @@ rebuilding artifacts. The resolved Release is pinned for the duration of a reque
 or scheduled invocation.
 
 The standalone [serving-policy registry](serving-policy.md) models an Environment-wide atomic or
-weighted desired Release set. It does not yet replace Channel resolution or select a Release for a
-request; that integration must preserve exact request and durable-work pinning.
+weighted Release set. `environment:default` selects through its converged policy, while explicit
+Channel resolution remains available independently.
 
 ## Workspace and Dev Revision
 
@@ -50,10 +50,12 @@ abstraction can provide semantics beyond scheduling.
 
 ## Code targets and pinning
 
-Clients select exactly one `workspace:`, `release:`, or `channel:` target. Resolution produces an
-exact Release or Dev Revision before execution. That identity is pinned for one request and nested
-calls, one Realtime evaluation/delivery revision, one scheduled invocation, or one Cron activation.
-A Channel move affects future resolutions only. There is no `latest` fallback.
+Clients select `environment:default` or exactly one `workspace:`, `release:`, or `channel:` target.
+Resolution produces an exact Release or Dev Revision before execution. That identity is pinned for
+one request and nested calls, one Realtime evaluation/delivery revision, one scheduled invocation,
+or one Cron activation. Mutations derive weighted selection from their `OperationId`, keeping
+retries on the same Release. A policy or Channel move affects future resolutions only. There is no
+`latest` fallback.
 
 ## Identity and consistency
 
@@ -74,6 +76,7 @@ whose behalf it acts. Function policy evaluates both, and credential roles canno
 | Live iteration | Workspace + immutable Dev Revisions |
 | Stable preview/reproducible client | Explicit Release |
 | Traffic promotion/rollback | Channel + compare-and-set |
+| Environment-default weighted traffic | Serving policy + `environment:default` |
 | Delayed/detached work | `runAfter` / `runAt` |
 | Repeated UTC schedule | Cron declaration |
 | User identity | External JWT/OIDC + Application Key |
