@@ -157,10 +157,14 @@ stored by another Environment. A copied project directory remains sensitive beca
 source, local data, and other credentials; the link descriptor itself contains none.
 
 Managed OIDC enrollment is disabled by default. When configured, it requires a separate
-high-entropy gateway credential in `runku-managed-enrollment`; Runku first verifies the external
-OIDC bearer, then atomically creates or reconciles only the complete bounded grants supplied by
-that trusted gateway. The native client cannot forward or choose this header. Self-Hosted OIDC
-without this explicit gateway trust remains invitation-gated on first enrollment.
+high-entropy gateway credential in `runku-managed-enrollment` paired with one exact canonical HTTPS
+source authority. Runku first verifies the external OIDC bearer, then atomically reconciles only
+that source's complete bounded grant subset under a monotonic `u64` revision. The S2S managed-grants
+endpoint accepts only that internal credential, never an operator or Application bearer. Equal
+revision replay is digest-bound, lower revisions and divergent reuse fail closed, and current
+grants are reloaded for every request and log-follow iteration. Sources cannot overwrite one
+another. The native client cannot forward or choose the internal header. Self-Hosted OIDC without
+this explicit gateway trust remains invitation-gated on first enrollment.
 
 Initial-owner recovery is deliberately local and pre-enrollment only. It requires administrative
 access to PostgreSQL, the installation pepper, configuration, and protected state directory;

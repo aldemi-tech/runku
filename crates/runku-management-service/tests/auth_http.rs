@@ -25,8 +25,8 @@ use runku_management_service::{
     build_management_router_with_product,
 };
 use runku_platform_identity::{
-    AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, OperatorGrant,
-    OperatorName, PlatformCapability, PlatformIdentityCrypto, PlatformIdentityError,
+    AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, ManagedSourceAuthority,
+    OperatorGrant, OperatorName, PlatformCapability, PlatformIdentityCrypto, PlatformIdentityError,
     PlatformIdentityRepository, PlatformIdentityRepositoryConfig, PlatformIdentityService,
     SessionTokenPolicy, SqlPlatformIdentityRepository,
 };
@@ -126,7 +126,10 @@ impl ManagementProduct for DataProbeProduct {
         &self,
         _query: &ManagementLogQuery,
     ) -> Result<ManagementLogPage, ManagementProductError> {
-        Err(ManagementProductError::Invalid)
+        Ok(ManagementLogPage {
+            records: Vec::new(),
+            next: "logc_0".to_owned(),
+        })
     }
 
     async fn log_archive_status(
@@ -199,7 +202,10 @@ impl ManagementProduct for ArchiveStatusProduct {
         &self,
         _query: &ManagementLogQuery,
     ) -> Result<ManagementLogPage, ManagementProductError> {
-        Err(ManagementProductError::Invalid)
+        Ok(ManagementLogPage {
+            records: Vec::new(),
+            next: "logc_0".to_owned(),
+        })
     }
 
     async fn log_archive_status(
@@ -258,6 +264,7 @@ impl ExternalIdentityAuthenticator for AcceptingExternalIdentity {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn managed_oidc_requires_gateway_secret_and_exposes_linkable_resources()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
@@ -286,6 +293,9 @@ async fn managed_oidc_requires_gateway_secret_and_exposes_linkable_resources()
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
             managed_enrollment_key: Some(ManagedEnrollmentKey::new(&"m".repeat(32))?),
+            managed_source_authority: Some(ManagedSourceAuthority::from_str(
+                "https://cloud.runku.example",
+            )?),
         },
         identity,
         Some(Arc::new(AcceptingExternalIdentity)),
@@ -296,6 +306,7 @@ async fn managed_oidc_requires_gateway_secret_and_exposes_linkable_resources()
         "deviceName": "managed-device",
         "managedEnrollment": {
             "operatorName": "Cloud user",
+            "sourceRevision": 1,
             "grants": [{
                 "role": "developer",
                 "scope": {"kind": "project", "projectId": scope.project_id(), "environmentId": null}
@@ -328,10 +339,15 @@ async fn managed_oidc_requires_gateway_secret_and_exposes_linkable_resources()
         .await?;
     assert_eq!(accepted.status(), StatusCode::OK);
     let login: Value = serde_json::from_slice(&to_bytes(accepted.into_body(), 16 * 1024).await?)?;
+    assert_eq!(login["applied"], true);
+    assert_eq!(login["replayed"], false);
+    assert_eq!(login["sourceRevision"], 1);
     let access = login["accessToken"]
         .as_str()
         .ok_or("missing access token")?;
+    let operator_id = login["operatorId"].as_str().ok_or("missing operator id")?;
     let resources = router
+        .clone()
         .oneshot(
             Request::get("/v1/auth/resources")
                 .header(header::AUTHORIZATION, format!("Bearer {access}"))
@@ -344,6 +360,119 @@ async fn managed_oidc_requires_gateway_secret_and_exposes_linkable_resources()
     assert_eq!(
         body["resources"][0]["projectId"],
         scope.project_id().to_string()
+    );
+
+    let follow_path = format!(
+        "/v1/projects/{}/environments/{}/logs/follow?after=logc_0&limit=1",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let follow = router
+        .clone()
+        .oneshot(
+            Request::get(&follow_path)
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(follow.status(), StatusCode::OK);
+
+    let reconcile_path = format!("/v1/auth/managed/operators/{operator_id}/grants");
+    let revoke_body = json!({"sourceRevision": 2, "grants": []}).to_string();
+    let denied = router
+        .clone()
+        .oneshot(
+            Request::put(&reconcile_path)
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(revoke_body.clone()))?,
+        )
+        .await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+    let mut duplicate = Request::put(&reconcile_path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            "runku-managed-enrollment",
+            format!("Bearer {}", "m".repeat(32)),
+        )
+        .body(Body::from(revoke_body.clone()))?;
+    duplicate.headers_mut().append(
+        axum::http::HeaderName::from_static("runku-managed-enrollment"),
+        axum::http::HeaderValue::from_str(&format!("Bearer {}", "m".repeat(32)))?,
+    );
+    let duplicate = router.clone().oneshot(duplicate).await?;
+    assert_eq!(duplicate.status(), StatusCode::UNAUTHORIZED);
+
+    let reconcile = |body: String| {
+        Request::put(&reconcile_path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                "runku-managed-enrollment",
+                format!("Bearer {}", "m".repeat(32)),
+            )
+            .body(Body::from(body))
+    };
+    let revoked = router
+        .clone()
+        .oneshot(reconcile(revoke_body.clone())?)
+        .await?;
+    assert_eq!(revoked.status(), StatusCode::OK);
+    let revoked: Value = serde_json::from_slice(&to_bytes(revoked.into_body(), 16 * 1024).await?)?;
+    assert_eq!(revoked["applied"], true);
+    assert_eq!(revoked["replayed"], false);
+    assert_eq!(revoked["sourceRevision"], 2);
+    assert!(revoked.get("accessToken").is_none());
+
+    let replay = router.clone().oneshot(reconcile(revoke_body)?).await?;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay: Value = serde_json::from_slice(&to_bytes(replay.into_body(), 16 * 1024).await?)?;
+    assert_eq!(replay["applied"], false);
+    assert_eq!(replay["replayed"], true);
+
+    let divergent = router
+        .clone()
+        .oneshot(reconcile(
+            json!({
+                "sourceRevision": 2,
+                "grants": [{
+                    "role": "observer",
+                    "scope": {"kind": "project", "projectId": scope.project_id(), "environmentId": null}
+                }]
+            })
+            .to_string(),
+        )?)
+        .await?;
+    assert_eq!(divergent.status(), StatusCode::CONFLICT);
+    let divergent: Value =
+        serde_json::from_slice(&to_bytes(divergent.into_body(), 16 * 1024).await?)?;
+    assert_eq!(divergent["code"], "PLATFORM_MANAGED_SOURCE_CONFLICT");
+
+    let stale = router
+        .clone()
+        .oneshot(reconcile(
+            json!({"sourceRevision": 1, "grants": []}).to_string(),
+        )?)
+        .await?;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale: Value = serde_json::from_slice(&to_bytes(stale.into_body(), 16 * 1024).await?)?;
+    assert_eq!(stale["code"], "PLATFORM_MANAGED_SOURCE_STALE");
+
+    let resources = router
+        .clone()
+        .oneshot(
+            Request::get("/v1/auth/resources")
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let resources: Value =
+        serde_json::from_slice(&to_bytes(resources.into_body(), 16 * 1024).await?)?;
+    assert_eq!(resources["resources"], json!([]));
+    let followed = to_bytes(follow.into_body(), 16 * 1024).await?;
+    assert_eq!(
+        followed.as_ref(),
+        b"{\"error\":{\"code\":\"PLATFORM_UNAUTHENTICATED\"}}\n"
     );
     repository.close().await;
     Ok(())
@@ -376,6 +505,7 @@ async fn readiness_requires_the_attached_product_store() -> Result<(), Box<dyn s
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
             managed_enrollment_key: None,
+            managed_source_authority: None,
         },
         identity,
         None,
@@ -423,6 +553,8 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
                 subject_id: "environment-manager".to_owned(),
             },
             OperatorName::from_str("Environment manager")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
             vec![OperatorGrant {
                 scope: AccessScope::Environment(scope),
                 capabilities: BTreeSet::from([PlatformCapability::EnvironmentsManage]),
@@ -438,6 +570,8 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
                 subject_id: "data-reader".to_owned(),
             },
             OperatorName::from_str("Data reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
             vec![OperatorGrant {
                 scope: AccessScope::Environment(scope),
                 capabilities: BTreeSet::from([PlatformCapability::DataRead]),
@@ -457,6 +591,7 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
             managed_enrollment_key: None,
+            managed_source_authority: None,
         },
         identity,
         None,
@@ -483,7 +618,7 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
             ))
     };
 
-    let manager_access = environment_manager.access_token.expose();
+    let manager_access = environment_manager.login.access_token.expose();
     let response = router
         .clone()
         .oneshot(
@@ -498,7 +633,7 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
     assert_eq!(product.reads.load(Ordering::SeqCst), 0);
     assert_eq!(product.writes.load(Ordering::SeqCst), 0);
 
-    let reader_access = data_reader.access_token.expose();
+    let reader_access = data_reader.login.access_token.expose();
     let response = router
         .clone()
         .oneshot(
@@ -553,6 +688,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
             managed_enrollment_key: None,
+            managed_source_authority: None,
         },
         identity.clone(),
         None,
@@ -571,6 +707,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: Some("https://api.runku.example".to_owned()),
             managed_enrollment_key: None,
+            managed_source_authority: None,
         },
         identity.clone(),
         Some(Arc::new(RejectingExternalIdentity)),
@@ -648,6 +785,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
             managed_enrollment_key: None,
+            managed_source_authority: None,
         },
         identity.clone(),
         None,
@@ -851,6 +989,7 @@ async fn invitation_operation_is_reconcilable_conflict_safe_and_revocable()
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
             managed_enrollment_key: None,
+            managed_source_authority: None,
         },
         identity,
         None,

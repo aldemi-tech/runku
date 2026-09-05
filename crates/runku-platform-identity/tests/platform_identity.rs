@@ -1,12 +1,12 @@
 //! Platform Identity bootstrap, session rotation, OIDC linking, and scope isolation.
 
-use std::{str::FromStr as _, sync::Arc};
+use std::{collections::BTreeSet, str::FromStr as _, sync::Arc};
 
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, IdempotentInvitationResult,
-    InvitationStatus, OperatorGrant, OperatorName, OperatorRole, PlatformCapability,
-    PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository,
+    InvitationStatus, ManagedSourceAuthority, OperatorGrant, OperatorName, OperatorRole,
+    PlatformCapability, PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository,
     PlatformIdentityRepositoryConfig, PlatformIdentityService, SessionTokenPolicy,
     SqlPlatformIdentityRepository,
 };
@@ -162,6 +162,7 @@ async fn bootstrap_invite_refresh_revoke_and_oidc_are_scope_safe()
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn managed_oidc_enrollment_creates_and_reconciles_authoritative_project_grants()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
@@ -184,10 +185,13 @@ async fn managed_oidc_enrollment_creates_and_reconciles_authoritative_project_gr
     };
     let first_project = ProjectId::generate();
     let second_project = ProjectId::generate();
+    let authority = ManagedSourceAuthority::from_str("https://cloud.runku.example")?;
     let first = service
         .login_with_managed_external_identity(
             identity.clone(),
             OperatorName::from_str("Cloud user")?,
+            authority.clone(),
+            1,
             vec![OperatorGrant {
                 scope: AccessScope::Project(first_project),
                 capabilities: OperatorRole::Developer.capabilities(),
@@ -196,7 +200,9 @@ async fn managed_oidc_enrollment_creates_and_reconciles_authoritative_project_gr
             TimestampMicros::new(1_900_000_000_000_000),
         )
         .await?;
-    first.context.authorize(
+    assert!(first.reconciliation.applied);
+    assert!(!first.reconciliation.replayed);
+    first.login.context.authorize(
         AccessScope::Project(first_project),
         PlatformCapability::ReleasesPublish,
     )?;
@@ -205,6 +211,8 @@ async fn managed_oidc_enrollment_creates_and_reconciles_authoritative_project_gr
         .login_with_managed_external_identity(
             identity,
             OperatorName::from_str("Ignored replacement name")?,
+            authority.clone(),
+            2,
             vec![OperatorGrant {
                 scope: AccessScope::Project(second_project),
                 capabilities: OperatorRole::Observer.capabilities(),
@@ -213,24 +221,27 @@ async fn managed_oidc_enrollment_creates_and_reconciles_authoritative_project_gr
             TimestampMicros::new(1_900_000_000_000_001),
         )
         .await?;
-    assert_eq!(second.context.operator.id, first.context.operator.id);
+    assert_eq!(
+        second.login.context.operator.id,
+        first.login.context.operator.id
+    );
     assert!(
-        second.context.operator.authorization_revision
-            > first.context.operator.authorization_revision
+        second.login.context.operator.authorization_revision
+            > first.login.context.operator.authorization_revision
     );
     assert_eq!(
-        second.context.authorize(
+        second.login.context.authorize(
             AccessScope::Project(first_project),
             PlatformCapability::ReleasesRead
         ),
         Err(PlatformIdentityError::Forbidden),
     );
-    second.context.authorize(
+    second.login.context.authorize(
         AccessScope::Project(second_project),
         PlatformCapability::ReleasesRead,
     )?;
     assert_eq!(
-        second.context.authorize(
+        second.login.context.authorize(
             AccessScope::Project(second_project),
             PlatformCapability::ReleasesPublish
         ),
@@ -238,11 +249,263 @@ async fn managed_oidc_enrollment_creates_and_reconciles_authoritative_project_gr
     );
     let refreshed_first = service
         .authenticate(
-            &first.access_token,
+            &first.login.access_token,
             TimestampMicros::new(1_900_000_000_000_002),
         )
         .await?;
-    assert_eq!(refreshed_first.grants, second.context.grants);
+    assert_eq!(refreshed_first.grants, second.login.context.grants);
+
+    let replay = service
+        .reconcile_managed_grants(
+            first.login.context.operator.id,
+            authority.clone(),
+            2,
+            second.login.context.grants.clone(),
+            TimestampMicros::new(1_900_000_000_000_003),
+        )
+        .await?;
+    assert!(!replay.applied);
+    assert!(replay.replayed);
+    assert_eq!(
+        replay.authorization_revision,
+        second.login.context.operator.authorization_revision
+    );
+    assert!(matches!(
+        service
+            .reconcile_managed_grants(
+                first.login.context.operator.id,
+                authority.clone(),
+                2,
+                Vec::new(),
+                TimestampMicros::new(1_900_000_000_000_004),
+            )
+            .await,
+        Err(PlatformIdentityError::ManagedSourceConflict)
+    ));
+    assert!(matches!(
+        service
+            .reconcile_managed_grants(
+                first.login.context.operator.id,
+                authority.clone(),
+                1,
+                second.login.context.grants.clone(),
+                TimestampMicros::new(1_900_000_000_000_005),
+            )
+            .await,
+        Err(PlatformIdentityError::ManagedSourceStale)
+    ));
+
+    let second_authority = ManagedSourceAuthority::from_str("https://access.runku.example")?;
+    service
+        .reconcile_managed_grants(
+            first.login.context.operator.id,
+            second_authority.clone(),
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Project(second_project),
+                capabilities: BTreeSet::from([PlatformCapability::CredentialsRead]),
+            }],
+            TimestampMicros::new(1_900_000_000_000_006),
+        )
+        .await?;
+
+    let revoked = service
+        .reconcile_managed_grants(
+            first.login.context.operator.id,
+            authority,
+            3,
+            Vec::new(),
+            TimestampMicros::new(1_900_000_000_000_007),
+        )
+        .await?;
+    assert!(revoked.applied);
+    let active_session = service
+        .authenticate(
+            &first.login.access_token,
+            TimestampMicros::new(1_900_000_000_000_008),
+        )
+        .await?;
+    assert_eq!(
+        active_session.authorize(
+            AccessScope::Project(second_project),
+            PlatformCapability::ReleasesRead,
+        ),
+        Err(PlatformIdentityError::Forbidden)
+    );
+    active_session.authorize(
+        AccessScope::Project(second_project),
+        PlatformCapability::CredentialsRead,
+    )?;
+    service
+        .reconcile_managed_grants(
+            first.login.context.operator.id,
+            second_authority,
+            2,
+            Vec::new(),
+            TimestampMicros::new(1_900_000_000_000_009),
+        )
+        .await?;
+    let fully_revoked = service
+        .authenticate(
+            &first.login.access_token,
+            TimestampMicros::new(1_900_000_000_000_010),
+        )
+        .await?;
+    assert!(fully_revoked.grants.is_empty());
+
+    let canonical_authority = ManagedSourceAuthority::from_str("https://canonical.runku.example")?;
+    let canonical_first = OperatorGrant {
+        scope: AccessScope::Project(first_project),
+        capabilities: BTreeSet::from([PlatformCapability::ReleasesRead]),
+    };
+    let canonical_second = OperatorGrant {
+        scope: AccessScope::Project(second_project),
+        capabilities: BTreeSet::from([PlatformCapability::DataRead]),
+    };
+    service
+        .reconcile_managed_grants(
+            first.login.context.operator.id,
+            canonical_authority.clone(),
+            1,
+            vec![canonical_second.clone(), canonical_first.clone()],
+            TimestampMicros::new(1_900_000_000_000_011),
+        )
+        .await?;
+    let canonical_replay = service
+        .reconcile_managed_grants(
+            first.login.context.operator.id,
+            canonical_authority,
+            1,
+            vec![canonical_first, canonical_second],
+            TimestampMicros::new(1_900_000_000_000_012),
+        )
+        .await?;
+    assert!(canonical_replay.replayed);
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn first_managed_reconciliation_adopts_only_the_explicit_operator_legacy_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("managed-legacy.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let service = PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([23; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?;
+    let start = TimestampMicros::new(1_910_000_000_000_000);
+    let bootstrap = match service
+        .initialize_bootstrap(OperatorName::from_str("Owner")?, start)
+        .await?
+    {
+        BootstrapResult::Created(generated) => generated,
+        BootstrapResult::Replayed | BootstrapResult::Complete => {
+            return Err("fresh bootstrap was not created".into());
+        }
+    };
+    let owner = service
+        .login_with_invitation(
+            &bootstrap.code,
+            DeviceName::from_str("owner")?,
+            None,
+            TimestampMicros::new(start.get() + 1),
+        )
+        .await?;
+    let linked_project = ProjectId::generate();
+    let linked_invitation = service
+        .create_invitation(
+            &owner.context,
+            OperatorName::from_str("Linked operator")?,
+            AccessScope::Project(linked_project),
+            OperatorRole::Observer,
+            TimestampMicros::new(start.get() + 2),
+        )
+        .await?;
+    let external = ExternalOperatorIdentity {
+        provider_id: "cloud".to_owned(),
+        subject_id: "legacy-linked".to_owned(),
+    };
+    let linked = service
+        .login_with_invitation(
+            &linked_invitation.code,
+            DeviceName::from_str("linked")?,
+            Some(external.clone()),
+            TimestampMicros::new(start.get() + 3),
+        )
+        .await?;
+
+    let invitation_only_project = ProjectId::generate();
+    let invitation_only_invitation = service
+        .create_invitation(
+            &owner.context,
+            OperatorName::from_str("Invitation only")?,
+            AccessScope::Project(invitation_only_project),
+            OperatorRole::Observer,
+            TimestampMicros::new(start.get() + 4),
+        )
+        .await?;
+    let invitation_only = service
+        .login_with_invitation(
+            &invitation_only_invitation.code,
+            DeviceName::from_str("invitation-only")?,
+            None,
+            TimestampMicros::new(start.get() + 5),
+        )
+        .await?;
+
+    let authority = ManagedSourceAuthority::from_str("https://cloud.runku.example")?;
+    service
+        .login_with_managed_external_identity(
+            external,
+            OperatorName::from_str("Ignored")?,
+            authority.clone(),
+            1,
+            Vec::new(),
+            DeviceName::from_str("managed")?,
+            TimestampMicros::new(start.get() + 6),
+        )
+        .await?;
+    let linked_after = service
+        .authenticate(&linked.access_token, TimestampMicros::new(start.get() + 7))
+        .await?;
+    assert!(linked_after.grants.is_empty());
+    let invitation_only_after = service
+        .authenticate(
+            &invitation_only.access_token,
+            TimestampMicros::new(start.get() + 8),
+        )
+        .await?;
+    invitation_only_after.authorize(
+        AccessScope::Project(invitation_only_project),
+        PlatformCapability::ReleasesRead,
+    )?;
+
+    service
+        .reconcile_managed_grants(
+            invitation_only.context.operator.id,
+            authority,
+            1,
+            Vec::new(),
+            TimestampMicros::new(start.get() + 9),
+        )
+        .await?;
+    let explicit_after = service
+        .authenticate(
+            &invitation_only.access_token,
+            TimestampMicros::new(start.get() + 10),
+        )
+        .await?;
+    assert!(explicit_after.grants.is_empty());
     repository.close().await;
     Ok(())
 }

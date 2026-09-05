@@ -52,6 +52,64 @@ bounded_name!(
     OperatorName,
     120
 );
+
+/// Canonical HTTPS origin that owns one independently versioned managed grant set.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ManagedSourceAuthority(String);
+
+impl ManagedSourceAuthority {
+    /// Returns the exact configured canonical origin.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ManagedSourceAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for ManagedSourceAuthority {
+    type Err = PlatformIdentityError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty() || value.len() > 2_048 {
+            return Err(PlatformIdentityError::InvalidInput);
+        }
+        let origin = url::Url::parse(value).map_err(|_| PlatformIdentityError::InvalidInput)?;
+        if origin.scheme() != "https"
+            || origin.host_str().is_none()
+            || !origin.username().is_empty()
+            || origin.password().is_some()
+            || origin.path() != "/"
+            || origin.query().is_some()
+            || origin.fragment().is_some()
+            || origin.origin().ascii_serialization() != value
+        {
+            return Err(PlatformIdentityError::InvalidInput);
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Durable outcome of reconciling one source-owned managed grant set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedGrantReconciliation {
+    /// Operator whose effective grants were reconciled.
+    pub operator_id: OperatorId,
+    /// Exact source authority owning the replaced subset.
+    pub source_authority: ManagedSourceAuthority,
+    /// Applied or replayed monotonic source revision.
+    pub source_revision: u64,
+    /// Current operator authorization revision after reconciliation.
+    pub authorization_revision: u64,
+    /// True when a greater revision committed.
+    pub applied: bool,
+    /// True when an equal revision and identical digest was replayed.
+    pub replayed: bool,
+}
 bounded_name!(
     /// Human-readable name of one enrolled CLI device.
     DeviceName,
@@ -532,6 +590,30 @@ mod tests {
             reader.authorize(scope, PlatformCapability::DataWrite),
             Err(PlatformIdentityError::Forbidden)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_source_authority_requires_an_exact_canonical_https_origin()
+    -> Result<(), PlatformIdentityError> {
+        assert_eq!(
+            ManagedSourceAuthority::from_str("https://cloud.runku.example")?.as_str(),
+            "https://cloud.runku.example"
+        );
+        for invalid in [
+            "http://cloud.runku.example",
+            "https://cloud.runku.example/",
+            "https://cloud.runku.example/path",
+            "https://cloud.runku.example:443",
+            "https://user@cloud.runku.example",
+            "HTTPS://cloud.runku.example",
+        ] {
+            assert_eq!(
+                ManagedSourceAuthority::from_str(invalid),
+                Err(PlatformIdentityError::InvalidInput),
+                "accepted non-canonical authority {invalid}"
+            );
+        }
         Ok(())
     }
 }

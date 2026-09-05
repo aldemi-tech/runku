@@ -104,8 +104,9 @@ Configuration is strict:
 | `RUNKU_MANAGEMENT_TLS_TERMINATED` | no | exact `true` permits a non-loopback listener behind a trusted TLS boundary |
 | `RUNKU_PUBLIC_MANAGEMENT_URL` | no | canonical public HTTPS Management origin returned by login discovery; literal-loopback HTTP is local-only |
 | `RUNKU_PLATFORM_OIDC_CONFIG` | no | absolute path to a strict JSON file, at most 64 KiB |
-| `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN` | no | separate gateway secret, at least 32 bytes; enables managed first OIDC enrollment and authoritative grant reconciliation; requires OIDC |
+| `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN` | paired | separate internal gateway secret, at least 32 bytes; enables managed OIDC enrollment and the exact managed-grants S2S endpoint |
 | `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN_FILE` | alternative | absolute one-line regular non-symlink file containing the same separate gateway secret |
+| `RUNKU_PLATFORM_MANAGED_SOURCE_AUTHORITY` | paired | exact canonical HTTPS origin that owns every grant revision accepted with the managed token; configure together with that token |
 | `RUNKU_PRODUCT_ROOT` | no | absolute initialized Product Environment root exposed by authenticated lifecycle routes |
 | `RUNKU_PLATFORM_DATABASE_URL` | no | optional Environment-scoped PostgreSQL URL for Function documents, indexes, outbox, and schedules; sensitive; requires Product root |
 | `RUNKU_PLATFORM_DATABASE_URL_FILE` | alternative | path to a file containing the same Function platform URL; absolute, one-line, regular, non-symlinked |
@@ -404,16 +405,30 @@ PKCE verifier, or external token.
 
 ### Managed-service OIDC enrollment
 
-A SaaS control plane that already owns user and tenant membership may configure the same
-high-entropy secret as `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN` and authenticate its private
-`POST /v1/auth/oidc` hop with `runku-managed-enrollment: Bearer …`. After verifying the OIDC bearer,
-Runku accepts a bounded `managedEnrollment` object containing the operator name and complete
-Project-scoped role set. First login creates the external identity, grants, session, and audit
-atomically; later login replaces that subject's managed grants with the current authoritative set.
-The gateway header is never a user credential and must be stripped from public input. Without the
-configured secret, with a mismatched secret, or when both invitation and managed enrollment are
-sent, the request fails closed. This is why a Runku Cloud user needs only `runku login`, while an
-ordinary Self-Hosted installation still uses an invitation for first identity binding.
+A SaaS control plane that already owns user and tenant membership configures a high-entropy
+`RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN` together with one exact canonical HTTPS
+`RUNKU_PLATFORM_MANAGED_SOURCE_AUTHORITY`. It authenticates its private `POST /v1/auth/oidc` hop
+with `runku-managed-enrollment: Bearer …`. After verifying the OIDC bearer, Runku accepts a bounded
+`managedEnrollment` object containing `operatorName`, `sourceRevision` (`u64`, at least 1), and the
+complete Project-scoped role set owned by that configured source. First login creates the external
+identity, source-owned grants, session, authorization revision, and audit atomically.
+
+The same trusted reconciler is available without an OIDC login at exact endpoint
+`PUT /v1/auth/managed/operators/{operatorId}/grants`. It accepts only the managed header—not an
+operator session—and the JSON body `{ "sourceRevision": 2, "grants": [...] }`. A greater revision
+atomically replaces only this source's grant subset; an empty list revokes it. An equal revision
+with identical normalized content returns a successful replay. Equal revision with different
+content returns `409 PLATFORM_MANAGED_SOURCE_CONFLICT`; a lower revision returns
+`409 PLATFORM_MANAGED_SOURCE_STALE`. The stable response contains only `applied`, `replayed`,
+`sourceRevision`, and `authorizationRevision`.
+
+Existing sessions remain valid, but every Management request and each `logs follow` iteration
+reloads current grants, so a committed downgrade or revocation takes effect immediately. The first
+trusted reconciliation for a managed OIDC operator adopts and replaces legacy pre-source grants.
+Invitation-only operators are unchanged unless the control plane explicitly targets their ID via
+the S2S endpoint. The gateway header is never a user credential and must be stripped from public
+input. A missing/incomplete token-authority pair, mismatched token, zero revision, or simultaneous
+invitation and managed enrollment fails closed. Ordinary Self-Hosted OIDC remains invitation-gated.
 
 Changing `providerId` creates a distinct trust namespace. Rotating `subjectPepper` makes existing
 links unresolvable. Treat either as an identity migration requiring overlap or re-enrollment; do
@@ -569,10 +584,12 @@ Before upgrading:
 5. start on a restricted listener and verify liveness, readiness, invitation/session, and OIDC;
 6. admit traffic and retain the old binary only within the schema compatibility decision.
 
-Schema v1 initialization and the v1-to-v2 invitation-operation migration are additive. There is no
-published mixed-version or downgrade window. After v2 is recorded, move forward; do not use an
-older server as an operational rollback even though the added columns/table do not reinterpret v1
-rows. Never drop tables or change migration rows to force an older binary to start.
+Schema v1 initialization, v2 invitation operations, and v3 source-owned managed grants are
+append-only. The v3 migration snapshots existing effective grants as unmanaged legacy ownership;
+only a later authenticated reconciliation adopts the explicitly targeted operator. There is no
+published mixed-version or downgrade window. After v3 is recorded, move forward; do not use an
+older server as an operational rollback. Never drop tables or change migration rows to force an
+older binary to start.
 
 ## Failure handling
 
@@ -581,6 +598,8 @@ rows. Never drop tables or change migration rows to force an older binary to sta
 | `SERVER_CONFIGURATION_MISSING` | a required environment variable is absent/empty | fix configuration; no durable change occurred |
 | `SERVER_DATABASE_URL_INVALID` | the Identity URL has an unsupported scheme, no host, or no database name | correct the Identity secret source; no connection was attempted |
 | `SERVER_OIDC_CONFIG_INVALID` | unsafe JSON, issuer/origin/algorithm/pepper policy | reject startup; correct config without broadening trust |
+| `SERVER_MANAGED_SOURCE_AUTHORITY_INVALID` | managed source is not one exact canonical HTTPS origin | correct the configured authority; never accept it from a request |
+| `SERVER_MANAGED_SOURCE_CONFIGURATION_INCOMPLETE` | managed token or source authority is configured without its pair | configure both for managed reconciliation or remove both |
 | `SERVER_PLATFORM_DATABASE_UNAVAILABLE` | the Identity database connect, version, schema, or migration check failed | preserve logs; verify dependency/schema before retry |
 | `SERVER_BOOTSTRAP_FILE_MISSING` | database has a pending bootstrap but protected file is absent | stop; preserve evidence, then restore the matching set or run the explicit recovery operation |
 | `SERVER_BOOTSTRAP_RECOVERY_CONFIRMATION_INVALID` | the offline replacement phrase is missing or wrong | verify the intended installation and rerun with the exact documented confirmation |
@@ -590,6 +609,8 @@ rows. Never drop tables or change migration rows to force an older binary to sta
 | `PLATFORM_ACCESS_DENIED` | valid operator lacks capability at exact scope | change the grant deliberately; do not use an application key |
 | `PLATFORM_IDENTITY_RESULT_UNCERTAIN` | commit may have succeeded | reconcile session/invitation/audit before creating new secret material |
 | `PLATFORM_INVITATION_OPERATION_REUSED` | one `opn_*` was presented with different issuance content | stop; retain both requests as evidence and allocate a new ID only for a deliberate new operation |
+| `PLATFORM_MANAGED_SOURCE_CONFLICT` | the current managed revision was reused with different normalized grants | stop; reconcile control-plane state and never retry with changed bytes at that revision |
+| `PLATFORM_MANAGED_SOURCE_STALE` | a lower managed revision attempted rollback | read the control-plane revision, allocate a greater revision for a deliberate new state |
 | `PLATFORM_IDENTITY_STORAGE_CORRUPT` | schema/persisted invariant failed | stop writes and restore/investigate; never edit rows ad hoc |
 
 `SERVER_PLATFORM_DATABASE_UNAVAILABLE` is an older stable error code: in this table it means the
@@ -609,9 +630,23 @@ make platform-identity-check
 ```
 
 It runs domain/repository tests on SQLite, Management HTTP tests, CLI parser/process tests, and
-strict Clippy for all affected crates. The external-provider campaign is explicit because it starts
-containers and a server process. Its target name identifies the concrete fixture rather than the
-product's integration boundary:
+strict Clippy for all affected crates.
+
+The source-owned reconciliation adapter campaign is separately opt-in and creates then removes one
+randomly named database on the pinned local PostgreSQL 16 fixture:
+
+```sh
+docker compose -f compose.storage.yml up -d --wait
+RUNKU_TEST_POSTGRES_URL='postgres://runku:runku_local_test_only@127.0.0.1:55432/runku_test' \
+  cargo test -p runku-platform-identity --test postgres_managed_grants --locked -- --test-threads=1
+```
+
+It proves schema v3 initialization, concurrent revision conflict, stale rejection, exact replay,
+source ownership, and full `u64` source-revision persistence on PostgreSQL. SQLite migration and
+legacy adoption remain in `make platform-identity-check`.
+
+The external-provider campaign is explicit because it starts containers and a server process. Its
+target name identifies the concrete fixture rather than the product's integration boundary:
 
 ```sh
 make platform-identity-keycloak-check

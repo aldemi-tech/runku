@@ -27,13 +27,14 @@ use sqlx::{
 use crate::{
     AccessScope, BootstrapCreate, ConsumedInvitation, ExternalOperatorIdentity,
     IdempotentInvitationCreate, InvitationKind, InvitationStatus, ManagedExternalLogin,
+    ManagedExternalLoginResult, ManagedGrantReconciliation, ManagedGrantReconciliationRequest,
     NewInvitation, NewOperatorSession, Operator, OperatorContext, OperatorGrant,
     OperatorInvitation, OperatorName, OperatorSession, OperatorStatus, PlatformCapability,
     PlatformIdentityBackend, PlatformIdentityError, PlatformIdentityRepository,
     PlatformIdentityTelemetrySnapshot, RefreshedSession, SessionStatus, key::PlatformDigest,
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MIGRATION_LOCK: i64 = 7_251_204_431;
 const SCHEMA_V1: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS runku_platform_meta (singleton_id BIGINT PRIMARY KEY, initialized BOOLEAN NOT NULL, authorization_revision BIGINT NOT NULL)",
@@ -53,6 +54,15 @@ const SCHEMA_V2: &[&str] = &[
     "ALTER TABLE runku_platform_audit ADD COLUMN request_operation_id TEXT NULL",
     "ALTER TABLE runku_platform_audit ADD COLUMN subject_invitation_id TEXT NULL",
     "CREATE INDEX runku_platform_audit_by_invitation ON runku_platform_audit(subject_invitation_id, occurred_at_micros, event_id)",
+];
+const SCHEMA_V3: &[&str] = &[
+    "CREATE TABLE runku_operator_unmanaged_grants (operator_id TEXT NOT NULL, scope_key TEXT NOT NULL, scope_kind TEXT NOT NULL, project_id TEXT NULL, environment_id TEXT NULL, capability TEXT NOT NULL, created_at_micros BIGINT NOT NULL, created_by TEXT NULL, PRIMARY KEY(operator_id, scope_key, capability), FOREIGN KEY(operator_id) REFERENCES runku_operators(operator_id) ON DELETE CASCADE)",
+    "INSERT INTO runku_operator_unmanaged_grants (operator_id, scope_key, scope_kind, project_id, environment_id, capability, created_at_micros, created_by) SELECT operator_id, scope_key, scope_kind, project_id, environment_id, capability, created_at_micros, created_by FROM runku_operator_grants",
+    "CREATE TABLE runku_managed_grant_sources (operator_id TEXT NOT NULL, source_authority TEXT NOT NULL, source_revision TEXT NOT NULL, grants_digest BYTEA NOT NULL, created_at_micros BIGINT NOT NULL, updated_at_micros BIGINT NOT NULL, PRIMARY KEY(operator_id, source_authority), CHECK (length(grants_digest) = 32), CHECK (created_at_micros >= 0), CHECK (updated_at_micros >= created_at_micros), FOREIGN KEY(operator_id) REFERENCES runku_operators(operator_id) ON DELETE CASCADE)",
+    "CREATE TABLE runku_managed_source_grants (operator_id TEXT NOT NULL, source_authority TEXT NOT NULL, scope_key TEXT NOT NULL, scope_kind TEXT NOT NULL, project_id TEXT NULL, environment_id TEXT NULL, capability TEXT NOT NULL, created_at_micros BIGINT NOT NULL, PRIMARY KEY(operator_id, source_authority, scope_key, capability), FOREIGN KEY(operator_id, source_authority) REFERENCES runku_managed_grant_sources(operator_id, source_authority) ON DELETE CASCADE)",
+    "CREATE INDEX runku_managed_sources_by_authority ON runku_managed_grant_sources(source_authority, operator_id)",
+    "ALTER TABLE runku_platform_audit ADD COLUMN source_authority TEXT NULL",
+    "ALTER TABLE runku_platform_audit ADD COLUMN source_revision TEXT NULL",
 ];
 
 /// Operational role selected for repository composition.
@@ -383,8 +393,15 @@ impl PlatformIdentityRepository for SqlPlatformIdentityRepository {
         &self,
         candidate: &ManagedExternalLogin,
         now: TimestampMicros,
-    ) -> Result<OperatorContext, PlatformIdentityError> {
+    ) -> Result<ManagedExternalLoginResult, PlatformIdentityError> {
         self.track(login_external_managed(&self.pool, self.backend, candidate, now).await)
+    }
+
+    async fn reconcile_managed_grants(
+        &self,
+        request: &ManagedGrantReconciliationRequest,
+    ) -> Result<ManagedGrantReconciliation, PlatformIdentityError> {
+        self.track(reconcile_managed_grants(&self.pool, self.backend, request).await)
     }
 
     async fn authenticate_access(
@@ -975,10 +992,11 @@ async fn login_external_managed(
     backend: PlatformIdentityBackend,
     candidate: &ManagedExternalLogin,
     now: TimestampMicros,
-) -> Result<OperatorContext, PlatformIdentityError> {
+) -> Result<ManagedExternalLoginResult, PlatformIdentityError> {
     candidate.external_identity.validate()?;
     validate_new_session(&candidate.session)?;
     if candidate.session.created_at != now
+        || candidate.source_revision == 0
         || candidate.grants.len() > 64
         || candidate
             .grants
@@ -996,39 +1014,33 @@ async fn login_external_managed(
         .bind(&candidate.external_identity.provider_id)
         .bind(&candidate.external_identity.subject_id)
         .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
-    let was_existing = existing.is_some();
-    let operator_id = match existing {
-        Some(value) => value
+    let operator_id = if let Some(value) = existing {
+        value
             .parse::<OperatorId>()
-            .map_err(|_| PlatformIdentityError::Corruption)?,
-        None => {
-            sqlx::query("INSERT INTO runku_operators (operator_id, name, status, created_at_micros, authorization_revision) VALUES ($1, $2, 'active', $3, 1)")
+            .map_err(|_| PlatformIdentityError::Corruption)?
+    } else {
+        sqlx::query("INSERT INTO runku_operators (operator_id, name, status, created_at_micros, authorization_revision) VALUES ($1, $2, 'active', $3, 0)")
                 .bind(candidate.operator_id.to_string()).bind(candidate.operator_name.as_str()).bind(now.get())
                 .execute(&mut *tx).await.map_err(map_constraint_error)?;
-            sqlx::query("INSERT INTO runku_operator_identities (provider_id, subject_id, operator_id, created_at_micros) VALUES ($1, $2, $3, $4)")
+        sqlx::query("INSERT INTO runku_operator_identities (provider_id, subject_id, operator_id, created_at_micros) VALUES ($1, $2, $3, $4)")
                 .bind(&candidate.external_identity.provider_id).bind(&candidate.external_identity.subject_id)
                 .bind(candidate.operator_id.to_string()).bind(now.get()).execute(&mut *tx).await
                 .map_err(map_constraint_error)?;
-            candidate.operator_id
-        }
+        candidate.operator_id
     };
-    let current = load_grants_tx(&mut tx, operator_id).await?;
-    if current != candidate.grants {
-        sqlx::query("DELETE FROM runku_operator_grants WHERE operator_id = $1")
-            .bind(operator_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        for grant in &candidate.grants {
-            insert_grant(&mut tx, operator_id, grant, now, None).await?;
-        }
-        if was_existing {
-            sqlx::query("UPDATE runku_operators SET authorization_revision = authorization_revision + 1 WHERE operator_id = $1")
-                .bind(operator_id.to_string()).execute(&mut *tx).await.map_err(map_sqlx_error)?;
-        }
-        sqlx::query("UPDATE runku_platform_meta SET initialized = TRUE, authorization_revision = authorization_revision + 1 WHERE singleton_id = 1")
-            .execute(&mut *tx).await.map_err(map_sqlx_error)?;
-    }
+    let reconciliation = reconcile_managed_grants_tx(
+        &mut tx,
+        &ManagedGrantReconciliationRequest {
+            operator_id,
+            source_authority: candidate.source_authority.clone(),
+            source_revision: candidate.source_revision,
+            grants: candidate.grants.clone(),
+            grants_digest: candidate.grants_digest,
+            reconciled_at: now,
+            adopt_legacy: true,
+        },
+    )
+    .await?;
     insert_session(&mut tx, operator_id, &candidate.session).await?;
     audit(
         &mut tx,
@@ -1045,7 +1057,139 @@ async fn login_external_managed(
     tx.commit()
         .await
         .map_err(|error| map_commit_error(&error))?;
-    Ok(context)
+    Ok(ManagedExternalLoginResult {
+        context,
+        reconciliation,
+    })
+}
+
+async fn reconcile_managed_grants(
+    pool: &AnyPool,
+    backend: PlatformIdentityBackend,
+    request: &ManagedGrantReconciliationRequest,
+) -> Result<ManagedGrantReconciliation, PlatformIdentityError> {
+    validate_managed_reconciliation(request)?;
+    let mut tx = begin_write(pool, backend).await?;
+    let result = reconcile_managed_grants_tx(&mut tx, request).await?;
+    tx.commit()
+        .await
+        .map_err(|error| map_commit_error(&error))?;
+    Ok(result)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn reconcile_managed_grants_tx(
+    tx: &mut Transaction<'_, Any>,
+    request: &ManagedGrantReconciliationRequest,
+) -> Result<ManagedGrantReconciliation, PlatformIdentityError> {
+    validate_managed_reconciliation(request)?;
+    let current_authorization = sqlx::query_scalar::<_, i64>(
+        "SELECT authorization_revision FROM runku_operators WHERE operator_id = $1",
+    )
+    .bind(request.operator_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or(PlatformIdentityError::NotFound)?;
+    let current_authorization =
+        u64::try_from(current_authorization).map_err(|_| PlatformIdentityError::Corruption)?;
+    let prior = sqlx::query("SELECT source_revision, grants_digest FROM runku_managed_grant_sources WHERE operator_id = $1 AND source_authority = $2")
+        .bind(request.operator_id.to_string())
+        .bind(request.source_authority.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    if let Some(prior) = prior {
+        let revision = canonical_u64(&text(&prior, "source_revision")?)?;
+        if request.source_revision < revision {
+            return Err(PlatformIdentityError::ManagedSourceStale);
+        }
+        if request.source_revision == revision {
+            let digest = decode_sha256(
+                prior
+                    .try_get("grants_digest")
+                    .map_err(|_| PlatformIdentityError::Corruption)?,
+            )?;
+            if digest != request.grants_digest {
+                return Err(PlatformIdentityError::ManagedSourceConflict);
+            }
+            return Ok(ManagedGrantReconciliation {
+                operator_id: request.operator_id,
+                source_authority: request.source_authority.clone(),
+                source_revision: revision,
+                authorization_revision: current_authorization,
+                applied: false,
+                replayed: true,
+            });
+        }
+    } else if request.adopt_legacy {
+        sqlx::query("DELETE FROM runku_operator_unmanaged_grants WHERE operator_id = $1")
+            .bind(request.operator_id.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    }
+
+    let prior_created_at = sqlx::query_scalar::<_, i64>("SELECT created_at_micros FROM runku_managed_grant_sources WHERE operator_id = $1 AND source_authority = $2")
+        .bind(request.operator_id.to_string())
+        .bind(request.source_authority.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .unwrap_or(request.reconciled_at.get());
+    sqlx::query("INSERT INTO runku_managed_grant_sources (operator_id, source_authority, source_revision, grants_digest, created_at_micros, updated_at_micros) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT(operator_id, source_authority) DO UPDATE SET source_revision = excluded.source_revision, grants_digest = excluded.grants_digest, updated_at_micros = excluded.updated_at_micros")
+        .bind(request.operator_id.to_string())
+        .bind(request.source_authority.as_str())
+        .bind(request.source_revision.to_string())
+        .bind(request.grants_digest.to_vec())
+        .bind(prior_created_at)
+        .bind(request.reconciled_at.get())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    sqlx::query(
+        "DELETE FROM runku_managed_source_grants WHERE operator_id = $1 AND source_authority = $2",
+    )
+    .bind(request.operator_id.to_string())
+    .bind(request.source_authority.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    for grant in &request.grants {
+        insert_managed_source_grant(tx, request, grant).await?;
+    }
+    sqlx::query("DELETE FROM runku_operator_grants WHERE operator_id = $1")
+        .bind(request.operator_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    sqlx::query("INSERT INTO runku_operator_grants (operator_id, scope_key, scope_kind, project_id, environment_id, capability, created_at_micros, created_by) SELECT operator_id, scope_key, scope_kind, project_id, environment_id, capability, $2, NULL FROM runku_operator_unmanaged_grants WHERE operator_id = $1 UNION SELECT operator_id, scope_key, scope_kind, project_id, environment_id, capability, $2, NULL FROM runku_managed_source_grants WHERE operator_id = $1")
+        .bind(request.operator_id.to_string())
+        .bind(request.reconciled_at.get())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    sqlx::query("UPDATE runku_operators SET authorization_revision = authorization_revision + 1 WHERE operator_id = $1")
+        .bind(request.operator_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    sqlx::query("UPDATE runku_platform_meta SET initialized = TRUE, authorization_revision = authorization_revision + 1 WHERE singleton_id = 1")
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    let authorization_revision = current_authorization
+        .checked_add(1)
+        .ok_or(PlatformIdentityError::Corruption)?;
+    audit_managed_reconciliation(tx, request).await?;
+    Ok(ManagedGrantReconciliation {
+        operator_id: request.operator_id,
+        source_authority: request.source_authority.clone(),
+        source_revision: request.source_revision,
+        authorization_revision,
+        applied: true,
+        replayed: false,
+    })
 }
 
 async fn authenticate_access(
@@ -1300,6 +1444,35 @@ async fn insert_grant(
             .bind(operator_id.to_string()).bind(&scope_key).bind(kind).bind(project.clone())
             .bind(environment.clone()).bind(capability.as_str()).bind(created_at.get())
             .bind(created_by.map(|id| id.to_string())).execute(&mut **tx).await
+            .map_err(map_constraint_error)?;
+        sqlx::query("INSERT INTO runku_operator_unmanaged_grants (operator_id, scope_key, scope_kind, project_id, environment_id, capability, created_at_micros, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+            .bind(operator_id.to_string()).bind(&scope_key).bind(kind).bind(project.clone())
+            .bind(environment.clone()).bind(capability.as_str()).bind(created_at.get())
+            .bind(created_by.map(|id| id.to_string())).execute(&mut **tx).await
+            .map_err(map_constraint_error)?;
+    }
+    Ok(())
+}
+
+async fn insert_managed_source_grant(
+    tx: &mut Transaction<'_, Any>,
+    request: &ManagedGrantReconciliationRequest,
+    grant: &OperatorGrant,
+) -> Result<(), PlatformIdentityError> {
+    grant.validate()?;
+    let (scope_key, kind, project, environment) = encode_scope(grant.scope);
+    for capability in &grant.capabilities {
+        sqlx::query("INSERT INTO runku_managed_source_grants (operator_id, source_authority, scope_key, scope_kind, project_id, environment_id, capability, created_at_micros) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+            .bind(request.operator_id.to_string())
+            .bind(request.source_authority.as_str())
+            .bind(&scope_key)
+            .bind(kind)
+            .bind(project.clone())
+            .bind(environment.clone())
+            .bind(capability.as_str())
+            .bind(request.reconciled_at.get())
+            .execute(&mut **tx)
+            .await
             .map_err(map_constraint_error)?;
     }
     Ok(())
@@ -1584,6 +1757,52 @@ fn validate_new_session(session: &NewOperatorSession) -> Result<(), PlatformIden
     Ok(())
 }
 
+fn validate_managed_reconciliation(
+    request: &ManagedGrantReconciliationRequest,
+) -> Result<(), PlatformIdentityError> {
+    if request.source_revision == 0
+        || request.reconciled_at.get() < 0
+        || request.grants.len() > 64
+        || request.grants.iter().any(|grant| grant.validate().is_err())
+        || request
+            .grants
+            .windows(2)
+            .any(|pair| pair[0].scope >= pair[1].scope)
+        || managed_grants_digest(&request.grants) != request.grants_digest
+    {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn managed_grants_digest(grants: &[OperatorGrant]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"runku-managed-grants-v1\0");
+    for grant in grants {
+        match grant.scope {
+            AccessScope::Installation => digest.update(b"installation\0"),
+            AccessScope::Project(project) => {
+                digest.update(b"project\0");
+                digest.update(project.to_string().as_bytes());
+                digest.update([0]);
+            }
+            AccessScope::Environment(environment) => {
+                digest.update(b"environment\0");
+                digest.update(environment.project_id().to_string().as_bytes());
+                digest.update([0]);
+                digest.update(environment.environment_id().to_string().as_bytes());
+                digest.update([0]);
+            }
+        }
+        for capability in &grant.capabilities {
+            digest.update(capability.as_str().as_bytes());
+            digest.update([0]);
+        }
+        digest.update([0xff]);
+    }
+    digest.finalize().into()
+}
+
 async fn audit(
     tx: &mut Transaction<'_, Any>,
     actor: Option<OperatorId>,
@@ -1613,6 +1832,22 @@ async fn audit_invitation(
         .bind(at.get())
         .bind(request_operation_id.map(|id| id.to_string()))
         .bind(invitation_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn audit_managed_reconciliation(
+    tx: &mut Transaction<'_, Any>,
+    request: &ManagedGrantReconciliationRequest,
+) -> Result<(), PlatformIdentityError> {
+    sqlx::query("INSERT INTO runku_platform_audit (event_id, actor_operator_id, subject_operator_id, operation, outcome, occurred_at_micros, source_authority, source_revision) VALUES ($1, NULL, $2, 'grants.managed-reconcile', 'succeeded', $3, $4, $5)")
+        .bind(OperationId::generate().to_string())
+        .bind(request.operator_id.to_string())
+        .bind(request.reconciled_at.get())
+        .bind(request.source_authority.as_str())
+        .bind(request.source_revision.to_string())
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -1661,7 +1896,7 @@ async fn migrate(
     {
         return Err(PlatformIdentityError::Corruption);
     }
-    for (version, statements) in [(1_i64, SCHEMA_V1), (2_i64, SCHEMA_V2)] {
+    for (version, statements) in [(1_i64, SCHEMA_V1), (2_i64, SCHEMA_V2), (3_i64, SCHEMA_V3)] {
         let checksum = schema_checksum(version, statements);
         if let Some(row) = recorded
             .iter()
@@ -1793,6 +2028,16 @@ fn nonnegative_u64(row: &sqlx::any::AnyRow, column: &str) -> Result<u64, Platfor
     u64::try_from(value).map_err(|_| PlatformIdentityError::Corruption)
 }
 
+fn canonical_u64(value: &str) -> Result<u64, PlatformIdentityError> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| PlatformIdentityError::Corruption)?;
+    if parsed == 0 || parsed.to_string() != value {
+        return Err(PlatformIdentityError::Corruption);
+    }
+    Ok(parsed)
+}
+
 fn decode_digest(bytes: Vec<u8>) -> Result<PlatformDigest, PlatformIdentityError> {
     let array: [u8; 32] = bytes
         .try_into()
@@ -1855,7 +2100,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn schema_v1_upgrades_append_only_to_invitation_operations()
+    async fn schema_v1_upgrades_append_only_to_managed_grant_sources()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
             schema_checksum(1, SCHEMA_V1),
@@ -1888,7 +2133,7 @@ mod tests {
         )
         .fetch_all(&pool)
         .await?;
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, vec![1, 2, 3]);
         let operation_tables = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'runku_operator_invitation_operations'",
         )
@@ -1901,6 +2146,28 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(revoked_columns, 1);
+        for table in [
+            "runku_operator_unmanaged_grants",
+            "runku_managed_grant_sources",
+            "runku_managed_source_grants",
+        ] {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $1",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(count, 1, "missing append-only table {table}");
+        }
+        for column in ["source_authority", "source_revision"] {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM pragma_table_info('runku_platform_audit') WHERE name = $1",
+            )
+            .bind(column)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(count, 1, "missing append-only audit column {column}");
+        }
         pool.close().await;
         Ok(())
     }

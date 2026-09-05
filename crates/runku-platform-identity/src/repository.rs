@@ -7,8 +7,9 @@ use runku_core::{OperationId, OperatorId, OperatorInvitationId, OperatorSessionI
 use runku_value::TimestampMicros;
 
 use crate::{
-    DeviceName, ExternalOperatorIdentity, InvitationKind, OperatorContext, OperatorGrant,
-    OperatorInvitation, OperatorName, OperatorSession, PlatformIdentityError, key::PlatformDigest,
+    DeviceName, ExternalOperatorIdentity, InvitationKind, ManagedGrantReconciliation,
+    ManagedSourceAuthority, OperatorContext, OperatorGrant, OperatorInvitation, OperatorName,
+    OperatorSession, PlatformIdentityError, key::PlatformDigest,
 };
 
 /// Physical storage backend selected by composition.
@@ -79,8 +80,42 @@ pub struct ManagedExternalLogin {
     pub external_identity: ExternalOperatorIdentity,
     /// Complete authoritative grant set to reconcile for this subject.
     pub grants: Vec<OperatorGrant>,
+    /// Canonical configured authority owning `grants`.
+    pub source_authority: ManagedSourceAuthority,
+    /// Monotonic revision asserted by that authority.
+    pub source_revision: u64,
+    /// Canonical digest of the normalized source-owned grant set.
+    pub grants_digest: [u8; 32],
     /// New device session.
     pub session: NewOperatorSession,
+}
+
+/// Validated source-owned grant replacement passed to durable storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedGrantReconciliationRequest {
+    /// Existing operator to reconcile.
+    pub operator_id: OperatorId,
+    /// Canonical source authority.
+    pub source_authority: ManagedSourceAuthority,
+    /// Monotonic source revision.
+    pub source_revision: u64,
+    /// Canonically sorted complete grant set owned by this source.
+    pub grants: Vec<OperatorGrant>,
+    /// SHA-256 digest of the normalized grant set.
+    pub grants_digest: [u8; 32],
+    /// Server-owned reconciliation time.
+    pub reconciled_at: TimestampMicros,
+    /// Whether an explicit trusted first reconciliation may adopt legacy pre-source grants.
+    pub adopt_legacy: bool,
+}
+
+/// Atomic managed login result including grant reconciliation metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedExternalLoginResult {
+    /// Newly created session and effective authority.
+    pub context: OperatorContext,
+    /// Source reconciliation outcome committed in the same transaction.
+    pub reconciliation: ManagedGrantReconciliation,
 }
 
 /// Atomic refresh replacement material.
@@ -222,7 +257,13 @@ pub trait PlatformIdentityRepository: fmt::Debug + Send + Sync {
         &self,
         candidate: &ManagedExternalLogin,
         now: TimestampMicros,
-    ) -> Result<OperatorContext, PlatformIdentityError>;
+    ) -> Result<ManagedExternalLoginResult, PlatformIdentityError>;
+
+    /// Replaces only one source-owned grant subset under a monotonic revision.
+    async fn reconcile_managed_grants(
+        &self,
+        request: &ManagedGrantReconciliationRequest,
+    ) -> Result<ManagedGrantReconciliation, PlatformIdentityError>;
 
     /// Resolves one current access token and loads current grants.
     async fn authenticate_access(

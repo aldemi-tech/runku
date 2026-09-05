@@ -21,9 +21,9 @@ use runku_core::{
 };
 use runku_platform_identity::{
     AccessScope, AccessToken, DeviceName, ExternalOperatorIdentity, IdempotentInvitationResult,
-    InvitationCode, InvitationStatus, LoginResult, OperatorContext, OperatorInvitation,
-    OperatorName, OperatorRole, PlatformCapability, PlatformIdentityError, PlatformIdentityService,
-    RefreshToken,
+    InvitationCode, InvitationStatus, LoginResult, ManagedGrantReconciliation, ManagedLoginResult,
+    ManagedSourceAuthority, OperatorContext, OperatorInvitation, OperatorName, OperatorRole,
+    PlatformCapability, PlatformIdentityError, PlatformIdentityService, RefreshToken,
 };
 use runku_protocol::DEVELOPMENT_PUBLISH_MAX_BYTES;
 use runku_value::TimestampMicros;
@@ -98,6 +98,8 @@ pub struct ManagementHttpConfig {
     pub public_management_endpoint: Option<String>,
     /// Optional separate gateway secret enabling managed first-login enrollment and grant sync.
     pub managed_enrollment_key: Option<ManagedEnrollmentKey>,
+    /// Exact HTTPS authority owning every reconciliation accepted with the managed token.
+    pub managed_source_authority: Option<ManagedSourceAuthority>,
 }
 
 impl ManagementHttpConfig {
@@ -107,6 +109,9 @@ impl ManagementHttpConfig {
         }
         if let Some(endpoint) = &self.public_management_endpoint {
             validate_public_endpoint(endpoint)?;
+        }
+        if self.managed_enrollment_key.is_some() != self.managed_source_authority.is_some() {
+            return Err(PlatformIdentityError::InvalidInput);
         }
         Ok(())
     }
@@ -132,6 +137,7 @@ struct HttpState {
     oidc_client: Option<OidcClientConfiguration>,
     public_management_endpoint: Option<String>,
     managed_enrollment_key: Option<ManagedEnrollmentKey>,
+    managed_source_authority: Option<ManagedSourceAuthority>,
     admission: Arc<Semaphore>,
 }
 
@@ -153,6 +159,7 @@ pub fn build_management_router(
 /// # Errors
 ///
 /// Rejects invalid transport bounds before the listener accepts traffic.
+#[allow(clippy::too_many_lines)]
 pub fn build_management_router_with_product(
     config: ManagementHttpConfig,
     identity: Arc<PlatformIdentityService>,
@@ -174,6 +181,7 @@ pub fn build_management_router_with_product(
         oidc_client,
         public_management_endpoint: config.public_management_endpoint,
         managed_enrollment_key: config.managed_enrollment_key,
+        managed_source_authority: config.managed_source_authority,
         admission: Arc::new(Semaphore::new(config.max_concurrent_requests)),
     };
     Ok(Router::new()
@@ -186,6 +194,10 @@ pub fn build_management_router_with_product(
         .route("/v1/auth/resources", get(resources))
         .route("/v1/auth/sessions", get(sessions))
         .route("/v1/auth/sessions/{session_id}", delete(revoke_session))
+        .route(
+            "/v1/auth/managed/operators/{operator_id}/grants",
+            put(reconcile_managed_operator_grants),
+        )
         .route("/v1/access/invitations", post(invite))
         .route(
             "/v1/access/invitations/{invitation_id}",
@@ -1055,6 +1067,14 @@ struct OidcRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManagedEnrollmentRequest {
     operator_name: String,
+    source_revision: u64,
+    grants: Vec<ManagedGrantRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagedGrantReconciliationRequestWire {
+    source_revision: u64,
     grants: Vec<ManagedGrantRequest>,
 }
 
@@ -1088,6 +1108,21 @@ struct LoginResponse {
     refresh_token: String,
     operator_id: String,
     session_id: String,
+    authorization_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applied: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replayed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_revision: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedGrantReconciliationResponse {
+    applied: bool,
+    replayed: bool,
+    source_revision: u64,
     authorization_revision: u64,
 }
 
@@ -1249,11 +1284,12 @@ async fn oidc(
         Ok(device) => device,
         Err(error) => return failure(error),
     };
-    let result = if request.invitation_code.is_some() && request.managed_enrollment.is_some() {
-        Err(PlatformIdentityError::InvalidInput)
-    } else if let Some(code) = request.invitation_code {
+    if request.invitation_code.is_some() && request.managed_enrollment.is_some() {
+        return failure(PlatformIdentityError::InvalidInput);
+    }
+    if let Some(code) = request.invitation_code {
         let code = Zeroizing::new(code);
-        match InvitationCode::from_str(&code) {
+        let result = match InvitationCode::from_str(&code) {
             Ok(code) => {
                 state
                     .identity
@@ -1261,62 +1297,135 @@ async fn oidc(
                     .await
             }
             Err(error) => Err(error),
-        }
-    } else if let Some(managed) = request.managed_enrollment {
-        let trusted = managed_bearer(&headers).is_some_and(|secret| {
-            state
-                .managed_enrollment_key
-                .as_ref()
-                .is_some_and(|key| key.matches(secret))
-        });
-        if !trusted {
-            return failure(PlatformIdentityError::Unauthenticated);
-        }
+        };
+        return match result {
+            Ok(result) => login_response(&result),
+            Err(error) => failure(error),
+        };
+    }
+    if let Some(managed) = request.managed_enrollment {
+        let source_authority = match trusted_managed_source(&state, &headers) {
+            Ok(authority) => authority,
+            Err(error) => return failure(error),
+        };
         let name = match OperatorName::from_str(&managed.operator_name) {
             Ok(name) => name,
             Err(error) => return failure(error),
         };
-        let grants = managed
-            .grants
-            .into_iter()
-            .map(|grant| {
-                let role = parse_role(&grant.role)?;
-                let scope = parse_scope(&grant.scope)?;
-                if !matches!(scope, AccessScope::Project(_)) {
-                    return Err(PlatformIdentityError::InvalidInput);
-                }
-                Ok(runku_platform_identity::OperatorGrant {
-                    scope,
-                    capabilities: role.capabilities(),
-                })
-            })
-            .collect::<Result<Vec<_>, PlatformIdentityError>>();
-        match grants {
-            Ok(grants) => {
-                state
-                    .identity
-                    .login_with_managed_external_identity(identity, name, grants, device, timestamp)
-                    .await
-            }
-            Err(error) => Err(error),
-        }
-    } else {
-        state
+        let grants = match parse_managed_grants(managed.grants) {
+            Ok(grants) => grants,
+            Err(error) => return failure(error),
+        };
+        return match state
             .identity
-            .login_with_external_identity(&identity, device, timestamp)
+            .login_with_managed_external_identity(
+                identity,
+                name,
+                source_authority,
+                managed.source_revision,
+                grants,
+                device,
+                timestamp,
+            )
             .await
-    };
+        {
+            Ok(result) => managed_login_response(&result),
+            Err(error) => failure(error),
+        };
+    }
+    let result = state
+        .identity
+        .login_with_external_identity(&identity, device, timestamp)
+        .await;
     match result {
         Ok(result) => login_response(&result),
         Err(error) => failure(error),
     }
 }
 
+fn parse_managed_grants(
+    grants: Vec<ManagedGrantRequest>,
+) -> Result<Vec<runku_platform_identity::OperatorGrant>, PlatformIdentityError> {
+    grants
+        .into_iter()
+        .map(|grant| {
+            let role = parse_role(&grant.role)?;
+            let scope = parse_scope(&grant.scope)?;
+            if !matches!(scope, AccessScope::Project(_)) {
+                return Err(PlatformIdentityError::InvalidInput);
+            }
+            Ok(runku_platform_identity::OperatorGrant {
+                scope,
+                capabilities: role.capabilities(),
+            })
+        })
+        .collect()
+}
+
 fn managed_bearer(headers: &HeaderMap) -> Option<&str> {
-    let value = headers.get(MANAGED_ENROLLMENT_HEADER)?.to_str().ok()?;
-    value
-        .strip_prefix("Bearer ")
-        .filter(|secret| !secret.is_empty() && secret.len() <= 16 * 1024)
+    let mut values = headers.get_all(MANAGED_ENROLLMENT_HEADER).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.strip_prefix("Bearer ").filter(|secret| {
+        !secret.is_empty() && secret.len() <= 16 * 1024 && secret.trim() == *secret
+    })
+}
+
+fn trusted_managed_source(
+    state: &HttpState,
+    headers: &HeaderMap,
+) -> Result<ManagedSourceAuthority, PlatformIdentityError> {
+    let trusted = managed_bearer(headers).is_some_and(|secret| {
+        state
+            .managed_enrollment_key
+            .as_ref()
+            .is_some_and(|key| key.matches(secret))
+    });
+    if !trusted {
+        return Err(PlatformIdentityError::Unauthenticated);
+    }
+    state
+        .managed_source_authority
+        .clone()
+        .ok_or(PlatformIdentityError::Unauthenticated)
+}
+
+async fn reconcile_managed_operator_grants(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(operator_id): Path<String>,
+    Json(request): Json<ManagedGrantReconciliationRequestWire>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let source_authority = match trusted_managed_source(&state, &headers) {
+        Ok(authority) => authority,
+        Err(error) => return failure(error),
+    };
+    let Ok(operator_id) = operator_id.parse() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let grants = match parse_managed_grants(request.grants) {
+        Ok(grants) => grants,
+        Err(error) => return failure(error),
+    };
+    match state
+        .identity
+        .reconcile_managed_grants(
+            operator_id,
+            source_authority,
+            request.source_revision,
+            grants,
+            now(),
+        )
+        .await
+    {
+        Ok(result) => reconciliation_response(&result),
+        Err(error) => failure(error),
+    }
 }
 
 async fn me(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -1735,6 +1844,39 @@ fn login_response(result: &LoginResult) -> Response {
             operator_id: result.context.operator.id.to_string(),
             session_id: result.context.session.id.to_string(),
             authorization_revision: result.context.operator.authorization_revision,
+            applied: None,
+            replayed: None,
+            source_revision: None,
+        },
+        true,
+    )
+}
+
+fn managed_login_response(result: &ManagedLoginResult) -> Response {
+    json(
+        StatusCode::OK,
+        &LoginResponse {
+            access_token: result.login.access_token.expose().to_owned(),
+            refresh_token: result.login.refresh_token.expose().to_owned(),
+            operator_id: result.login.context.operator.id.to_string(),
+            session_id: result.login.context.session.id.to_string(),
+            authorization_revision: result.reconciliation.authorization_revision,
+            applied: Some(result.reconciliation.applied),
+            replayed: Some(result.reconciliation.replayed),
+            source_revision: Some(result.reconciliation.source_revision),
+        },
+        true,
+    )
+}
+
+fn reconciliation_response(result: &ManagedGrantReconciliation) -> Response {
+    json(
+        StatusCode::OK,
+        &ManagedGrantReconciliationResponse {
+            applied: result.applied,
+            replayed: result.replayed,
+            source_revision: result.source_revision,
+            authorization_revision: result.authorization_revision,
         },
         true,
     )
@@ -1752,9 +1894,10 @@ fn failure(error: PlatformIdentityError) -> Response {
             StatusCode::FORBIDDEN
         }
         PlatformIdentityError::NotFound => StatusCode::NOT_FOUND,
-        PlatformIdentityError::Conflict | PlatformIdentityError::InvitationOperationReused => {
-            StatusCode::CONFLICT
-        }
+        PlatformIdentityError::Conflict
+        | PlatformIdentityError::InvitationOperationReused
+        | PlatformIdentityError::ManagedSourceConflict
+        | PlatformIdentityError::ManagedSourceStale => StatusCode::CONFLICT,
         PlatformIdentityError::Unavailable | PlatformIdentityError::EntropyUnavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }

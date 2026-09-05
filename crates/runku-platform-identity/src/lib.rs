@@ -19,18 +19,20 @@ pub use key::{
     InvitationCode, PlatformDigest, PlatformIdentityCrypto, RefreshToken,
 };
 pub use model::{
-    AccessScope, DeviceName, ExternalOperatorIdentity, InvitationKind, InvitationStatus, Operator,
-    OperatorContext, OperatorGrant, OperatorInvitation, OperatorName, OperatorRole,
-    OperatorSession, OperatorStatus, PlatformCapability, SessionStatus,
+    AccessScope, DeviceName, ExternalOperatorIdentity, InvitationKind, InvitationStatus,
+    ManagedGrantReconciliation, ManagedSourceAuthority, Operator, OperatorContext, OperatorGrant,
+    OperatorInvitation, OperatorName, OperatorRole, OperatorSession, OperatorStatus,
+    PlatformCapability, SessionStatus,
 };
 pub use repository::{
     BootstrapCreate, ConsumedInvitation, IdempotentInvitationCreate, ManagedExternalLogin,
-    NewInvitation, NewOperatorSession, PlatformIdentityBackend, PlatformIdentityRepository,
+    ManagedExternalLoginResult, ManagedGrantReconciliationRequest, NewInvitation,
+    NewOperatorSession, PlatformIdentityBackend, PlatformIdentityRepository,
     PlatformIdentityTelemetrySnapshot, RefreshedSession,
 };
 pub use service::{
-    BootstrapResult, IdempotentInvitationResult, LoginResult, PlatformIdentityService,
-    SessionTokenPolicy,
+    BootstrapResult, IdempotentInvitationResult, LoginResult, ManagedLoginResult,
+    PlatformIdentityService, SessionTokenPolicy,
 };
 pub use sql::{
     PlatformIdentityRepositoryConfig, PlatformIdentityRepositoryRole, SqlPlatformIdentityRepository,

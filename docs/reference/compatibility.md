@@ -34,6 +34,23 @@ exact. Older clients can ignore the additive endpoints and capabilities. Data wr
 existing logical operation journal and storage schemas, so no migration or release-version change
 is introduced by this source change.
 
+The same post-0.4.5 source line makes managed grant reconciliation source-owned and revisioned.
+Managed OIDC and `PUT /v1/auth/managed/operators/{operatorId}/grants` share one transactional
+contract: greater `u64` revisions replace only the configured HTTPS authority's subset, exact
+digest replays succeed, and stale/divergent revisions conflict. Platform Identity schema v3 is an
+append-only ownership migration. It snapshots existing grants as unmanaged and does not grant new
+authority; the first trusted reconciliation adopts only its explicit operator. Existing sessions
+and invitation-only operators remain valid. Older servers do not understand this ordering or
+ownership contract, so server rollback after schema v3 is unsupported. No release number or
+artifact is assigned by this source change.
+
+This is additive for invitation login, ordinary linked OIDC, operator sessions, and Product API
+clients. It is a coordinated contract upgrade for the opt-in managed control plane: the gateway
+must configure the same source authority and send `sourceRevision` before deploying this server;
+an older unversioned `managedEnrollment` body is rejected instead of being assigned an ambiguous
+revision. Deploy the gateway first (or atomically), then migrate/start the server, and do not roll
+the server back after schema v3.
+
 ## Pre-release matrix
 
 | Boundary | Current rule |
@@ -50,7 +67,7 @@ is introduced by this source change.
 | Compact server | Linux GNU ARM64/x86_64 binary and multi-platform OCI image; one attached Product Environment, Safe V8 profile |
 | Compact deployment | Dedicated Linux host, Compose v2, one active Environment writer, PostgreSQL 16, host TLS proxy, backup/empty restore |
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
-| Platform Identity | Management HTTP v1, native OIDC configuration, authenticated Product lifecycle/catalog/Data Admin/log stream, schema v2; no mixed-version or downgrade window |
+| Platform Identity | Management HTTP v1, native OIDC configuration, source-owned managed reconciliation, authenticated Product lifecycle/catalog/Data Admin/log stream, schema v3; no mixed-version or downgrade window |
 
 The source line adds optional `runku init --project-id/--environment-id` flags as a compatible CLI
 extension. Existing invocations keep generated IDs. Provisioners that use the extension must require

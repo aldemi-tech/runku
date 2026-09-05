@@ -38,9 +38,9 @@ use runku_observability::{
     S3LogArchiveConfig,
 };
 use runku_platform_identity::{
-    BootstrapResult, OperatorName, PlatformIdentityCrypto, PlatformIdentityRepository,
-    PlatformIdentityRepositoryConfig, PlatformIdentityService, SessionTokenPolicy,
-    SqlPlatformIdentityRepository,
+    BootstrapResult, ManagedSourceAuthority, OperatorName, PlatformIdentityCrypto,
+    PlatformIdentityRepository, PlatformIdentityRepositoryConfig, PlatformIdentityService,
+    SessionTokenPolicy, SqlPlatformIdentityRepository,
 };
 use runku_value::TimestampMicros;
 use serde::{Deserialize, Serialize};
@@ -144,6 +144,7 @@ async fn run() -> Result<(), &'static str> {
         exposure: config.exposure,
         public_management_endpoint: config.public_management_endpoint.clone(),
         managed_enrollment_key: config.managed_enrollment_key.clone(),
+        managed_source_authority: config.managed_source_authority.clone(),
     };
     let external = external_authenticator(config.oidc.as_ref())?;
     let product_adapter = match config.product_root.as_ref() {
@@ -213,6 +214,7 @@ struct ServerConfig {
     exposure: ManagementHttpExposure,
     public_management_endpoint: Option<String>,
     managed_enrollment_key: Option<ManagedEnrollmentKey>,
+    managed_source_authority: Option<ManagedSourceAuthority>,
     oidc: Option<OidcConfig>,
     product_root: Option<PathBuf>,
     platform_database_url: Option<Zeroizing<String>>,
@@ -299,8 +301,15 @@ impl ServerConfig {
                     .map_err(|_| "SERVER_MANAGED_ENROLLMENT_TOKEN_INVALID")
             })
             .transpose()?;
-        if managed_enrollment_key.is_some() && oidc.is_none() {
-            return Err("SERVER_MANAGED_ENROLLMENT_REQUIRES_OIDC");
+        let managed_source_authority = env::var("RUNKU_PLATFORM_MANAGED_SOURCE_AUTHORITY")
+            .ok()
+            .map(|value| {
+                ManagedSourceAuthority::from_str(&value)
+                    .map_err(|_| "SERVER_MANAGED_SOURCE_AUTHORITY_INVALID")
+            })
+            .transpose()?;
+        if managed_enrollment_key.is_some() != managed_source_authority.is_some() {
+            return Err("SERVER_MANAGED_SOURCE_CONFIGURATION_INCOMPLETE");
         }
         let product_root = env::var_os("RUNKU_PRODUCT_ROOT")
             .map(PathBuf::from)
@@ -373,6 +382,7 @@ impl ServerConfig {
             exposure,
             public_management_endpoint,
             managed_enrollment_key,
+            managed_source_authority,
             oidc,
             product_root,
             platform_database_url,

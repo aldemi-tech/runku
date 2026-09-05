@@ -9,10 +9,11 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     AccessScope, AccessToken, ConsumedInvitation, DeviceName, ExternalOperatorIdentity,
     GeneratedInvitationCode, IdempotentInvitationCreate, InvitationCode, InvitationKind,
-    InvitationStatus, ManagedExternalLogin, NewInvitation, NewOperatorSession, OperatorContext,
-    OperatorGrant, OperatorInvitation, OperatorName, OperatorRole, PlatformCapability,
-    PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository, RefreshToken,
-    RefreshedSession,
+    InvitationStatus, ManagedExternalLogin, ManagedGrantReconciliation,
+    ManagedGrantReconciliationRequest, ManagedSourceAuthority, NewInvitation, NewOperatorSession,
+    OperatorContext, OperatorGrant, OperatorInvitation, OperatorName, OperatorRole,
+    PlatformCapability, PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository,
+    RefreshToken, RefreshedSession,
 };
 
 /// Bounded lifetime policy for operator credentials.
@@ -70,6 +71,15 @@ pub struct LoginResult {
     pub refresh_token: RefreshToken,
     /// Current server-authoritative operator context.
     pub context: OperatorContext,
+}
+
+/// Managed OIDC login plus the source-versioned grant outcome committed with it.
+#[derive(Debug)]
+pub struct ManagedLoginResult {
+    /// New operator session and credentials.
+    pub login: LoginResult,
+    /// Non-secret managed grant reconciliation outcome.
+    pub reconciliation: ManagedGrantReconciliation,
 }
 
 /// Result of a durable invitation issuance operation.
@@ -374,39 +384,79 @@ impl PlatformIdentityService {
     /// Creates or reconciles a first-party gateway-managed OIDC operator and starts a session.
     ///
     /// The HTTP boundary must authenticate the gateway separately before invoking this method.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identity, authority, revision, grants, or device input; stale/divergent
+    /// source revisions; disabled operators; and repository or entropy failures.
+    #[allow(clippy::too_many_arguments)]
     pub async fn login_with_managed_external_identity(
         &self,
         identity: ExternalOperatorIdentity,
         operator_name: OperatorName,
-        mut grants: Vec<OperatorGrant>,
+        source_authority: ManagedSourceAuthority,
+        source_revision: u64,
+        grants: Vec<OperatorGrant>,
         device_name: DeviceName,
         now: TimestampMicros,
-    ) -> Result<LoginResult, PlatformIdentityError> {
+    ) -> Result<ManagedLoginResult, PlatformIdentityError> {
         identity.validate()?;
-        if grants.len() > 64 || grants.iter().any(|grant| grant.validate().is_err()) {
-            return Err(PlatformIdentityError::InvalidInput);
-        }
-        grants.sort_by_key(|grant| grant.scope);
-        if grants.windows(2).any(|pair| pair[0].scope == pair[1].scope) {
-            return Err(PlatformIdentityError::InvalidInput);
-        }
+        let grants = normalize_managed_grants(grants)?;
+        validate_managed_revision(source_revision, now)?;
+        let grants_digest = managed_grants_digest(&grants);
         let (session, access, refresh) = self.new_session(device_name, now)?;
         let candidate = ManagedExternalLogin {
             operator_id: OperatorId::generate(),
             operator_name,
             external_identity: identity,
             grants,
+            source_authority,
+            source_revision,
+            grants_digest,
             session,
         };
-        let context = self
+        let result = self
             .repository
             .login_external_managed(&candidate, now)
             .await?;
-        Ok(LoginResult {
-            access_token: access.token,
-            refresh_token: refresh.token,
-            context,
+        Ok(ManagedLoginResult {
+            login: LoginResult {
+                access_token: access.token,
+                refresh_token: refresh.token,
+                context: result.context,
+            },
+            reconciliation: result.reconciliation,
         })
+    }
+
+    /// Reconciles a complete source-owned grant set for an existing operator.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid authority/revision/grants, stale or divergent revisions, unknown operators,
+    /// and repository failures. This explicit trusted call may adopt legacy pre-source grants on
+    /// the first reconciliation.
+    pub async fn reconcile_managed_grants(
+        &self,
+        operator_id: OperatorId,
+        source_authority: ManagedSourceAuthority,
+        source_revision: u64,
+        grants: Vec<OperatorGrant>,
+        now: TimestampMicros,
+    ) -> Result<ManagedGrantReconciliation, PlatformIdentityError> {
+        let grants = normalize_managed_grants(grants)?;
+        validate_managed_revision(source_revision, now)?;
+        self.repository
+            .reconcile_managed_grants(&ManagedGrantReconciliationRequest {
+                operator_id,
+                source_authority,
+                source_revision,
+                grants_digest: managed_grants_digest(&grants),
+                grants,
+                reconciled_at: now,
+                adopt_legacy: true,
+            })
+            .await
     }
 
     /// Authenticates one Management API bearer and reloads current grants.
@@ -573,6 +623,54 @@ fn invitation_request_digest(
     }
     for capability in capabilities {
         digest_field(&mut digest, capability.as_str());
+    }
+    digest.finalize().into()
+}
+
+fn normalize_managed_grants(
+    mut grants: Vec<OperatorGrant>,
+) -> Result<Vec<OperatorGrant>, PlatformIdentityError> {
+    if grants.len() > 64 || grants.iter().any(|grant| grant.validate().is_err()) {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
+    grants.sort_by_key(|grant| grant.scope);
+    if grants.windows(2).any(|pair| pair[0].scope == pair[1].scope) {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
+    Ok(grants)
+}
+
+fn validate_managed_revision(
+    source_revision: u64,
+    now: TimestampMicros,
+) -> Result<(), PlatformIdentityError> {
+    if source_revision == 0 || now.get() < 0 {
+        Err(PlatformIdentityError::InvalidInput)
+    } else {
+        Ok(())
+    }
+}
+
+fn managed_grants_digest(grants: &[OperatorGrant]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"runku-managed-grants-v1\0");
+    for grant in grants {
+        match grant.scope {
+            AccessScope::Installation => digest.update(b"installation\0"),
+            AccessScope::Project(project) => {
+                digest.update(b"project\0");
+                digest_field(&mut digest, &project.to_string());
+            }
+            AccessScope::Environment(environment) => {
+                digest.update(b"environment\0");
+                digest_field(&mut digest, &environment.project_id().to_string());
+                digest_field(&mut digest, &environment.environment_id().to_string());
+            }
+        }
+        for capability in &grant.capabilities {
+            digest_field(&mut digest, capability.as_str());
+        }
+        digest.update([0xff]);
     }
     digest.finalize().into()
 }

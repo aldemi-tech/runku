@@ -251,6 +251,14 @@ conflict, operation-ID reuse, schema validation, unavailable, or corruption with
 tokens, source, or stored values. Existing 0.4.5 grants do not acquire `data:*` implicitly; opt in
 by updating the intended grant instead of widening `environments:manage`.
 
+Managed control planes update authority through
+`PUT /v1/auth/managed/operators/{operatorId}/grants` with the separately configured internal token.
+Each body is a complete source-owned Project-role set and a monotonic `sourceRevision`; an empty set
+is an intentional revocation. Reuse the exact revision only for an identical replay. Never attempt
+rollback with a lower revision or use an operator/Application bearer for this endpoint. Once the
+response reports `applied: true`, existing sessions are immediately constrained because ordinary
+authorization and every log-follow iteration reload current grants.
+
 Recovery rules:
 
 - `401` after the single refresh attempt: run `runku login` again; do not replace it with `rk_sec`;

@@ -153,3 +153,51 @@ fn identity_and_function_platform_must_target_different_databases()
     assert!(!String::from_utf8_lossy(&output.stderr).contains("other-secret"));
     Ok(())
 }
+
+#[test]
+fn managed_token_and_canonical_source_authority_are_an_exact_pair()
+-> Result<(), Box<dyn std::error::Error>> {
+    let token = "m".repeat(32);
+    let token_only = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN", &token),
+    ])?;
+    assert_error(
+        &token_only,
+        "SERVER_MANAGED_SOURCE_CONFIGURATION_INCOMPLETE",
+    );
+
+    let authority_only = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        (
+            "RUNKU_PLATFORM_MANAGED_SOURCE_AUTHORITY",
+            "https://cloud.runku.example",
+        ),
+    ])?;
+    assert_error(
+        &authority_only,
+        "SERVER_MANAGED_SOURCE_CONFIGURATION_INCOMPLETE",
+    );
+
+    let noncanonical = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN", &token),
+        (
+            "RUNKU_PLATFORM_MANAGED_SOURCE_AUTHORITY",
+            "https://cloud.runku.example/",
+        ),
+    ])?;
+    assert_error(&noncanonical, "SERVER_MANAGED_SOURCE_AUTHORITY_INVALID");
+
+    let paired = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN", &token),
+        (
+            "RUNKU_PLATFORM_MANAGED_SOURCE_AUTHORITY",
+            "https://cloud.runku.example",
+        ),
+    ])?;
+    assert!(paired.status.success());
+    assert_eq!(paired.stdout, b"configuration valid\n");
+    Ok(())
+}

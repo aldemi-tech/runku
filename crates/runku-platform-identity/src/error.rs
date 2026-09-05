@@ -26,6 +26,12 @@ pub enum PlatformIdentityError {
     /// One invitation operation identity was reused for different requested content.
     #[error("platform invitation operation identity was reused")]
     InvitationOperationReused,
+    /// A managed grant source attempted to reuse one revision with different content.
+    #[error("managed grant source revision conflicts with committed content")]
+    ManagedSourceConflict,
+    /// A managed grant source attempted to roll back its committed revision.
+    #[error("managed grant source revision is stale")]
+    ManagedSourceStale,
     /// The installation already has its initial owner.
     #[error("platform identity bootstrap is already complete")]
     AlreadyInitialized,
@@ -61,6 +67,8 @@ impl PlatformIdentityError {
             Self::NotFound => "PLATFORM_IDENTITY_NOT_FOUND",
             Self::Conflict => "PLATFORM_IDENTITY_CONFLICT",
             Self::InvitationOperationReused => "PLATFORM_INVITATION_OPERATION_REUSED",
+            Self::ManagedSourceConflict => "PLATFORM_MANAGED_SOURCE_CONFLICT",
+            Self::ManagedSourceStale => "PLATFORM_MANAGED_SOURCE_STALE",
             Self::AlreadyInitialized => "PLATFORM_BOOTSTRAP_COMPLETE",
             Self::Inactive => "PLATFORM_CREDENTIAL_INACTIVE",
             Self::EntropyUnavailable => "PLATFORM_IDENTITY_ENTROPY_UNAVAILABLE",
