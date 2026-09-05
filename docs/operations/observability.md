@@ -17,9 +17,18 @@ Best-effort telemetry must never become authoritative billing or scheduling stat
 Platform Identity writes operator/invitation/session security audit events in the same PostgreSQL
 transaction as each successful state change. Its repository also maintains process-local aggregate
 counters for bootstrap, invitation, authentication, refresh, revocation, and retryable failures.
-The current source Management API does not yet expose those counters as a metrics endpoint or offer
-an audit query endpoint; operators must not treat ordinary logs as a substitute for the durable
-audit table.
+The authenticated Product Management API exposes fixed-name Environment runtime, worker, and
+artifact-cache aggregates through `GET .../metrics` with `usage:read`. It intentionally does not
+expose Platform Identity security counters or an audit query endpoint; operators must not treat
+ordinary logs or these diagnostic counters as a substitute for the durable audit table or usage
+facts.
+
+`GET .../instances/healthz` requires `environments:read` and returns one opaque `product` instance
+with fixed component names. A Product without a published Release reports its runtime as `idle`,
+which remains healthy; dependency failures report only `unavailable`, never internal messages,
+provider placement, cell identity, or credentials. Counter values are canonical decimal strings so
+JavaScript consumers preserve `u64` precision. Names and units are Product-owned, sorted, and have
+no user-controlled labels.
 
 Idempotent invitation create/replay and revocation have bounded process counters. Successful
 creates and state-changing revocations also record the non-secret request Operation ID and

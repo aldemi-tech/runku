@@ -383,6 +383,52 @@ pub struct ManagementEnvironmentResult {
     pub replayed: bool,
 }
 
+/// One fixed-name aggregate Product metric without tenant-controlled labels.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementMetric {
+    /// Stable dotted metric name.
+    pub name: String,
+    /// Canonical decimal unsigned value safe for arbitrary-precision consumers.
+    pub value: String,
+    /// Stable unit such as `count`, `bytes`, or `entries`.
+    pub unit: String,
+}
+
+/// Bounded aggregate metrics for one exact Product Environment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementMetrics {
+    /// Wire version.
+    pub version: u8,
+    /// Fixed-name metric set ordered by name.
+    pub metrics: Vec<ManagementMetric>,
+}
+
+/// One non-secret Product instance health component.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementHealthComponent {
+    /// Stable component name.
+    pub name: String,
+    /// `ready`, `idle`, or `unavailable`.
+    pub status: String,
+}
+
+/// Sanitized health projection for the Product instance serving one Environment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementInstanceHealth {
+    /// Wire version.
+    pub version: u8,
+    /// Product-owned opaque instance identifier.
+    pub instance_id: String,
+    /// `ready` or `unavailable`.
+    pub status: String,
+    /// Fixed component set ordered by name.
+    pub components: Vec<ManagementHealthComponent>,
+}
+
 /// Non-secret Environment operation used to reconcile an uncertain result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1110,6 +1156,16 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
     /// dependency failure rather than only Platform Identity health.
     async fn health(&self) -> Result<(), ManagementProductError> {
         Ok(())
+    }
+
+    /// Reads bounded aggregate operational metrics for this exact Environment.
+    async fn metrics(&self) -> Result<ManagementMetrics, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Reads sanitized component health for this Product instance.
+    async fn instance_health(&self) -> Result<ManagementInstanceHealth, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
     }
 
     /// Gets the exact Product Environment owned by this adapter.

@@ -527,6 +527,8 @@ plus Runku's stricter verifier rules above.
 | `PUT .../crons/{name}/activation` | `cron:activate` + `Idempotency-Key: opn_*` | enables/disables an exact immutable declaration using repository CAS; operator disable intent survives restart and manifest reconciliation |
 | `GET .../cron-operations/{opn_*}` | `cron:read` | reconciles one successful non-secret activation result after uncertainty |
 | `GET .../scheduled?limit=...&after=...` | `schedules:read` | reads bounded durable queue/history in stable ID order without worker identity |
+| `GET .../metrics` | `usage:read` | reads a bounded fixed-name aggregate metric set; decimal strings preserve full counter precision and remain diagnostic only |
+| `GET .../instances/healthz` | `environments:read` | reads sanitized Product dependency/runtime status without provider, cell, credential, or error details |
 | `GET .../functions` and `GET .../schema/tables` | `releases:read` | reads a bounded catalog from one verified effective artifact |
 | `POST .../data/query` and `GET .../data/documents/{table}/{document}` | `data:read` | reads logical documents through the canonical store and schema |
 | `POST .../data/documents/{table}` | `data:write` + `Idempotency-Key: opn_*` | inserts a schema-valid document with deterministic identity |

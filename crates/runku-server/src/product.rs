@@ -58,9 +58,10 @@ use runku_management_service::{
     ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementEnvironment,
     ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
     ManagementEnvironmentOperation, ManagementEnvironmentResult, ManagementEnvironmentUpdate,
-    ManagementFunctionEntry, ManagementFunctionPage, ManagementIssuedStorageAccessKey,
-    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
-    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementFunctionEntry, ManagementFunctionPage, ManagementHealthComponent,
+    ManagementInstanceHealth, ManagementIssuedStorageAccessKey, ManagementLogArchiveStatus,
+    ManagementLogPage, ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery,
+    ManagementMetric, ManagementMetrics, ManagementProduct, ManagementProductError,
     ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
     ManagementScheduledInvocation, ManagementScheduledPage, ManagementSchemaIndex,
     ManagementSchemaPage, ManagementSchemaTable, ManagementServingOperation,
@@ -725,6 +726,156 @@ impl ManagementProduct for ProductAdapter {
         self.cron.health().await.map_err(map_cron)?;
         self.serving.health().await.map_err(map_serving)?;
         self.storage.health().await.map_err(map_storage)
+    }
+
+    async fn metrics(&self) -> Result<ManagementMetrics, ManagementProductError> {
+        let process = self.process.lock().await;
+        let (local, runtime, cache) = if let Some(process) = process.as_ref() {
+            (
+                process.telemetry(),
+                process.runtime().telemetry(),
+                process.service().artifact_cache_telemetry(),
+            )
+        } else {
+            (Default::default(), Default::default(), Default::default())
+        };
+        let mut metrics = vec![
+            management_metric("artifact_cache.entries", cache.entries, "entries"),
+            management_metric("artifact_cache.evictions", cache.evictions, "count"),
+            management_metric("artifact_cache.hits", cache.hits, "count"),
+            management_metric("artifact_cache.misses", cache.misses, "count"),
+            management_metric(
+                "artifact_cache.retained_bytes",
+                cache.retained_bytes,
+                "bytes",
+            ),
+            management_metric("background_failures", local.background_failures, "count"),
+            management_metric("catalog_refreshes", local.catalog_refreshes, "count"),
+            management_metric("cron_polls", local.cron_polls, "count"),
+            management_metric("file_usage_events", local.file_usage_events, "count"),
+            management_metric("file_usage_polls", local.file_usage_polls, "count"),
+            management_metric("forced_shutdowns", local.forced_shutdowns, "count"),
+            management_metric("log_archive_polls", local.log_archive_polls, "count"),
+            management_metric("log_archive_records", local.log_archive_records, "count"),
+            management_metric("log_journal_polls", local.log_journal_polls, "count"),
+            management_metric("log_journal_records", local.log_journal_records, "count"),
+            management_metric("realtime_polls", local.realtime_polls, "count"),
+            management_metric("runtime.admitted", runtime.admitted, "count"),
+            management_metric("runtime.busy", runtime.busy, "count"),
+            management_metric("runtime.cancelled", runtime.cancelled, "count"),
+            management_metric(
+                "runtime.deadline_exceeded",
+                runtime.deadline_exceeded,
+                "count",
+            ),
+            management_metric(
+                "runtime.function_call_busy",
+                runtime.function_call_busy,
+                "count",
+            ),
+            management_metric(
+                "runtime.function_call_denied",
+                runtime.function_call_denied,
+                "count",
+            ),
+            management_metric(
+                "runtime.function_call_failed",
+                runtime.function_call_failed,
+                "count",
+            ),
+            management_metric(
+                "runtime.function_call_limited",
+                runtime.function_call_limited,
+                "count",
+            ),
+            management_metric(
+                "runtime.function_call_succeeded",
+                runtime.function_call_succeeded,
+                "count",
+            ),
+            management_metric("runtime.function_calls", runtime.function_calls, "count"),
+            management_metric(
+                "runtime.function_logs_dropped",
+                runtime.function_logs_dropped,
+                "count",
+            ),
+            management_metric(
+                "runtime.function_logs_emitted",
+                runtime.function_logs_emitted,
+                "count",
+            ),
+            management_metric(
+                "runtime.function_logs_limited",
+                runtime.function_logs_limited,
+                "count",
+            ),
+            management_metric("runtime.heap_exceeded", runtime.heap_exceeded, "count"),
+            management_metric("runtime.internal_errors", runtime.internal_errors, "count"),
+            management_metric("runtime.invalid", runtime.invalid, "count"),
+            management_metric(
+                "runtime.javascript_errors",
+                runtime.javascript_errors,
+                "count",
+            ),
+            management_metric("runtime.nested_admitted", runtime.nested_admitted, "count"),
+            management_metric("runtime.nested_busy", runtime.nested_busy, "count"),
+            management_metric("runtime.nested_failed", runtime.nested_failed, "count"),
+            management_metric(
+                "runtime.nested_succeeded",
+                runtime.nested_succeeded,
+                "count",
+            ),
+            management_metric(
+                "runtime.platform_logs_dropped",
+                runtime.platform_logs_dropped,
+                "count",
+            ),
+            management_metric("runtime.succeeded", runtime.succeeded, "count"),
+            management_metric("scheduled_polls", local.scheduled_polls, "count"),
+        ];
+        metrics.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(ManagementMetrics {
+            version: 1,
+            metrics,
+        })
+    }
+
+    async fn instance_health(&self) -> Result<ManagementInstanceHealth, ManagementProductError> {
+        let component = |name: &str, ready: bool| ManagementHealthComponent {
+            name: name.to_owned(),
+            status: if ready { "ready" } else { "unavailable" }.to_owned(),
+        };
+        let mut components = vec![
+            component("cron", self.cron.health().await.is_ok()),
+            component("data", self.data_store.health().await.is_ok()),
+            component("environments", self.environments.health().await.is_ok()),
+            component(
+                "identity",
+                self.identity.configuration_revision().await.is_ok(),
+            ),
+            component("serving", self.serving.health().await.is_ok()),
+            component("storage", self.storage.health().await.is_ok()),
+        ];
+        let process = self.process.lock().await;
+        components.push(ManagementHealthComponent {
+            name: "runtime".to_owned(),
+            status: match process.as_ref() {
+                Some(process) if process.is_ready() => "ready",
+                Some(_) => "unavailable",
+                None => "idle",
+            }
+            .to_owned(),
+        });
+        components.sort_by(|left, right| left.name.cmp(&right.name));
+        let ready = components
+            .iter()
+            .all(|value| value.status == "ready" || value.status == "idle");
+        Ok(ManagementInstanceHealth {
+            version: 1,
+            instance_id: "product".to_owned(),
+            status: if ready { "ready" } else { "unavailable" }.to_owned(),
+            components,
+        })
     }
 
     async fn environment(&self) -> Result<ManagementEnvironment, ManagementProductError> {
@@ -2034,6 +2185,14 @@ fn parse_credential_path(
     ))
 }
 
+fn management_metric(name: &str, value: u64, unit: &str) -> ManagementMetric {
+    ManagementMetric {
+        name: name.to_owned(),
+        value: value.to_string(),
+        unit: unit.to_owned(),
+    }
+}
+
 fn management_environment(environment: &Environment) -> ManagementEnvironment {
     ManagementEnvironment {
         version: 1,
@@ -2956,6 +3115,63 @@ export const hourly = cron({
             },
         ))
         .await
+    }
+
+    #[tokio::test]
+    async fn console_metrics_and_instance_health_are_bounded_and_cover_idle_runtime() -> TestResult
+    {
+        let directory = tempfile::tempdir()?;
+        initialize_local(
+            directory.path(),
+            "local".parse()?,
+            "127.0.0.1:0".parse::<SocketAddr>()?,
+            TimestampMicros::new(1_800_000_000_000_000),
+        )
+        .await?;
+        let product = open_adapter(directory.path()).await?;
+
+        let metrics = product.metrics().await?;
+        assert_eq!(metrics.version, 1);
+        assert!(metrics.metrics.len() >= 30);
+        assert!(
+            metrics
+                .metrics
+                .windows(2)
+                .all(|pair| pair[0].name < pair[1].name)
+        );
+        assert!(metrics.metrics.iter().all(|metric| {
+            metric.value.parse::<u64>().is_ok()
+                && matches!(metric.unit.as_str(), "count" | "bytes" | "entries")
+        }));
+        assert_eq!(
+            metrics
+                .metrics
+                .iter()
+                .find(|metric| metric.name == "runtime.admitted")
+                .map(|metric| metric.value.as_str()),
+            Some("0")
+        );
+
+        let health = product.instance_health().await?;
+        assert_eq!(health.version, 1);
+        assert_eq!(health.instance_id, "product");
+        assert_eq!(health.status, "ready");
+        assert_eq!(health.components.len(), 7);
+        assert!(
+            health
+                .components
+                .windows(2)
+                .all(|pair| pair[0].name < pair[1].name)
+        );
+        assert_eq!(
+            health
+                .components
+                .iter()
+                .find(|component| component.name == "runtime")
+                .map(|component| component.status.as_str()),
+            Some("idle")
+        );
+        Ok(())
     }
 
     async fn product_database(

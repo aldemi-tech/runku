@@ -20,9 +20,10 @@ use runku_management_service::{
     ManagementBucketPage, ManagementCronActivationResult, ManagementCronActivationSet,
     ManagementCronCatalog, ManagementCronQuery, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataWriteResult, ManagementEnvironment,
-    ManagementEnvironmentConfiguration, ManagementHttpConfig, ManagementHttpExposure,
-    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
-    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementEnvironmentConfiguration, ManagementHealthComponent, ManagementHttpConfig,
+    ManagementHttpExposure, ManagementInstanceHealth, ManagementLogArchiveStatus,
+    ManagementLogPage, ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery,
+    ManagementMetric, ManagementMetrics, ManagementProduct, ManagementProductError,
     ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
     ManagementScheduledPage, ManagementWorkspacePublish, OidcClientConfiguration,
     build_management_router, build_management_router_with_product,
@@ -61,6 +62,8 @@ struct DataProbeProduct {
     cron_reads: AtomicUsize,
     cron_writes: AtomicUsize,
     scheduled_reads: AtomicUsize,
+    metrics_reads: AtomicUsize,
+    instance_health_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -71,6 +74,31 @@ impl ManagementProduct for DataProbeProduct {
 
     async fn health(&self) -> Result<(), ManagementProductError> {
         Ok(())
+    }
+
+    async fn metrics(&self) -> Result<ManagementMetrics, ManagementProductError> {
+        self.metrics_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementMetrics {
+            version: 1,
+            metrics: vec![ManagementMetric {
+                name: "runtime.admitted".to_owned(),
+                value: "7".to_owned(),
+                unit: "count".to_owned(),
+            }],
+        })
+    }
+
+    async fn instance_health(&self) -> Result<ManagementInstanceHealth, ManagementProductError> {
+        self.instance_health_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementInstanceHealth {
+            version: 1,
+            instance_id: "product".to_owned(),
+            status: "ready".to_owned(),
+            components: vec![ManagementHealthComponent {
+                name: "runtime".to_owned(),
+                status: "ready".to_owned(),
+            }],
+        })
     }
 
     async fn environment(&self) -> Result<ManagementEnvironment, ManagementProductError> {
@@ -779,6 +807,23 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_006),
         )
         .await?;
+    let usage_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "usage-reader".to_owned(),
+            },
+            OperatorName::from_str("Usage reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::UsageRead]),
+            }],
+            DeviceName::from_str("usage reader device")?,
+            TimestampMicros::new(1_900_000_000_000_007),
+        )
+        .await?;
     let product = Arc::new(DataProbeProduct {
         scope,
         reads: AtomicUsize::new(0),
@@ -789,6 +834,8 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         cron_reads: AtomicUsize::new(0),
         cron_writes: AtomicUsize::new(0),
         scheduled_reads: AtomicUsize::new(0),
+        metrics_reads: AtomicUsize::new(0),
+        instance_health_reads: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -840,6 +887,16 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     );
     let cron_activation_path = format!(
         "/v1/projects/{}/environments/{}/crons/crons.hourly/activation",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let metrics_path = format!(
+        "/v1/projects/{}/environments/{}/metrics",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let instance_health_path = format!(
+        "/v1/projects/{}/environments/{}/instances/healthz",
         scope.project_id(),
         scope.environment_id()
     );
@@ -897,6 +954,16 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(product.environment_reads.load(Ordering::SeqCst), 0);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&metrics_path)
+                .header(header::AUTHORIZATION, format!("Bearer {manager_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.metrics_reads.load(Ordering::SeqCst), 0);
 
     let reader_access = data_reader.login.access_token.expose();
     let response = router
@@ -951,6 +1018,41 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.environment_reads.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&instance_health_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {environment_access}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.instance_health_reads.load(Ordering::SeqCst), 1);
+
+    let usage_access = usage_reader.login.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&metrics_path)
+                .header(header::AUTHORIZATION, format!("Bearer {usage_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.metrics_reads.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&instance_health_path)
+                .header(header::AUTHORIZATION, format!("Bearer {usage_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.instance_health_reads.load(Ordering::SeqCst), 1);
 
     let automation_access = automation_reader.login.access_token.expose();
     let response = router

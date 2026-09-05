@@ -223,6 +223,14 @@ pub fn build_management_router_with_product(
             get(product_environment_operation),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/metrics",
+            get(product_metrics),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/instances/healthz",
+            get(product_instance_health),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{environment_id}/workspace/publish",
             post(product_publish).layer(DefaultBodyLimit::max(DEVELOPMENT_PUBLISH_MAX_BYTES)),
         )
@@ -383,6 +391,58 @@ async fn product_environment(
         Err(response) => return *response,
     };
     match product.environment().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_metrics(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::UsageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.metrics().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_instance_health(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::EnvironmentsRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.instance_health().await {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }
