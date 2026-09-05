@@ -141,6 +141,10 @@ pub enum PlatformCapability {
     CredentialsRead,
     /// Create, rotate, revoke, or delete credentials.
     CredentialsManage,
+    /// Read logical bucket configuration and non-secret Object Storage key metadata.
+    StorageRead,
+    /// Create, configure, archive buckets and manage scoped Product storage keys.
+    StorageManage,
     /// Query historical operational logs.
     LogsRead,
     /// Follow an operational log stream.
@@ -169,6 +173,8 @@ impl PlatformCapability {
             Self::DataWrite => "data:write",
             Self::CredentialsRead => "credentials:read",
             Self::CredentialsManage => "credentials:manage",
+            Self::StorageRead => "storage:read",
+            Self::StorageManage => "storage:manage",
             Self::LogsRead => "logs:read",
             Self::LogsFollow => "logs:follow",
             Self::LogsPrune => "logs:prune",
@@ -195,6 +201,8 @@ impl PlatformCapability {
             "data:write" => Ok(Self::DataWrite),
             "credentials:read" => Ok(Self::CredentialsRead),
             "credentials:manage" => Ok(Self::CredentialsManage),
+            "storage:read" => Ok(Self::StorageRead),
+            "storage:manage" => Ok(Self::StorageManage),
             "logs:read" => Ok(Self::LogsRead),
             "logs:follow" => Ok(Self::LogsFollow),
             "logs:prune" => Ok(Self::LogsPrune),
@@ -219,6 +227,8 @@ impl PlatformCapability {
             Self::DataWrite,
             Self::CredentialsRead,
             Self::CredentialsManage,
+            Self::StorageRead,
+            Self::StorageManage,
             Self::LogsRead,
             Self::LogsFollow,
             Self::LogsPrune,
@@ -310,6 +320,8 @@ impl OperatorRole {
                 C::DataWrite,
                 C::CredentialsRead,
                 C::CredentialsManage,
+                C::StorageRead,
+                C::StorageManage,
                 C::LogsRead,
                 C::LogsFollow,
                 C::LogsPrune,
@@ -325,6 +337,7 @@ impl OperatorRole {
                 C::DataRead,
                 C::DataWrite,
                 C::CredentialsRead,
+                C::StorageRead,
                 C::LogsRead,
                 C::LogsFollow,
             ]
@@ -333,6 +346,7 @@ impl OperatorRole {
             Self::Observer => [
                 C::ReleasesRead,
                 C::CredentialsRead,
+                C::StorageRead,
                 C::LogsRead,
                 C::LogsFollow,
                 C::DataRead,
@@ -578,6 +592,14 @@ mod tests {
             environment_manager.authorize(scope, PlatformCapability::DataWrite),
             Err(PlatformIdentityError::Forbidden)
         );
+        assert_eq!(
+            environment_manager.authorize(scope, PlatformCapability::StorageRead),
+            Err(PlatformIdentityError::Forbidden)
+        );
+        assert_eq!(
+            environment_manager.authorize(scope, PlatformCapability::StorageManage),
+            Err(PlatformIdentityError::Forbidden)
+        );
 
         let reader = context([PlatformCapability::DataRead])?;
         let scope = reader.grants[0].scope;
@@ -588,6 +610,17 @@ mod tests {
         );
         assert_eq!(
             reader.authorize(scope, PlatformCapability::DataWrite),
+            Err(PlatformIdentityError::Forbidden)
+        );
+        let storage_reader = context([PlatformCapability::StorageRead])?;
+        let scope = storage_reader.grants[0].scope;
+        assert!(
+            storage_reader
+                .authorize(scope, PlatformCapability::StorageRead)
+                .is_ok()
+        );
+        assert_eq!(
+            storage_reader.authorize(scope, PlatformCapability::StorageManage),
             Err(PlatformIdentityError::Forbidden)
         );
         Ok(())

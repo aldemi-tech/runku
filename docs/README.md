@@ -34,7 +34,7 @@ Read in this order:
    [Serving policy](concepts/serving-policy.md) documents revisioned atomic/gradual Release weights
    and the compatibility gate; request routing remains a separate integration slice.
    [Logical Object Storage](concepts/object-storage.md) documents the provider-independent bucket
-   and Product access-key registry and its current no-object-bytes integration limit.
+   and Product access-key Management API and its current no-object-bytes integration limit.
 4. [Functions and runtimes](functions/functions-and-runtimes.md): declarations, capabilities, Safe
    V8, Full Node, nested calls, HTTPS, scheduling, and failure semantics.
 5. [Application file storage](functions/file-storage.md): Action APIs, streamed HTTP transfer,
@@ -101,7 +101,8 @@ reading order because it records the product invariants and definition of done.
 - [Serving policy](concepts/serving-policy.md): weighted Release intent, canonical compatibility
   evidence, desired/observed state, audit, recovery, and deferred runtime selection.
 - [Logical Object Storage](concepts/object-storage.md): revisioned buckets, scoped Product access
-  keys, SQL conformance, recovery, and the current provider/HTTP integration limit.
+  keys, authenticated Management API/server composition, SQL conformance, recovery, and the
+  current provider/data-plane integration limit.
 - [Repository map](internals/repository-map.md): crate ownership, dependency direction, tests,
   generated artifacts, and where to implement a change.
 - [Evolving Runku](development/evolving-runku.md): contract classification, versioning, migrations,

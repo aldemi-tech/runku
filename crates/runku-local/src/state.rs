@@ -26,8 +26,10 @@ use runku_release_repository::{RepositoryConfig, SqlReleaseRepository};
 use runku_releases::{FilesystemArtifactStore, FilesystemStoreRole};
 use runku_value::TimestampMicros;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+use zeroize::Zeroize as _;
 
 /// Fixed private directory under one explicit project root.
 pub const LOCAL_STATE_DIRECTORY: &str = ".runku";
@@ -313,6 +315,26 @@ pub(crate) async fn load_identity_pepper(
     paths: &LocalPaths,
 ) -> Result<[u8; IDENTITY_PEPPER_BYTES], LocalStateError> {
     load_private_pepper(&paths.identity_pepper).await
+}
+
+/// Derives the distinct local Object Storage access-key digest key from protected Product state.
+///
+/// The derivation is domain-separated and never persists the derived value. This keeps compact
+/// backup/restore identity material sufficient without reusing the Application Key HMAC domain.
+///
+/// # Errors
+///
+/// Rejects invalid Product state or inaccessible/malformed protected pepper material.
+pub async fn derive_local_object_storage_digest_key(
+    root: &Path,
+) -> Result<[u8; 32], LocalStateError> {
+    let (_, paths) = load_local(root).await?;
+    let mut pepper = load_identity_pepper(&paths).await?;
+    let mut digest = Sha256::new();
+    digest.update(b"RUNKU_LOCAL_OBJECT_STORAGE_DIGEST_KEY_V1\0");
+    digest.update(pepper);
+    pepper.zeroize();
+    Ok(digest.finalize().into())
 }
 
 pub(crate) async fn load_development_access_pepper(

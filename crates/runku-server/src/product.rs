@@ -31,24 +31,38 @@ use runku_local::{
     LocalChannelExpectation, LocalCodeResolution, LocalCreatedCredential, LocalCredentialMetadata,
     LocalIdentityError, LocalIdentityManager, LocalLogError, LocalLogManager, LocalProcess,
     LocalProcessConfig, LocalPublishError, LocalReleaseError, LocalReleaseManager,
-    LocalReleaseOutcome, LocalReleaseStatusReport, load_local, publish_local_if_head,
+    LocalReleaseOutcome, LocalReleaseStatusReport, derive_local_object_storage_digest_key,
+    load_local, publish_local_if_head,
 };
 use runku_management_service::{
     ManagementApplicationClient, ManagementApplicationClientCreate,
     ManagementApplicationClientList, ManagementApplicationCredential,
     ManagementApplicationCredentialCreate, ManagementApplicationCredentialLifecycle,
-    ManagementApplicationCredentialList, ManagementApplicationCredentialRotate,
-    ManagementCatalogQuery, ManagementCreatedApplicationClient,
-    ManagementCreatedApplicationCredential, ManagementDataDeleteRequest, ManagementDataDocument,
-    ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
-    ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementFunctionEntry,
-    ManagementFunctionPage, ManagementLogArchiveStatus, ManagementLogPage,
+    ManagementApplicationCredentialList, ManagementApplicationCredentialRotate, ManagementBucket,
+    ManagementBucketArchive, ManagementBucketConfiguration, ManagementBucketCorsRule,
+    ManagementBucketCreate, ManagementBucketLifecycle, ManagementBucketPage, ManagementBucketQuota,
+    ManagementBucketResult, ManagementBucketUpdate, ManagementCatalogQuery,
+    ManagementCreatedApplicationClient, ManagementCreatedApplicationCredential,
+    ManagementDataDeleteRequest, ManagementDataDocument, ManagementDataInsertRequest,
+    ManagementDataPage, ManagementDataQuery, ManagementDataReplaceRequest,
+    ManagementDataWriteResult, ManagementFunctionEntry, ManagementFunctionPage,
+    ManagementIssuedStorageAccessKey, ManagementLogArchiveStatus, ManagementLogPage,
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
     ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
     ManagementResolvedTarget, ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
     ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
-    ManagementServingPolicySet, ManagementServingRelease, ManagementWorkspacePublish,
+    ManagementServingPolicySet, ManagementServingRelease, ManagementStorageAccessKey,
+    ManagementStorageAccessKeyConfiguration, ManagementStorageAccessKeyIssue,
+    ManagementStorageAccessKeyPage, ManagementStorageAccessKeyRevoke,
+    ManagementStorageAccessKeyRotate, ManagementStorageOperation, ManagementWorkspacePublish,
 };
+use runku_object_storage::{
+    AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
+    BucketConfiguration, BucketId, BucketLifecycle, BucketPolicy, BucketQuota, CorsMethod,
+    CorsRule, ObjectStorageActor, ObjectStorageError, ObjectStorageOperation,
+    ObjectStorageOperationKind, ObjectStorageService, SecretDigestKey, Versioning,
+};
+use runku_object_storage_repository::{ObjectStorageRepositoryConfig, SqlObjectStorageRepository};
 use runku_observability::{
     LogArchive, LogLevel, LogQuery, LogStream, NatsLogJournal, SequencedOperationalEvent,
 };
@@ -79,6 +93,7 @@ pub struct ProductAdapter {
     data_store: Arc<dyn LogicalStore>,
     identity: LocalIdentityManager,
     serving: ServingPolicyService,
+    storage: ObjectStorageService,
 }
 
 /// Validated server-owned configuration for one Product adapter.
@@ -143,6 +158,15 @@ impl ProductAdapter {
         )
         .await
         .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let storage_repository = SqlObjectStorageRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", paths.identity_database.display()),
+            ObjectStorageRepositoryConfig::LOCAL,
+        )
+        .await
+        .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let storage_digest_key = derive_local_object_storage_digest_key(&root)
+            .await
+            .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
         let adapter = Self {
             root,
             scope: state.scope(),
@@ -162,6 +186,10 @@ impl ProductAdapter {
             data_store,
             identity,
             serving: ServingPolicyService::new(Arc::new(serving_repository)),
+            storage: ObjectStorageService::new(
+                Arc::new(storage_repository),
+                SecretDigestKey::new(storage_digest_key),
+            ),
         };
         let releases = LocalReleaseManager::open(&adapter.root)
             .await
@@ -276,6 +304,25 @@ impl ProductAdapter {
             credential_id: credential_id.to_string(),
             status: status.to_owned(),
             replayed: result == CredentialLifecycleResult::Replayed,
+        })
+    }
+
+    async fn bucket_result(
+        &self,
+        bucket_id: BucketId,
+        operation_id: OperationId,
+        replayed: bool,
+    ) -> Result<ManagementBucketResult, ManagementProductError> {
+        let bucket = self
+            .storage
+            .get_bucket(self.scope, bucket_id)
+            .await
+            .map_err(map_storage)?
+            .ok_or(ManagementProductError::Corruption)?;
+        Ok(ManagementBucketResult {
+            bucket: management_bucket(&bucket),
+            operation_id: operation_id.to_string(),
+            replayed,
         })
     }
 
@@ -577,7 +624,8 @@ impl ManagementProduct for ProductAdapter {
             .configuration_revision()
             .await
             .map_err(map_identity)?;
-        self.serving.health().await.map_err(map_serving)
+        self.serving.health().await.map_err(map_serving)?;
+        self.storage.health().await.map_err(map_storage)
     }
 
     async fn serving_policy(&self) -> Result<ManagementServingPolicy, ManagementProductError> {
@@ -666,6 +714,224 @@ impl ManagementProduct for ProductAdapter {
             .map_err(map_serving)?
             .as_ref()
             .map(management_serving_operation)
+            .ok_or(ManagementProductError::NotFound)
+    }
+
+    async fn buckets(
+        &self,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementBucketPage, ManagementProductError> {
+        let after = after
+            .map(str::parse::<BucketId>)
+            .transpose()
+            .map_err(map_storage)?;
+        let request =
+            runku_object_storage::BucketPageRequest::new(after, limit).map_err(map_storage)?;
+        let page = self
+            .storage
+            .list_buckets(self.scope, request)
+            .await
+            .map_err(map_storage)?;
+        Ok(ManagementBucketPage {
+            version: 1,
+            buckets: page.buckets.iter().map(management_bucket).collect(),
+            next: page.next.map(|value| value.to_string()),
+        })
+    }
+
+    async fn bucket(&self, bucket_id: &str) -> Result<ManagementBucket, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        self.storage
+            .get_bucket(self.scope, bucket_id)
+            .await
+            .map_err(map_storage)?
+            .as_ref()
+            .map(management_bucket)
+            .ok_or(ManagementProductError::NotFound)
+    }
+
+    async fn bucket_create(
+        &self,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementBucketCreate,
+    ) -> Result<ManagementBucketResult, ManagementProductError> {
+        let result = self
+            .storage
+            .create_bucket(
+                self.scope,
+                operation_id,
+                bucket_configuration(&request.configuration)?,
+                storage_actor(actor)?,
+                parse_timestamp(&request.at_micros)?,
+            )
+            .await
+            .map_err(map_storage)?;
+        self.bucket_result(result.operation.bucket_id, operation_id, result.replayed)
+            .await
+    }
+
+    async fn bucket_update(
+        &self,
+        bucket_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementBucketUpdate,
+    ) -> Result<ManagementBucketResult, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let result = self
+            .storage
+            .update_bucket(
+                self.scope,
+                bucket_id,
+                operation_id,
+                request.expected_revision,
+                bucket_configuration(&request.configuration)?,
+                storage_actor(actor)?,
+                parse_timestamp(&request.at_micros)?,
+            )
+            .await
+            .map_err(map_storage)?;
+        self.bucket_result(bucket_id, operation_id, result.replayed)
+            .await
+    }
+
+    async fn bucket_archive(
+        &self,
+        bucket_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementBucketArchive,
+    ) -> Result<ManagementBucketResult, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let result = self
+            .storage
+            .archive_bucket(
+                self.scope,
+                bucket_id,
+                operation_id,
+                request.expected_revision,
+                storage_actor(actor)?,
+                parse_timestamp(&request.at_micros)?,
+            )
+            .await
+            .map_err(map_storage)?;
+        self.bucket_result(bucket_id, operation_id, result.replayed)
+            .await
+    }
+
+    async fn storage_access_keys(
+        &self,
+        bucket_id: &str,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementStorageAccessKeyPage, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let after = after
+            .map(str::parse::<AccessKeyId>)
+            .transpose()
+            .map_err(map_storage)?;
+        let request =
+            runku_object_storage::AccessKeyPageRequest::new(after, limit).map_err(map_storage)?;
+        let page = self
+            .storage
+            .list_access_keys(self.scope, bucket_id, request)
+            .await
+            .map_err(map_storage)?;
+        Ok(ManagementStorageAccessKeyPage {
+            version: 1,
+            keys: page.keys.iter().map(management_storage_key).collect(),
+            next: page.next.map(|value| value.to_string()),
+        })
+    }
+
+    async fn storage_access_key_issue(
+        &self,
+        bucket_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementStorageAccessKeyIssue,
+    ) -> Result<ManagementIssuedStorageAccessKey, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let issued = self
+            .storage
+            .issue_access_key(
+                self.scope,
+                bucket_id,
+                operation_id,
+                storage_access_key_configuration(&request.configuration)?,
+                storage_actor(actor)?,
+                parse_timestamp(&request.at_micros)?,
+            )
+            .await
+            .map_err(map_storage)?;
+        Ok(management_issued_storage_key(&issued, operation_id))
+    }
+
+    async fn storage_access_key_rotate(
+        &self,
+        bucket_id: &str,
+        access_key_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementStorageAccessKeyRotate,
+    ) -> Result<ManagementIssuedStorageAccessKey, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let access_key_id = access_key_id.parse::<AccessKeyId>().map_err(map_storage)?;
+        let issued = self
+            .storage
+            .rotate_access_key(
+                self.scope,
+                bucket_id,
+                access_key_id,
+                operation_id,
+                request.expected_revision,
+                parse_timestamp(&request.overlap_until_micros)?,
+                storage_actor(actor)?,
+                parse_timestamp(&request.at_micros)?,
+            )
+            .await
+            .map_err(map_storage)?;
+        Ok(management_issued_storage_key(&issued, operation_id))
+    }
+
+    async fn storage_access_key_revoke(
+        &self,
+        bucket_id: &str,
+        access_key_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementStorageAccessKeyRevoke,
+    ) -> Result<ManagementStorageOperation, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let access_key_id = access_key_id.parse::<AccessKeyId>().map_err(map_storage)?;
+        let result = self
+            .storage
+            .revoke_access_key(
+                self.scope,
+                bucket_id,
+                access_key_id,
+                operation_id,
+                request.expected_revision,
+                storage_actor(actor)?,
+                parse_timestamp(&request.at_micros)?,
+            )
+            .await
+            .map_err(map_storage)?;
+        Ok(management_storage_operation(&result.operation))
+    }
+
+    async fn storage_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementStorageOperation, ManagementProductError> {
+        self.storage
+            .operation(self.scope, operation_id)
+            .await
+            .map_err(map_storage)?
+            .as_ref()
+            .map(management_storage_operation)
             .ok_or(ManagementProductError::NotFound)
     }
 
@@ -1465,6 +1731,200 @@ fn management_serving_operation(operation: &ServingOperation) -> ManagementServi
     }
 }
 
+fn management_bucket(bucket: &Bucket) -> ManagementBucket {
+    ManagementBucket {
+        bucket_id: bucket.id.to_string(),
+        configuration: management_bucket_configuration(&bucket.configuration),
+        revision: bucket.revision,
+        state: bucket.state.as_str().to_owned(),
+        created_at_micros: bucket.created_at.get().to_string(),
+        updated_at_micros: bucket.updated_at.get().to_string(),
+    }
+}
+
+fn management_bucket_configuration(
+    configuration: &BucketConfiguration,
+) -> ManagementBucketConfiguration {
+    ManagementBucketConfiguration {
+        name: configuration.name.to_string(),
+        policy: match configuration.policy {
+            BucketPolicy::Private => "private",
+            BucketPolicy::PublicRead => "publicRead",
+        }
+        .to_owned(),
+        cors: configuration
+            .cors
+            .iter()
+            .map(|rule| ManagementBucketCorsRule {
+                origins: rule.origins.clone(),
+                methods: rule
+                    .methods
+                    .iter()
+                    .map(|method| method.as_str().to_owned())
+                    .collect(),
+                allowed_headers: rule.allowed_headers.clone(),
+                exposed_headers: rule.exposed_headers.clone(),
+                max_age_seconds: rule.max_age_seconds,
+            })
+            .collect(),
+        versioning: configuration.versioning.as_str().to_owned(),
+        lifecycle: ManagementBucketLifecycle {
+            expire_current_after_days: configuration.lifecycle.expire_current_after_days,
+            expire_noncurrent_after_days: configuration.lifecycle.expire_noncurrent_after_days,
+            abort_incomplete_after_days: configuration.lifecycle.abort_incomplete_after_days,
+        },
+        quota: ManagementBucketQuota {
+            max_object_bytes: configuration.quota.max_object_bytes.to_string(),
+            max_total_bytes: configuration.quota.max_total_bytes.to_string(),
+            max_objects: configuration.quota.max_objects.to_string(),
+        },
+    }
+}
+
+fn bucket_configuration(
+    value: &ManagementBucketConfiguration,
+) -> Result<BucketConfiguration, ManagementProductError> {
+    let cors = value
+        .cors
+        .iter()
+        .map(|rule| {
+            let methods = rule
+                .methods
+                .iter()
+                .map(|method| method.parse::<CorsMethod>().map_err(map_storage))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if methods.len() != rule.methods.len() {
+                return Err(ManagementProductError::Invalid);
+            }
+            Ok(CorsRule {
+                origins: rule.origins.clone(),
+                methods,
+                allowed_headers: rule.allowed_headers.clone(),
+                exposed_headers: rule.exposed_headers.clone(),
+                max_age_seconds: rule.max_age_seconds,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let configuration = BucketConfiguration {
+        name: value.name.parse().map_err(map_storage)?,
+        policy: match value.policy.as_str() {
+            "private" => BucketPolicy::Private,
+            "publicRead" => BucketPolicy::PublicRead,
+            _ => return Err(ManagementProductError::Invalid),
+        },
+        cors,
+        versioning: value
+            .versioning
+            .parse::<Versioning>()
+            .map_err(map_storage)?,
+        lifecycle: BucketLifecycle {
+            expire_current_after_days: value.lifecycle.expire_current_after_days,
+            expire_noncurrent_after_days: value.lifecycle.expire_noncurrent_after_days,
+            abort_incomplete_after_days: value.lifecycle.abort_incomplete_after_days,
+        },
+        quota: BucketQuota {
+            max_object_bytes: parse_canonical_u64(&value.quota.max_object_bytes)?,
+            max_total_bytes: parse_canonical_u64(&value.quota.max_total_bytes)?,
+            max_objects: parse_canonical_u64(&value.quota.max_objects)?,
+        },
+    };
+    configuration.validate().map_err(map_storage)?;
+    Ok(configuration)
+}
+
+fn storage_access_key_configuration(
+    value: &ManagementStorageAccessKeyConfiguration,
+) -> Result<AccessKeyConfiguration, ManagementProductError> {
+    let operations = value
+        .operations
+        .iter()
+        .map(|operation| operation.parse::<AccessKeyOperation>().map_err(map_storage))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if operations.len() != value.operations.len() {
+        return Err(ManagementProductError::Invalid);
+    }
+    let configuration = AccessKeyConfiguration {
+        label: value.label.clone(),
+        prefix: value.prefix.clone(),
+        operations,
+    };
+    configuration.validate().map_err(map_storage)?;
+    Ok(configuration)
+}
+
+fn management_storage_key(metadata: &AccessKeyMetadata) -> ManagementStorageAccessKey {
+    ManagementStorageAccessKey {
+        access_key_id: metadata.id.to_string(),
+        bucket_id: metadata.bucket_id.to_string(),
+        configuration: ManagementStorageAccessKeyConfiguration {
+            label: metadata.configuration.label.clone(),
+            prefix: metadata.configuration.prefix.clone(),
+            operations: metadata
+                .configuration
+                .operations
+                .iter()
+                .map(|operation| operation.as_str().to_owned())
+                .collect(),
+        },
+        revision: metadata.revision,
+        state: metadata.state.as_str().to_owned(),
+        created_at_micros: metadata.created_at.get().to_string(),
+        updated_at_micros: metadata.updated_at.get().to_string(),
+        previous_generation_valid_until_micros: metadata
+            .previous_generation_valid_until
+            .map(|value| value.get().to_string()),
+    }
+}
+
+fn management_issued_storage_key(
+    issued: &runku_object_storage::IssuedAccessKey,
+    operation_id: OperationId,
+) -> ManagementIssuedStorageAccessKey {
+    let secret = issued
+        .secret
+        .as_ref()
+        .map(|value| value.expose().to_owned());
+    ManagementIssuedStorageAccessKey {
+        key: management_storage_key(&issued.metadata),
+        secret,
+        operation_id: operation_id.to_string(),
+        replayed: issued.replayed,
+    }
+}
+
+fn management_storage_operation(operation: &ObjectStorageOperation) -> ManagementStorageOperation {
+    ManagementStorageOperation {
+        operation_id: operation.operation_id.to_string(),
+        kind: match operation.kind {
+            ObjectStorageOperationKind::CreateBucket => "createBucket",
+            ObjectStorageOperationKind::UpdateBucket => "updateBucket",
+            ObjectStorageOperationKind::ArchiveBucket => "archiveBucket",
+            ObjectStorageOperationKind::IssueAccessKey => "issueAccessKey",
+            ObjectStorageOperationKind::RotateAccessKey => "rotateAccessKey",
+            ObjectStorageOperationKind::RevokeAccessKey => "revokeAccessKey",
+        }
+        .to_owned(),
+        bucket_id: operation.bucket_id.to_string(),
+        access_key_id: operation.access_key_id.map(|value| value.to_string()),
+        revision: operation.revision,
+        completed_at_micros: operation.completed_at.get().to_string(),
+    }
+}
+
+fn parse_canonical_u64(value: &str) -> Result<u64, ManagementProductError> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| ManagementProductError::Invalid)?;
+    if parsed.to_string() != value {
+        return Err(ManagementProductError::Invalid);
+    }
+    Ok(parsed)
+}
+
+fn storage_actor(actor: OperatorId) -> Result<ObjectStorageActor, ManagementProductError> {
+    actor.to_string().parse().map_err(map_storage)
+}
+
 fn outcome(value: LocalReleaseOutcome) -> ManagementReleaseOutcome {
     ManagementReleaseOutcome {
         release_id: value.release_id.to_string(),
@@ -1843,6 +2303,25 @@ const fn map_serving(error: ServingPolicyError) -> ManagementProductError {
     }
 }
 
+const fn map_storage(error: ObjectStorageError) -> ManagementProductError {
+    match error {
+        ObjectStorageError::InvalidInput | ObjectStorageError::LimitExceeded => {
+            ManagementProductError::Invalid
+        }
+        ObjectStorageError::NotFound => ManagementProductError::NotFound,
+        ObjectStorageError::Conflict => ManagementProductError::Conflict,
+        ObjectStorageError::OperationIdReused => ManagementProductError::OperationIdReused,
+        ObjectStorageError::Busy | ObjectStorageError::Unavailable => {
+            ManagementProductError::Unavailable
+        }
+        ObjectStorageError::ResultUncertain => ManagementProductError::ResultUncertain,
+        ObjectStorageError::Corruption
+        | ObjectStorageError::Unsupported
+        | ObjectStorageError::ProductionBackendUnsupported
+        | ObjectStorageError::Internal => ManagementProductError::Corruption,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{net::SocketAddr, path::Path, time::Duration};
@@ -1988,6 +2467,158 @@ export const summary = query({
             .execute(&mut connection)
             .await?;
         connection.close().await?;
+        Ok(())
+    }
+
+    fn test_bucket_configuration(policy: &str) -> ManagementBucketConfiguration {
+        ManagementBucketConfiguration {
+            name: "media-assets".to_owned(),
+            policy: policy.to_owned(),
+            cors: Vec::new(),
+            versioning: "enabled".to_owned(),
+            lifecycle: ManagementBucketLifecycle {
+                expire_current_after_days: None,
+                expire_noncurrent_after_days: Some(30),
+                abort_incomplete_after_days: Some(7),
+            },
+            quota: ManagementBucketQuota {
+                max_object_bytes: "1048576".to_owned(),
+                max_total_bytes: "10485760".to_owned(),
+                max_objects: "1000".to_owned(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn console_bucket_and_storage_key_lifecycle_is_scoped_cas_and_one_time() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        adapter(directory.path()).await?;
+        let product = Box::pin(open_adapter(directory.path())).await?;
+        let actor = OperatorId::generate();
+        let create_operation = OperationId::generate();
+        let create_request = ManagementBucketCreate {
+            configuration: test_bucket_configuration("private"),
+            at_micros: "1800000000000200".to_owned(),
+        };
+        let created = product
+            .bucket_create(create_operation, actor, &create_request)
+            .await?;
+        assert_eq!(created.bucket.revision, 1);
+        assert_eq!(created.bucket.configuration.policy, "private");
+        assert!(!created.replayed);
+        let replay = product
+            .bucket_create(create_operation, actor, &create_request)
+            .await?;
+        assert!(replay.replayed);
+        assert_eq!(replay.bucket.bucket_id, created.bucket.bucket_id);
+        assert_eq!(product.buckets(None, 10).await?.buckets.len(), 1);
+
+        let updated = product
+            .bucket_update(
+                &created.bucket.bucket_id,
+                OperationId::generate(),
+                actor,
+                &ManagementBucketUpdate {
+                    expected_revision: 1,
+                    configuration: test_bucket_configuration("publicRead"),
+                    at_micros: "1800000000000201".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(updated.bucket.revision, 2);
+        assert_eq!(updated.bucket.configuration.policy, "publicRead");
+
+        let issue_operation = OperationId::generate();
+        let issue_request = ManagementStorageAccessKeyIssue {
+            configuration: ManagementStorageAccessKeyConfiguration {
+                label: "uploader".to_owned(),
+                prefix: "public/".to_owned(),
+                operations: vec!["read".to_owned(), "write".to_owned()],
+            },
+            at_micros: "1800000000000202".to_owned(),
+        };
+        let issued = product
+            .storage_access_key_issue(
+                &created.bucket.bucket_id,
+                issue_operation,
+                actor,
+                &issue_request,
+            )
+            .await?;
+        assert!(
+            issued
+                .secret
+                .as_deref()
+                .is_some_and(|value| value.starts_with("rk_st_v1_"))
+        );
+        assert!(!issued.replayed);
+        let issue_replay = product
+            .storage_access_key_issue(
+                &created.bucket.bucket_id,
+                issue_operation,
+                actor,
+                &issue_request,
+            )
+            .await?;
+        assert!(issue_replay.replayed);
+        assert_eq!(issue_replay.secret, None);
+        assert_eq!(issue_replay.key.access_key_id, issued.key.access_key_id);
+
+        let rotated = product
+            .storage_access_key_rotate(
+                &created.bucket.bucket_id,
+                &issued.key.access_key_id,
+                OperationId::generate(),
+                actor,
+                &ManagementStorageAccessKeyRotate {
+                    expected_revision: 1,
+                    overlap_until_micros: "1800003600000203".to_owned(),
+                    at_micros: "1800000000000203".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(rotated.key.revision, 2);
+        assert!(rotated.secret.is_some());
+        let revoke_operation = OperationId::generate();
+        let revoked = product
+            .storage_access_key_revoke(
+                &created.bucket.bucket_id,
+                &issued.key.access_key_id,
+                revoke_operation,
+                actor,
+                &ManagementStorageAccessKeyRevoke {
+                    expected_revision: 2,
+                    at_micros: "1800000000000204".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(revoked.revision, 3);
+        assert_eq!(
+            product.storage_operation(revoke_operation).await?.kind,
+            "revokeAccessKey"
+        );
+        let archived = product
+            .bucket_archive(
+                &created.bucket.bucket_id,
+                OperationId::generate(),
+                actor,
+                &ManagementBucketArchive {
+                    expected_revision: 2,
+                    at_micros: "1800000000000205".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(archived.bucket.state, "archived");
+        assert_eq!(archived.bucket.revision, 3);
+        assert_eq!(
+            product
+                .storage_access_keys(&created.bucket.bucket_id, None, 10)
+                .await?
+                .keys[0]
+                .state,
+            "revoked"
+        );
         Ok(())
     }
 

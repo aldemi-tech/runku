@@ -36,6 +36,7 @@ pub use process::{
 };
 pub use publish::{LocalPublishError, LocalPublishResult, publish_local, publish_local_if_head};
 pub use state::{
-    LOCAL_STATE_DIRECTORY, LocalPaths, LocalProjectState, LocalStateError, initialize_local,
-    initialize_local_with_scope, load_local,
+    LOCAL_STATE_DIRECTORY, LocalPaths, LocalProjectState, LocalStateError,
+    derive_local_object_storage_digest_key, initialize_local, initialize_local_with_scope,
+    load_local,
 };

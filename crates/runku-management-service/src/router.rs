@@ -38,10 +38,12 @@ use zeroize::Zeroizing;
 
 use crate::{
     ManagementApplicationClientCreate, ManagementApplicationCredentialCreate,
-    ManagementApplicationCredentialRotate, ManagementCatalogQuery, ManagementDataDeleteRequest,
+    ManagementApplicationCredentialRotate, ManagementBucketArchive, ManagementBucketCreate,
+    ManagementBucketUpdate, ManagementCatalogQuery, ManagementDataDeleteRequest,
     ManagementDataInsertRequest, ManagementDataQuery, ManagementDataReplaceRequest,
     ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    ManagementServingPolicySet, OidcClientConfiguration,
+    ManagementServingPolicySet, ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
+    ManagementStorageAccessKeyRotate, OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -236,6 +238,32 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/serving-policy-operations/{operation_id}",
             get(product_serving_operation),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/buckets",
+            get(product_buckets).post(product_bucket_create),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/buckets/{bucket_id}",
+            get(product_bucket)
+                .put(product_bucket_update)
+                .delete(product_bucket_archive),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/buckets/{bucket_id}/access-keys",
+            get(product_storage_access_keys).post(product_storage_access_key_issue),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/buckets/{bucket_id}/access-keys/{access_key_id}/rotate",
+            post(product_storage_access_key_rotate),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/buckets/{bucket_id}/access-keys/{access_key_id}/revoke",
+            post(product_storage_access_key_revoke),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/storage-operations/{operation_id}",
+            get(product_storage_operation),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/application-clients",
@@ -682,6 +710,341 @@ async fn product_serving_operation(
     };
     match product.serving_operation(operation_id).await {
         Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoragePageQuery {
+    after: Option<String>,
+    limit: u16,
+}
+
+async fn product_buckets(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Query(query): Query<StoragePageQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.buckets(query.after.as_deref(), query.limit).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_bucket(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.bucket(&bucket).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_bucket_create(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementBucketCreate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .bucket_create(operation_id, context.operator.id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::CREATED, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_bucket_update(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket)): Path<(String, String, String)>,
+    Json(request): Json<ManagementBucketUpdate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .bucket_update(&bucket, operation_id, context.operator.id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_bucket_archive(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket)): Path<(String, String, String)>,
+    Json(request): Json<ManagementBucketArchive>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .bucket_archive(&bucket, operation_id, context.operator.id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_access_keys(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket)): Path<(String, String, String)>,
+    Query(query): Query<StoragePageQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .storage_access_keys(&bucket, query.after.as_deref(), query.limit)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_access_key_issue(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket)): Path<(String, String, String)>,
+    Json(request): Json<ManagementStorageAccessKeyIssue>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .storage_access_key_issue(&bucket, operation_id, context.operator.id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::CREATED, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_access_key_rotate(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket, access_key)): Path<(String, String, String, String)>,
+    Json(request): Json<ManagementStorageAccessKeyRotate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .storage_access_key_rotate(
+            &bucket,
+            &access_key,
+            operation_id,
+            context.operator.id,
+            &request,
+        )
+        .await
+    {
+        Ok(result) => json(StatusCode::CREATED, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_access_key_revoke(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket, access_key)): Path<(String, String, String, String)>,
+    Json(request): Json<ManagementStorageAccessKeyRevoke>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .storage_access_key_revoke(
+            &bucket,
+            &access_key,
+            operation_id,
+            context.operator.id,
+            &request,
+        )
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_operation(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, operation)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let Ok(operation_id) = operation.parse::<OperationId>() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.storage_operation(operation_id).await {
+        Ok(result) => json(StatusCode::OK, &result, true),
         Err(error) => product_failure(error),
     }
 }

@@ -17,12 +17,12 @@ use axum::{
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementApplicationClientList,
-    ManagementDataDocument, ManagementDataInsertRequest, ManagementDataWriteResult,
-    ManagementHttpConfig, ManagementHttpExposure, ManagementLogArchiveStatus, ManagementLogPage,
-    ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
-    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
-    ManagementWorkspacePublish, OidcClientConfiguration, build_management_router,
-    build_management_router_with_product,
+    ManagementBucketPage, ManagementDataDocument, ManagementDataInsertRequest,
+    ManagementDataWriteResult, ManagementHttpConfig, ManagementHttpExposure,
+    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
+    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementWorkspacePublish,
+    OidcClientConfiguration, build_management_router, build_management_router_with_product,
 };
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, ManagedSourceAuthority,
@@ -53,6 +53,7 @@ struct DataProbeProduct {
     reads: AtomicUsize,
     writes: AtomicUsize,
     credential_reads: AtomicUsize,
+    storage_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -73,6 +74,19 @@ impl ManagementProduct for DataProbeProduct {
             version: 1,
             configuration_revision: 1,
             clients: Vec::new(),
+        })
+    }
+
+    async fn buckets(
+        &self,
+        _after: Option<&str>,
+        _limit: u16,
+    ) -> Result<ManagementBucketPage, ManagementProductError> {
+        self.storage_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementBucketPage {
+            version: 1,
+            buckets: Vec::new(),
+            next: None,
         })
     }
 
@@ -541,7 +555,7 @@ async fn readiness_requires_the_attached_product_store() -> Result<(), Box<dyn s
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn data_admin_http_enforces_independent_least_privilege_capabilities()
+async fn console_product_http_enforces_independent_least_privilege_capabilities()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("data-admin-auth.sqlite3");
@@ -609,11 +623,29 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
             TimestampMicros::new(1_900_000_000_000_002),
         )
         .await?;
+    let storage_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "storage-reader".to_owned(),
+            },
+            OperatorName::from_str("Storage reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::StorageRead]),
+            }],
+            DeviceName::from_str("storage reader device")?,
+            TimestampMicros::new(1_900_000_000_000_003),
+        )
+        .await?;
     let product = Arc::new(DataProbeProduct {
         scope,
         reads: AtomicUsize::new(0),
         writes: AtomicUsize::new(0),
         credential_reads: AtomicUsize::new(0),
+        storage_reads: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -640,6 +672,11 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
     );
     let credential_path = format!(
         "/v1/projects/{}/environments/{}/application-clients",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let storage_path = format!(
+        "/v1/projects/{}/environments/{}/buckets?limit=10",
         scope.project_id(),
         scope.environment_id()
     );
@@ -677,6 +714,16 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(product.credential_reads.load(Ordering::SeqCst), 0);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&storage_path)
+                .header(header::AUTHORIZATION, format!("Bearer {manager_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.storage_reads.load(Ordering::SeqCst), 0);
 
     let reader_access = data_reader.login.access_token.expose();
     let response = router
@@ -695,6 +742,7 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
 
     let credential_access = credential_reader.login.access_token.expose();
     let response = router
+        .clone()
         .oneshot(
             Request::get(&credential_path)
                 .header(header::AUTHORIZATION, format!("Bearer {credential_access}"))
@@ -703,6 +751,17 @@ async fn data_admin_http_enforces_independent_least_privilege_capabilities()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.credential_reads.load(Ordering::SeqCst), 1);
+
+    let storage_access = storage_reader.login.access_token.expose();
+    let response = router
+        .oneshot(
+            Request::get(&storage_path)
+                .header(header::AUTHORIZATION, format!("Bearer {storage_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.storage_reads.load(Ordering::SeqCst), 1);
 
     repository.close().await;
     Ok(())

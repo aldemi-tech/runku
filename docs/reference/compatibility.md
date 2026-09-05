@@ -87,6 +87,13 @@ it does not change public Product protocols. The remaining Product repositories 
 Product root, so backup/restore must coordinate both authorities. Older binaries must not serve an
 Environment after this profile is adopted.
 
+The post-0.4.5 Management API additions for application credentials, weighted serving policy, and
+logical Object Storage are additive HTTP contracts. Operators that grant the new `storage:read`
+or `storage:manage` capabilities must upgrade Platform Identity and the Management API together;
+older binaries do not recognize those capability names and fail closed. Storage quotas are encoded
+as canonical decimal strings so JavaScript clients do not lose integer precision. Application-key
+secrets remain one-time responses and are intentionally absent from idempotent replay payloads.
+
 Version 0.4.4 gives the two PostgreSQL roles unambiguous canonical configuration names:
 `RUNKU_IDENTITY_DATABASE_URL` for Platform Identity and `RUNKU_PLATFORM_DATABASE_URL` for Function
 platform data. Their `_FILE` forms contain a path to the same secret, not another connection.

@@ -4057,6 +4057,8 @@ dependencies = [
  "runku-identity-provider",
  "runku-local",
  "runku-management-service",
+ "runku-object-storage",
+ "runku-object-storage-repository",
  "runku-observability",
  "runku-platform-identity",
  "runku-protocol",

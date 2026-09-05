@@ -299,6 +299,248 @@ pub struct ManagementServingOperation {
     pub completed_at_micros: String,
 }
 
+/// One bounded logical bucket CORS rule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketCorsRule {
+    /// Exact HTTPS origins, or only `*`.
+    pub origins: Vec<String>,
+    /// Canonical HTTP methods.
+    pub methods: Vec<String>,
+    /// Canonical lower-case request headers, or only `*`.
+    pub allowed_headers: Vec<String>,
+    /// Canonical lower-case exposed headers.
+    pub exposed_headers: Vec<String>,
+    /// Browser preflight cache bound.
+    pub max_age_seconds: u32,
+}
+
+/// Logical bucket lifecycle configuration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketLifecycle {
+    /// Expiry for current objects.
+    pub expire_current_after_days: Option<u32>,
+    /// Expiry for non-current versions.
+    pub expire_noncurrent_after_days: Option<u32>,
+    /// Multipart-abort deadline.
+    pub abort_incomplete_after_days: Option<u32>,
+}
+
+/// Logical bucket quota encoded losslessly for JavaScript clients.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketQuota {
+    /// Maximum bytes in one object.
+    pub max_object_bytes: String,
+    /// Maximum logical current bytes.
+    pub max_total_bytes: String,
+    /// Maximum current object count.
+    pub max_objects: String,
+}
+
+/// Complete replace-only logical bucket configuration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketConfiguration {
+    /// Environment-unique DNS-label name.
+    pub name: String,
+    /// `private` or `publicRead`.
+    pub policy: String,
+    /// Complete CORS rules.
+    pub cors: Vec<ManagementBucketCorsRule>,
+    /// `disabled` or `enabled`.
+    pub versioning: String,
+    /// Complete lifecycle configuration.
+    pub lifecycle: ManagementBucketLifecycle,
+    /// Complete quota.
+    pub quota: ManagementBucketQuota,
+}
+
+/// One non-provider logical bucket projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucket {
+    /// Stable logical bucket ID.
+    pub bucket_id: String,
+    /// Complete configuration.
+    pub configuration: ManagementBucketConfiguration,
+    /// Positive CAS revision.
+    pub revision: u64,
+    /// `active` or `archived`.
+    pub state: String,
+    /// Canonical decimal creation time.
+    pub created_at_micros: String,
+    /// Canonical decimal update time.
+    pub updated_at_micros: String,
+}
+
+/// Stable bounded bucket page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketPage {
+    /// Wire version.
+    pub version: u8,
+    /// Ordered buckets.
+    pub buckets: Vec<ManagementBucket>,
+    /// Exclusive next cursor.
+    pub next: Option<String>,
+}
+
+/// Bucket creation request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketCreate {
+    /// Complete initial configuration.
+    pub configuration: ManagementBucketConfiguration,
+    /// Caller-pinned canonical decimal operation time.
+    pub at_micros: String,
+}
+
+/// Complete bucket replacement request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketUpdate {
+    /// Required positive current revision.
+    pub expected_revision: u64,
+    /// Complete replacement configuration.
+    pub configuration: ManagementBucketConfiguration,
+    /// Caller-pinned canonical decimal operation time.
+    pub at_micros: String,
+}
+
+/// Irreversible bucket archive request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketArchive {
+    /// Required positive current revision.
+    pub expected_revision: u64,
+    /// Caller-pinned canonical decimal operation time.
+    pub at_micros: String,
+}
+
+/// Product Object Storage access-key scope.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStorageAccessKeyConfiguration {
+    /// Human-facing label.
+    pub label: String,
+    /// Object-key prefix; empty means the whole bucket.
+    pub prefix: String,
+    /// Non-empty subset of `list`, `read`, `write`, and `delete`.
+    pub operations: Vec<String>,
+}
+
+/// Non-secret Product Object Storage access-key metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStorageAccessKey {
+    /// Stable key ID.
+    pub access_key_id: String,
+    /// Owning bucket ID.
+    pub bucket_id: String,
+    /// Immutable scope and label.
+    pub configuration: ManagementStorageAccessKeyConfiguration,
+    /// Positive CAS revision.
+    pub revision: u64,
+    /// `active` or `revoked`.
+    pub state: String,
+    /// Canonical decimal creation time.
+    pub created_at_micros: String,
+    /// Canonical decimal update time.
+    pub updated_at_micros: String,
+    /// Prior-generation validity cutoff during rotation overlap.
+    pub previous_generation_valid_until_micros: Option<String>,
+}
+
+/// Bounded non-secret access-key page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStorageAccessKeyPage {
+    /// Wire version.
+    pub version: u8,
+    /// Ordered key metadata.
+    pub keys: Vec<ManagementStorageAccessKey>,
+    /// Exclusive next cursor.
+    pub next: Option<String>,
+}
+
+/// Access-key issuance request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStorageAccessKeyIssue {
+    /// Immutable scope and label.
+    pub configuration: ManagementStorageAccessKeyConfiguration,
+    /// Caller-pinned canonical decimal operation time.
+    pub at_micros: String,
+}
+
+/// Access-key rotation request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStorageAccessKeyRotate {
+    /// Required positive current revision.
+    pub expected_revision: u64,
+    /// Prior generation validity cutoff, no more than 24 hours after `atMicros`.
+    pub overlap_until_micros: String,
+    /// Caller-pinned canonical decimal operation time.
+    pub at_micros: String,
+}
+
+/// Access-key revoke request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStorageAccessKeyRevoke {
+    /// Required positive current revision.
+    pub expected_revision: u64,
+    /// Caller-pinned canonical decimal operation time.
+    pub at_micros: String,
+}
+
+/// One-time Product Object Storage key issuance/rotation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementIssuedStorageAccessKey {
+    /// Durable non-secret metadata.
+    pub key: ManagementStorageAccessKey,
+    /// One-time `rk_st_*` secret; absent on replay.
+    pub secret: Option<String>,
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// Whether exact durable operation content was replayed.
+    pub replayed: bool,
+}
+
+/// Bucket mutation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementBucketResult {
+    /// Durable bucket after the command.
+    pub bucket: ManagementBucket,
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// Whether exact durable operation content was replayed.
+    pub replayed: bool,
+}
+
+/// Non-secret storage operation used to reconcile uncertain results.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStorageOperation {
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// Stable operation kind.
+    pub kind: String,
+    /// Affected bucket ID.
+    pub bucket_id: String,
+    /// Affected access-key ID, when applicable.
+    pub access_key_id: Option<String>,
+    /// Resulting resource revision.
+    pub revision: u64,
+    /// Canonical decimal completion time.
+    pub completed_at_micros: String,
+}
+
 impl std::error::Error for ManagementProductError {}
 
 /// Bounded catalog page query resolved against one explicit code target.
@@ -757,6 +999,115 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         &self,
         operation_id: OperationId,
     ) -> Result<ManagementServingOperation, ManagementProductError> {
+        let _ = operation_id;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Lists one bounded stable logical bucket page.
+    async fn buckets(
+        &self,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementBucketPage, ManagementProductError> {
+        let _ = (after, limit);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Gets one exact logical bucket.
+    async fn bucket(&self, bucket_id: &str) -> Result<ManagementBucket, ManagementProductError> {
+        let _ = bucket_id;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Creates one logical bucket idempotently.
+    async fn bucket_create(
+        &self,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementBucketCreate,
+    ) -> Result<ManagementBucketResult, ManagementProductError> {
+        let _ = (operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Replaces one complete logical bucket configuration with CAS.
+    async fn bucket_update(
+        &self,
+        bucket_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementBucketUpdate,
+    ) -> Result<ManagementBucketResult, ManagementProductError> {
+        let _ = (bucket_id, operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Irreversibly archives one logical bucket with CAS.
+    async fn bucket_archive(
+        &self,
+        bucket_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementBucketArchive,
+    ) -> Result<ManagementBucketResult, ManagementProductError> {
+        let _ = (bucket_id, operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Lists one bounded non-secret Product storage-key page.
+    async fn storage_access_keys(
+        &self,
+        bucket_id: &str,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementStorageAccessKeyPage, ManagementProductError> {
+        let _ = (bucket_id, after, limit);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Issues one Product storage key with a one-time secret.
+    async fn storage_access_key_issue(
+        &self,
+        bucket_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementStorageAccessKeyIssue,
+    ) -> Result<ManagementIssuedStorageAccessKey, ManagementProductError> {
+        let _ = (bucket_id, operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Rotates one Product storage key with bounded generation overlap.
+    async fn storage_access_key_rotate(
+        &self,
+        bucket_id: &str,
+        access_key_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementStorageAccessKeyRotate,
+    ) -> Result<ManagementIssuedStorageAccessKey, ManagementProductError> {
+        let _ = (bucket_id, access_key_id, operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Revokes every generation of one Product storage key with CAS.
+    async fn storage_access_key_revoke(
+        &self,
+        bucket_id: &str,
+        access_key_id: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementStorageAccessKeyRevoke,
+    ) -> Result<ManagementStorageOperation, ManagementProductError> {
+        let _ = (bucket_id, access_key_id, operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Looks up one exact-scope storage operation after uncertainty.
+    async fn storage_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementStorageOperation, ManagementProductError> {
         let _ = operation_id;
         Err(ManagementProductError::NotFound)
     }

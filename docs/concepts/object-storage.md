@@ -2,8 +2,9 @@
 
 Status: the provider-independent bucket and Product access-key registry is implemented. SQLite
 conformance runs in the ordinary crate test; PostgreSQL 16+ runs when
-`RUNKU_TEST_POSTGRES_URL` is set. Object bytes, an S3-compatible HTTP surface, provider adapters,
-Management API routes, server composition, and CLI commands are not implemented by this slice.
+`RUNKU_TEST_POSTGRES_URL` is set. The compact server and authenticated Management API now compose
+bucket and Product access-key administration over this authority. Object bytes, an S3-compatible
+HTTP surface, provider adapters, native SDK object operations, and CLI commands remain unimplemented.
 
 This capability is distinct from [Application file storage](../functions/file-storage.md).
 Application Files are an Action-oriented upload/download facility. Logical Object Storage is a
@@ -58,10 +59,21 @@ At the cutoff the prior generation is invalid. Revocation invalidates every gene
 Authorization returns no distinction between malformed, missing, wrong-Environment, expired,
 revoked, wrong-prefix, or missing-operation credentials.
 
-The transport that eventually exposes these APIs remains responsible for authenticating the actor,
-authorizing the exact Environment, supplying a canonical actor ID and trustworthy timestamp,
-redacting the one-time secret, and applying request/body limits. The registry does not accept or
-store physical provider credentials.
+The Management transport authenticates the operator for every call, authorizes the exact
+Environment, supplies the verified `OperatorId` as actor, and applies request/body limits.
+`storage:read` covers bucket/key metadata and operation lookup; `storage:manage` covers create,
+replace, archive, issue, rotate, and revoke. Mutation requests require `Idempotency-Key: opn_*` and
+pin canonical operation timestamps so an exact transport retry has the same journal digest.
+Secret-bearing and non-secret key responses use `Cache-Control: no-store`. The registry does not
+accept or store physical provider credentials.
+
+The implemented routes are:
+
+- `GET|POST /v1/projects/{project}/environments/{environment}/buckets`;
+- `GET|PUT|DELETE .../buckets/{bkt_*}`;
+- `GET|POST .../buckets/{bkt_*}/access-keys`;
+- `POST .../access-keys/{sak_*}/rotate|revoke`;
+- `GET .../storage-operations/{opn_*}` for uncertain-result reconciliation.
 
 ## Persistence and recovery
 

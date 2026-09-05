@@ -31,6 +31,8 @@ runku-identity-provider = { path = "../runku-identity-provider" }
 runku-platform-identity = { path = "../runku-platform-identity" }
 runku-local = { path = "../runku-local" }
 runku-observability = { path = "../runku-observability" }
+runku-object-storage = { path = "../runku-object-storage" }
+runku-object-storage-repository = { path = "../runku-object-storage-repository" }
 runku-protocol = { path = "../runku-protocol" }
 runku-releases = { path = "../runku-releases" }
 runku-schema = { path = "../runku-schema" }

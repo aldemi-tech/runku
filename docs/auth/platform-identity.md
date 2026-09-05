@@ -519,6 +519,8 @@ plus Runku's stricter verifier rules above.
 | `PUT .../serving-policy` | `channels:promote` + `Idempotency-Key: opn_*` | replaces the complete compatible desired policy using exact CAS; remains pending until serving-path materialization |
 | `GET .../application-clients` and credential lists/reveal | `credentials:read` | reads non-secret identity metadata or re-derives a verified publishable key |
 | Application Client/credential create, rotate, revoke, and delete routes | `credentials:manage` | manages exact-scope Product credentials; confidential material is returned once |
+| Bucket/key lists, bucket get, and storage-operation lookup | `storage:read` | reads provider-independent logical storage metadata only |
+| Bucket create/replace/archive and storage-key issue/rotate/revoke | `storage:manage` + `Idempotency-Key: opn_*` | applies exact-scope CAS/idempotency; Product key secrets appear once |
 | `GET .../functions` and `GET .../schema/tables` | `releases:read` | reads a bounded catalog from one verified effective artifact |
 | `POST .../data/query` and `GET .../data/documents/{table}/{document}` | `data:read` | reads logical documents through the canonical store and schema |
 | `POST .../data/documents/{table}` | `data:write` + `Idempotency-Key: opn_*` | inserts a schema-valid document with deterministic identity |
