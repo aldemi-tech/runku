@@ -96,6 +96,7 @@ reading order because it records the product invariants and definition of done.
   rollout, rollback, security review, and evidence requirements.
 - [Documentation maintenance](maintainers/documentation.md): required reading maps, source
   precedence, update matrix, link/example checks, and review rubric.
+- [Brand identity](brand.md): public Product logo assets, color modes, and usage constraints.
 - [Public protocol vectors](../protocol/README.md): exact persisted and wire compatibility fixtures.
 - [Contributing](../CONTRIBUTING.md): toolchain, gates, pull-request contract, and review workflow.
 

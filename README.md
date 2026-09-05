@@ -1,5 +1,12 @@
 # Runku
 
+<p align="left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/runku-logo-horizontal-reversed.png">
+    <img src="docs/assets/brand/runku-logo-horizontal.png" alt="Runku" width="300">
+  </picture>
+</p>
+
 Runku is an open-source, self-hosted Backend-as-a-Service for transactional TypeScript Functions,
 typed document data, realtime subscriptions, immutable releases, durable scheduling, and explicit
 application identity.
@@ -327,6 +334,8 @@ The [documentation portal](docs/README.md) provides task-oriented reading paths 
 developers, operators, security reviewers, maintainers, and AI assistants. Documentation status is
 explicit: implemented behavior, conformance evidence, production-readiness requirements, and
 unsupported future assumptions are not interchangeable.
+
+Public logo files and their usage rules are documented in [Brand identity](docs/brand.md).
 
 ## License
 
