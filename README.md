@@ -31,6 +31,7 @@ Runku is currently pre-release.
 | Platform operator bootstrap, sessions, reconcilable scoped invitations, browser OIDC, and remote lifecycle/logs | Implemented in source with a full PostgreSQL + browser + Product lifecycle campaign |
 | Environment lifecycle registry | Domain service plus SQLite/PostgreSQL repository implemented and test-covered; not yet attached to the Management API or server composition |
 | Weighted serving-policy registry | Atomic/gradual desired policy, strict Release contract gate, observations, operation journal, and audit implemented over SQLite/PostgreSQL; runtime routing is not yet attached |
+| Logical Object Storage registry | Revisioned bucket/access-key domain plus SQLite/PostgreSQL repository implemented and test-covered; object bytes, provider adapters, S3/HTTP, server, and CLI surfaces are not yet implemented |
 | Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
 | Compact Docker standalone installation | Release-packaged with PostgreSQL, secret files, probes, backup/verify/restore/upgrade, and guarded removal |
 | Embedded Operational Log history | SQLite hot tier, filesystem/S3 Parquet, DuckDB query, safe retention, and live stream implemented and test-covered |

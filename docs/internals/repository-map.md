@@ -18,6 +18,8 @@ domain contracts toward adapters and process composition.
 | `runku-schema` | Schema/index catalog and maintenance rules |
 | `runku-environments` | Environment configuration, desired/observed lifecycle, commands, repository contract, service |
 | `runku-environment-repository` | Checksum-migrated SQLite/PostgreSQL Environment registry adapters and conformance |
+| `runku-object-storage` | Provider-independent logical buckets, Product access keys, idempotency, CAS, and audit contracts |
+| `runku-object-storage-repository` | Checksum-migrated SQLite/PostgreSQL logical Object Storage registry and conformance |
 
 Pure crates must not depend on SQL, HTTP, runtime, filesystem, or deployment frameworks.
 

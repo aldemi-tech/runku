@@ -3830,6 +3830,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "runku-object-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "getrandom 0.4.3",
+ "hmac",
+ "runku-core",
+ "runku-value",
+ "serde",
+ "sha2 0.11.0",
+ "thiserror",
+ "ulid",
+ "zeroize",
+]
+
+[[package]]
+name = "runku-object-storage-repository"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "runku-core",
+ "runku-object-storage",
+ "runku-value",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "runku-observability"
 version = "0.1.0"
 dependencies = [

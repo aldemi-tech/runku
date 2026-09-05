@@ -29,6 +29,8 @@ members = [
     "crates/runku-cli",
     "crates/runku-build",
     "crates/runku-observability",
+    "crates/runku-object-storage",
+    "crates/runku-object-storage-repository",
     "crates/runku-otel",
     "crates/runku-protocol",
     "crates/runku-releases",

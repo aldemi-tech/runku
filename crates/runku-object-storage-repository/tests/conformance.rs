@@ -1,0 +1,548 @@
+//! Shared SQLite/PostgreSQL registry conformance and adversarial coverage.
+
+use std::{collections::BTreeSet, error::Error, sync::Arc};
+
+use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
+use runku_object_storage::{
+    AccessKeyConfiguration, AccessKeyOperation, AccessKeyPageRequest, AccessKeyState,
+    AuditPageRequest, BucketConfiguration, BucketLifecycle, BucketPageRequest, BucketPolicy,
+    BucketQuota, BucketState, ObjectStorageActor, ObjectStorageError, ObjectStorageRepository,
+    ObjectStorageRepositoryBackend, ObjectStorageService, SecretDigestKey, Versioning,
+};
+use runku_object_storage_repository::{
+    ObjectStorageRepositoryConfig, RepositoryRole, SqlObjectStorageRepository,
+};
+use runku_value::TimestampMicros;
+use tempfile::tempdir;
+use tokio::sync::Barrier;
+
+#[tokio::test]
+async fn sqlite_conformance_reopen_and_checksum() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("object-storage.sqlite3");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    assert!(matches!(
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::PRODUCTION)
+            .await,
+        Err(ObjectStorageError::ProductionBackendUnsupported)
+    ));
+    let repository =
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::LOCAL)
+            .await?;
+    let (scope, bucket_id, create_operation) =
+        run_conformance(&repository, ObjectStorageRepositoryBackend::SQLite).await?;
+    assert_concurrent_cas(&repository).await?;
+    repository.close().await;
+
+    let reopened =
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::LOCAL)
+            .await?;
+    let bucket = reopened
+        .get_bucket(scope, bucket_id)
+        .await?
+        .ok_or("bucket missing")?;
+    assert_eq!(bucket.state, BucketState::Archived);
+    assert!(reopened.operation(scope, create_operation).await?.is_some());
+    reopened.close().await;
+
+    sqlx::any::install_default_drivers();
+    let pool = sqlx::AnyPool::connect(&url).await?;
+    sqlx::query("UPDATE runku_storage_schema_migrations SET checksum='tampered' WHERE version=1")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    assert!(matches!(
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::LOCAL)
+            .await,
+        Err(ObjectStorageError::Corruption)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_conformance() -> Result<(), Box<dyn Error>> {
+    let Some(url) = std::env::var("RUNKU_TEST_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let repository = SqlObjectStorageRepository::connect_postgres(
+        &url,
+        ObjectStorageRepositoryConfig::PRODUCTION,
+    )
+    .await?;
+    run_conformance(&repository, ObjectStorageRepositoryBackend::PostgreSQL).await?;
+    assert_concurrent_cas(&repository).await?;
+    repository.close().await;
+    Ok(())
+}
+
+async fn assert_concurrent_cas(
+    repository: &SqlObjectStorageRepository,
+) -> Result<(), Box<dyn Error>> {
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let service =
+        ObjectStorageService::new(Arc::new(repository.clone()), SecretDigestKey::new([8; 32]));
+    let actor: ObjectStorageActor = "operator:concurrency".parse()?;
+    let created = service
+        .create_bucket(
+            scope,
+            OperationId::generate(),
+            configuration("concurrent", BucketPolicy::Private)?,
+            actor.clone(),
+            TimestampMicros::new(100),
+        )
+        .await?;
+    let bucket = created.operation.bucket_id;
+    let barrier = Arc::new(Barrier::new(3));
+    let mut tasks = Vec::new();
+    for name in ["concurrent-a", "concurrent-b"] {
+        let service = service.clone();
+        let barrier = Arc::clone(&barrier);
+        let actor = actor.clone();
+        let configuration = configuration(name, BucketPolicy::Private)?;
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            service
+                .update_bucket(
+                    scope,
+                    bucket,
+                    OperationId::generate(),
+                    1,
+                    configuration,
+                    actor,
+                    TimestampMicros::new(101),
+                )
+                .await
+        }));
+    }
+    barrier.wait().await;
+    let mut successes = 0;
+    let mut rejected = 0;
+    for task in tasks {
+        match task.await? {
+            Ok(_) => successes += 1,
+            Err(ObjectStorageError::Conflict | ObjectStorageError::Busy) => rejected += 1,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert_eq!((successes, rejected), (1, 1));
+    assert_eq!(
+        service
+            .get_bucket(scope, bucket)
+            .await?
+            .ok_or("bucket missing")?
+            .revision,
+        2
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_conformance(
+    repository: &SqlObjectStorageRepository,
+    backend: ObjectStorageRepositoryBackend,
+) -> Result<
+    (
+        EnvironmentScope,
+        runku_object_storage::BucketId,
+        OperationId,
+    ),
+    Box<dyn Error>,
+> {
+    assert_eq!(repository.backend(), backend);
+    repository.health().await?;
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let other_scope = EnvironmentScope::new(scope.project_id(), EnvironmentId::generate());
+    let service =
+        ObjectStorageService::new(Arc::new(repository.clone()), SecretDigestKey::new([7; 32]));
+    let actor: ObjectStorageActor = "operator:01".parse()?;
+    let create_operation = OperationId::generate();
+    let created = service
+        .create_bucket(
+            scope,
+            create_operation,
+            configuration("media", BucketPolicy::Private)?,
+            actor.clone(),
+            TimestampMicros::new(10),
+        )
+        .await?;
+    assert!(!created.replayed);
+    let bucket_id = created.operation.bucket_id;
+    let replay = service
+        .create_bucket(
+            scope,
+            create_operation,
+            configuration("media", BucketPolicy::Private)?,
+            actor.clone(),
+            TimestampMicros::new(10),
+        )
+        .await?;
+    assert!(replay.replayed);
+    assert_eq!(replay.operation.bucket_id, bucket_id);
+    assert!(matches!(
+        service
+            .create_bucket(
+                scope,
+                create_operation,
+                configuration("assets", BucketPolicy::Private)?,
+                actor.clone(),
+                TimestampMicros::new(10)
+            )
+            .await,
+        Err(ObjectStorageError::OperationIdReused)
+    ));
+
+    assert_eq!(
+        service
+            .create_bucket(
+                scope,
+                OperationId::generate(),
+                configuration("media", BucketPolicy::Private)?,
+                actor.clone(),
+                TimestampMicros::new(11)
+            )
+            .await,
+        Err(ObjectStorageError::Conflict)
+    );
+    service
+        .create_bucket(
+            other_scope,
+            OperationId::generate(),
+            configuration("media", BucketPolicy::Private)?,
+            actor.clone(),
+            TimestampMicros::new(11),
+        )
+        .await?;
+    assert!(service.get_bucket(other_scope, bucket_id).await?.is_none());
+
+    let updated = service
+        .update_bucket(
+            scope,
+            bucket_id,
+            OperationId::generate(),
+            1,
+            configuration("assets", BucketPolicy::PublicRead)?,
+            actor.clone(),
+            TimestampMicros::new(12),
+        )
+        .await?;
+    assert_eq!(updated.operation.revision, 2);
+    assert_eq!(
+        service
+            .update_bucket(
+                scope,
+                bucket_id,
+                OperationId::generate(),
+                1,
+                configuration("stale", BucketPolicy::Private)?,
+                actor.clone(),
+                TimestampMicros::new(13)
+            )
+            .await,
+        Err(ObjectStorageError::Conflict)
+    );
+
+    let issue_operation = OperationId::generate();
+    let issued = service
+        .issue_access_key(
+            scope,
+            bucket_id,
+            issue_operation,
+            key_configuration(),
+            actor.clone(),
+            TimestampMicros::new(14),
+        )
+        .await?;
+    assert!(issued.secret.is_some());
+    assert!(
+        issued
+            .secret
+            .as_ref()
+            .is_some_and(|secret| secret.expose().starts_with("rk_st_v1_sak_"))
+    );
+    let first_secret = issued
+        .secret
+        .as_ref()
+        .ok_or("secret missing")?
+        .expose()
+        .to_owned();
+    let key_id = issued.metadata.id;
+    assert!(
+        service
+            .authorize_access_key(
+                &first_secret,
+                scope,
+                bucket_id,
+                "uploads/image.png",
+                AccessKeyOperation::Write,
+                TimestampMicros::new(14)
+            )
+            .await?
+            .is_some()
+    );
+    assert!(
+        service
+            .authorize_access_key(
+                &first_secret,
+                scope,
+                bucket_id,
+                "private/image.png",
+                AccessKeyOperation::Write,
+                TimestampMicros::new(14)
+            )
+            .await?
+            .is_none()
+    );
+    assert!(
+        service
+            .authorize_access_key(
+                &first_secret,
+                other_scope,
+                bucket_id,
+                "uploads/image.png",
+                AccessKeyOperation::Write,
+                TimestampMicros::new(14)
+            )
+            .await?
+            .is_none()
+    );
+    let issue_replay = service
+        .issue_access_key(
+            scope,
+            bucket_id,
+            issue_operation,
+            key_configuration(),
+            actor.clone(),
+            TimestampMicros::new(14),
+        )
+        .await?;
+    assert!(issue_replay.replayed);
+    assert!(issue_replay.secret.is_none());
+    assert_eq!(issue_replay.metadata.id, key_id);
+
+    let rotated = service
+        .rotate_access_key(
+            scope,
+            bucket_id,
+            key_id,
+            OperationId::generate(),
+            1,
+            TimestampMicros::new(20),
+            actor.clone(),
+            TimestampMicros::new(15),
+        )
+        .await?;
+    assert!(rotated.secret.is_some());
+    let rotated_secret = rotated
+        .secret
+        .as_ref()
+        .ok_or("rotated secret missing")?
+        .expose()
+        .to_owned();
+    assert_eq!(rotated.metadata.revision, 2);
+    assert_eq!(
+        rotated.metadata.previous_generation_valid_until,
+        Some(TimestampMicros::new(20))
+    );
+    assert!(
+        service
+            .authorize_access_key(
+                &first_secret,
+                scope,
+                bucket_id,
+                "uploads/image.png",
+                AccessKeyOperation::Read,
+                TimestampMicros::new(19)
+            )
+            .await?
+            .is_some()
+    );
+    assert!(
+        service
+            .authorize_access_key(
+                &first_secret,
+                scope,
+                bucket_id,
+                "uploads/image.png",
+                AccessKeyOperation::Read,
+                TimestampMicros::new(20)
+            )
+            .await?
+            .is_none()
+    );
+    assert!(
+        service
+            .authorize_access_key(
+                &rotated_secret,
+                scope,
+                bucket_id,
+                "uploads/image.png",
+                AccessKeyOperation::Read,
+                TimestampMicros::new(20)
+            )
+            .await?
+            .is_some()
+    );
+    let revoked = service
+        .revoke_access_key(
+            scope,
+            bucket_id,
+            key_id,
+            OperationId::generate(),
+            2,
+            actor.clone(),
+            TimestampMicros::new(21),
+        )
+        .await?;
+    assert_eq!(revoked.operation.revision, 3);
+    assert_eq!(
+        service
+            .get_access_key(scope, bucket_id, key_id)
+            .await?
+            .ok_or("key missing")?
+            .state,
+        AccessKeyState::Revoked
+    );
+    assert!(
+        service
+            .authorize_access_key(
+                &rotated_secret,
+                scope,
+                bucket_id,
+                "uploads/image.png",
+                AccessKeyOperation::Read,
+                TimestampMicros::new(22)
+            )
+            .await?
+            .is_none()
+    );
+
+    let second = service
+        .issue_access_key(
+            scope,
+            bucket_id,
+            OperationId::generate(),
+            key_configuration(),
+            actor.clone(),
+            TimestampMicros::new(22),
+        )
+        .await?;
+    let second_id = second.metadata.id;
+    let archived = service
+        .archive_bucket(
+            scope,
+            bucket_id,
+            OperationId::generate(),
+            2,
+            actor,
+            TimestampMicros::new(23),
+        )
+        .await?;
+    assert_eq!(archived.operation.revision, 3);
+    assert_eq!(
+        service
+            .get_access_key(scope, bucket_id, second_id)
+            .await?
+            .ok_or("key missing")?
+            .state,
+        AccessKeyState::Revoked
+    );
+    assert!(matches!(
+        service
+            .issue_access_key(
+                scope,
+                bucket_id,
+                OperationId::generate(),
+                key_configuration(),
+                "operator:02".parse()?,
+                TimestampMicros::new(24)
+            )
+            .await,
+        Err(ObjectStorageError::Conflict)
+    ));
+
+    let page = service
+        .list_buckets(scope, BucketPageRequest::new(None, 1)?)
+        .await?;
+    assert_eq!(page.buckets.len(), 1);
+    let keys = service
+        .list_access_keys(scope, bucket_id, AccessKeyPageRequest::new(None, 1)?)
+        .await?;
+    assert_eq!(keys.keys.len(), 1);
+    assert!(keys.next.is_some());
+    let audit = service
+        .audit(scope, AuditPageRequest::new(None, 100)?)
+        .await?;
+    assert_eq!(audit.events.len(), 7);
+    assert_eq!(audit.events[0].operation_id, create_operation);
+    assert!(repository.telemetry().commands >= 6);
+    assert!(repository.telemetry().replays >= 2);
+    Ok((scope, bucket_id, create_operation))
+}
+
+fn configuration(
+    name: &str,
+    policy: BucketPolicy,
+) -> Result<BucketConfiguration, ObjectStorageError> {
+    Ok(BucketConfiguration {
+        name: name.parse()?,
+        policy,
+        cors: Vec::new(),
+        versioning: Versioning::Enabled,
+        lifecycle: BucketLifecycle {
+            expire_current_after_days: Some(365),
+            expire_noncurrent_after_days: Some(30),
+            abort_incomplete_after_days: Some(7),
+        },
+        quota: BucketQuota {
+            max_object_bytes: 10_000_000,
+            max_total_bytes: 1_000_000_000,
+            max_objects: 10_000,
+        },
+    })
+}
+
+fn key_configuration() -> AccessKeyConfiguration {
+    AccessKeyConfiguration {
+        label: "media-uploader".to_owned(),
+        prefix: "uploads/".to_owned(),
+        operations: BTreeSet::from([AccessKeyOperation::Read, AccessKeyOperation::Write]),
+    }
+}
+
+#[test]
+fn invalid_domains_fail_closed() {
+    assert!(
+        "Bad_Name"
+            .parse::<runku_object_storage::BucketName>()
+            .is_err()
+    );
+    assert!(
+        AccessKeyConfiguration {
+            label: "x".to_owned(),
+            prefix: "../escape".to_owned(),
+            operations: BTreeSet::from([AccessKeyOperation::Read])
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn local_role_cannot_open_postgres() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    let Ok(runtime) = runtime else {
+        return;
+    };
+    assert!(matches!(
+        runtime.block_on(SqlObjectStorageRepository::connect_postgres(
+            "postgres://localhost/runku",
+            ObjectStorageRepositoryConfig {
+                role: RepositoryRole::Local,
+                ..ObjectStorageRepositoryConfig::LOCAL
+            }
+        )),
+        Err(ObjectStorageError::ProductionBackendUnsupported)
+    ));
+}
