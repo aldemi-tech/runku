@@ -105,6 +105,46 @@ impl EnvironmentService {
             .await
     }
 
+    /// Archives one active Environment using an exact revision precondition.
+    pub async fn archive(
+        &self,
+        scope: EnvironmentScope,
+        operation_id: OperationId,
+        expected_revision: u64,
+        archived_at: TimestampMicros,
+    ) -> Result<EnvironmentOperationResult, EnvironmentError> {
+        self.repository
+            .apply(
+                scope,
+                operation_id,
+                &EnvironmentCommand::Archive {
+                    expected_revision,
+                    archived_at,
+                },
+            )
+            .await
+    }
+
+    /// Restores one archived Environment using an exact revision precondition.
+    pub async fn restore(
+        &self,
+        scope: EnvironmentScope,
+        operation_id: OperationId,
+        expected_revision: u64,
+        restored_at: TimestampMicros,
+    ) -> Result<EnvironmentOperationResult, EnvironmentError> {
+        self.repository
+            .apply(
+                scope,
+                operation_id,
+                &EnvironmentCommand::Restore {
+                    expected_revision,
+                    restored_at,
+                },
+            )
+            .await
+    }
+
     /// Records one materializer outcome for the exact desired revision.
     ///
     /// # Errors

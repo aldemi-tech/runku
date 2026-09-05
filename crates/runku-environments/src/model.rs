@@ -321,8 +321,7 @@ impl Environment {
     /// Whether the exact desired revision is observed ready.
     #[must_use]
     pub fn is_converged(&self) -> bool {
-        self.desired_state == EnvironmentDesiredState::Active
-            && self.observed_state == EnvironmentObservedState::Ready
+        self.observed_state == EnvironmentObservedState::Ready
             && self.observed_configuration_revision == Some(self.configuration_revision)
     }
 
@@ -356,6 +355,20 @@ pub enum EnvironmentCommand {
         configuration: EnvironmentConfiguration,
         /// Trusted update timestamp.
         updated_at: TimestampMicros,
+    },
+    /// Changes desired lifecycle state from active to archived.
+    Archive {
+        /// Required current configuration revision.
+        expected_revision: u64,
+        /// Trusted archive timestamp.
+        archived_at: TimestampMicros,
+    },
+    /// Changes desired lifecycle state from archived to active.
+    Restore {
+        /// Required current configuration revision.
+        expected_revision: u64,
+        /// Trusted restore timestamp.
+        restored_at: TimestampMicros,
     },
     /// Records the materializer result for one exact desired revision.
     Materialize {
@@ -401,6 +414,22 @@ impl EnvironmentCommand {
                 ..
             } => {
                 if *expected_revision == 0 || observed_at.get() < 0 {
+                    return Err(EnvironmentError::InvalidInput);
+                }
+            }
+            Self::Archive {
+                expected_revision,
+                archived_at,
+            } => {
+                if *expected_revision == 0 || archived_at.get() < 0 {
+                    return Err(EnvironmentError::InvalidInput);
+                }
+            }
+            Self::Restore {
+                expected_revision,
+                restored_at,
+            } => {
+                if *expected_revision == 0 || restored_at.get() < 0 {
                     return Err(EnvironmentError::InvalidInput);
                 }
             }
@@ -453,6 +482,22 @@ impl EnvironmentCommand {
                 }]);
                 digest.update(observed_at.get().to_be_bytes());
             }
+            Self::Archive {
+                expected_revision,
+                archived_at,
+            } => {
+                digest.update([4]);
+                digest.update(expected_revision.to_be_bytes());
+                digest.update(archived_at.get().to_be_bytes());
+            }
+            Self::Restore {
+                expected_revision,
+                restored_at,
+            } => {
+                digest.update([5]);
+                digest.update(expected_revision.to_be_bytes());
+                digest.update(restored_at.get().to_be_bytes());
+            }
         }
         Ok(digest.finalize().into())
     }
@@ -464,6 +509,8 @@ impl EnvironmentCommand {
             Self::Create { .. } => EnvironmentOperationKind::Create,
             Self::Update { .. } => EnvironmentOperationKind::Update,
             Self::Materialize { .. } => EnvironmentOperationKind::Materialize,
+            Self::Archive { .. } => EnvironmentOperationKind::Archive,
+            Self::Restore { .. } => EnvironmentOperationKind::Restore,
         }
     }
 }
@@ -546,8 +593,7 @@ impl EnvironmentLifecycle {
     ) -> Result<Environment, EnvironmentError> {
         current.validate()?;
         let observed_state = outcome.observed_state();
-        if current.desired_state != EnvironmentDesiredState::Active
-            || expected_revision != current.configuration_revision
+        if expected_revision != current.configuration_revision
             || (current.observed_state == observed_state
                 && current.observed_configuration_revision == Some(expected_revision))
         {
@@ -567,6 +613,38 @@ impl EnvironmentLifecycle {
         next.validate()?;
         Ok(next)
     }
+
+    /// Changes desired state through exact revision CAS and returns to pending observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns conflict for revision/state drift and invalid input for timestamp drift.
+    pub fn change_state(
+        current: &Environment,
+        expected_revision: u64,
+        desired_state: EnvironmentDesiredState,
+        changed_at: TimestampMicros,
+    ) -> Result<Environment, EnvironmentError> {
+        current.validate()?;
+        if expected_revision != current.configuration_revision
+            || desired_state == current.desired_state
+        {
+            return Err(EnvironmentError::Conflict);
+        }
+        if changed_at < current.updated_at {
+            return Err(EnvironmentError::InvalidInput);
+        }
+        let mut next = current.clone();
+        next.configuration_revision = next
+            .configuration_revision
+            .checked_add(1)
+            .ok_or(EnvironmentError::LimitExceeded)?;
+        next.desired_state = desired_state;
+        next.observed_state = EnvironmentObservedState::Pending;
+        next.updated_at = changed_at;
+        next.validate()?;
+        Ok(next)
+    }
 }
 
 /// Durable Environment operation kind.
@@ -578,6 +656,10 @@ pub enum EnvironmentOperationKind {
     Update,
     /// Materializer observation.
     Materialize,
+    /// Desired state changed to archived.
+    Archive,
+    /// Desired state changed back to active.
+    Restore,
 }
 
 impl EnvironmentOperationKind {
@@ -588,6 +670,8 @@ impl EnvironmentOperationKind {
             Self::Create => "create",
             Self::Update => "update",
             Self::Materialize => "materialize",
+            Self::Archive => "archive",
+            Self::Restore => "restore",
         }
     }
 }
@@ -600,6 +684,8 @@ impl FromStr for EnvironmentOperationKind {
             "create" => Ok(Self::Create),
             "update" => Ok(Self::Update),
             "materialize" => Ok(Self::Materialize),
+            "archive" => Ok(Self::Archive),
+            "restore" => Ok(Self::Restore),
             _ => Err(EnvironmentError::Corruption),
         }
     }
@@ -833,6 +919,56 @@ mod tests {
         assert_eq!(updated.observed_state, EnvironmentObservedState::Pending);
         assert_eq!(updated.observed_configuration_revision, Some(1));
         assert!(!updated.is_converged());
+        Ok(())
+    }
+
+    #[test]
+    fn archive_and_restore_are_revisioned_reconcilable_state_changes() -> Result<(), Box<dyn Error>>
+    {
+        let created = EnvironmentLifecycle::create(
+            scope(),
+            configuration("production")?,
+            TimestampMicros::new(10),
+        )?;
+        let ready = EnvironmentLifecycle::materialize(
+            &created,
+            1,
+            EnvironmentMaterializationOutcome::Ready,
+            TimestampMicros::new(11),
+        )?;
+        let archived = EnvironmentLifecycle::change_state(
+            &ready,
+            1,
+            EnvironmentDesiredState::Archived,
+            TimestampMicros::new(12),
+        )?;
+        assert_eq!(archived.configuration_revision, 2);
+        assert_eq!(archived.desired_state, EnvironmentDesiredState::Archived);
+        assert!(!archived.is_converged());
+        let archived = EnvironmentLifecycle::materialize(
+            &archived,
+            2,
+            EnvironmentMaterializationOutcome::Ready,
+            TimestampMicros::new(13),
+        )?;
+        assert!(archived.is_converged());
+        let restored = EnvironmentLifecycle::change_state(
+            &archived,
+            2,
+            EnvironmentDesiredState::Active,
+            TimestampMicros::new(14),
+        )?;
+        assert_eq!(restored.configuration_revision, 3);
+        assert_eq!(restored.desired_state, EnvironmentDesiredState::Active);
+        assert_eq!(
+            EnvironmentLifecycle::change_state(
+                &restored,
+                3,
+                EnvironmentDesiredState::Active,
+                TimestampMicros::new(15),
+            ),
+            Err(EnvironmentError::Conflict)
+        );
         Ok(())
     }
 

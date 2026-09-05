@@ -145,6 +145,13 @@ Management API now compose it as an additive exact-scope authority. Operators mu
 Platform Identity and Management together before granting the new `environments:read` capability;
 adopting the registry still requires a coordinated backup and rollback decision.
 
+The post-0.4.5 Environment schema v2 extends only the operation-kind constraint with `archive` and
+`restore`; it transactionally copies all v1 journal rows and does not reinterpret Environment
+configuration. Both commands increment the existing configuration/state revision, use the same
+idempotency and operation reconciliation contract, and preserve subordinate data. An older binary
+must not write a v2 registry. Cloud placement drain/restoration remains separately reconciled from
+this portable Product desired state.
+
 The standalone serving-policy registry is another compatible additive source-line capability. Its
 schema v1 adds only namespaced policy, weighted-Release, operation, audit, and migration tables.
 Each policy stores canonical schema, logical-index, and Cron-declaration hashes derived from

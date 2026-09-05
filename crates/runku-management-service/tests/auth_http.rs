@@ -20,7 +20,8 @@ use runku_management_service::{
     ManagementBucketPage, ManagementCronActivationResult, ManagementCronActivationSet,
     ManagementCronCatalog, ManagementCronQuery, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataWriteResult, ManagementEnvironment,
-    ManagementEnvironmentConfiguration, ManagementHealthComponent, ManagementHttpConfig,
+    ManagementEnvironmentConfiguration, ManagementEnvironmentLifecycleChange,
+    ManagementEnvironmentResult, ManagementHealthComponent, ManagementHttpConfig,
     ManagementHttpExposure, ManagementInstanceHealth, ManagementLogArchiveStatus,
     ManagementLogPage, ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery,
     ManagementMetric, ManagementMetrics, ManagementProduct, ManagementProductError,
@@ -66,6 +67,37 @@ struct DataProbeProduct {
     metrics_reads: AtomicUsize,
     instance_health_reads: AtomicUsize,
     compatibility_reads: AtomicUsize,
+    environment_archives: AtomicUsize,
+    environment_restores: AtomicUsize,
+}
+
+fn lifecycle_environment(
+    scope: EnvironmentScope,
+    revision: u64,
+    desired_state: &str,
+) -> ManagementEnvironment {
+    ManagementEnvironment {
+        version: 1,
+        project_id: scope.project_id().to_string(),
+        environment_id: scope.environment_id().to_string(),
+        configuration: ManagementEnvironmentConfiguration {
+            name: "Development".to_owned(),
+            slug: "development".to_owned(),
+            region: "local".to_owned(),
+            purpose: "development".to_owned(),
+            protection: "open".to_owned(),
+            location: "local".to_owned(),
+            workspace_targets_enabled: true,
+        },
+        configuration_revision: revision,
+        desired_state: desired_state.to_owned(),
+        observed_state: "ready".to_owned(),
+        observed_configuration_revision: Some(revision),
+        converged: true,
+        created_at_micros: "1".to_owned(),
+        updated_at_micros: "2".to_owned(),
+        observed_at_micros: Some("2".to_owned()),
+    }
 }
 
 #[async_trait]
@@ -149,6 +181,36 @@ impl ManagementProduct for DataProbeProduct {
             created_at_micros: "1".to_owned(),
             updated_at_micros: "1".to_owned(),
             observed_at_micros: None,
+        })
+    }
+
+    async fn environment_archive(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentLifecycleChange,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        self.environment_archives.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementEnvironmentResult {
+            environment: lifecycle_environment(
+                self.scope,
+                request.expected_revision + 1,
+                "archived",
+            ),
+            operation_id: operation_id.to_string(),
+            replayed: false,
+        })
+    }
+
+    async fn environment_restore(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentLifecycleChange,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        self.environment_restores.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementEnvironmentResult {
+            environment: lifecycle_environment(self.scope, request.expected_revision + 1, "active"),
+            operation_id: operation_id.to_string(),
+            replayed: false,
         })
     }
 
@@ -879,6 +941,8 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         metrics_reads: AtomicUsize::new(0),
         instance_health_reads: AtomicUsize::new(0),
         compatibility_reads: AtomicUsize::new(0),
+        environment_archives: AtomicUsize::new(0),
+        environment_restores: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -918,6 +982,8 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         scope.project_id(),
         scope.environment_id()
     );
+    let environment_archive_path = format!("{environment_path}/archive");
+    let environment_restore_path = format!("{environment_path}/restore");
     let cron_path = format!(
         "/v1/projects/{}/environments/{}/crons?target=workspace%3Alocal",
         scope.project_id(),
@@ -955,6 +1021,19 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             .header("idempotency-key", OperationId::generate().to_string())
             .body(Body::from(
                 json!({"target":"workspace:local", "value":{"type":"null"}}).to_string(),
+            ))
+    };
+    let lifecycle = |path: &str, access: &str, revision: u64| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", OperationId::generate().to_string())
+            .body(Body::from(
+                json!({
+                    "expectedRevision": revision,
+                    "changedAtMicros": "1900000000000009"
+                })
+                .to_string(),
             ))
     };
 
@@ -1002,6 +1081,18 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(product.environment_reads.load(Ordering::SeqCst), 0);
+    let response = router
+        .clone()
+        .oneshot(lifecycle(&environment_archive_path, manager_access, 1)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.environment_archives.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(lifecycle(&environment_restore_path, manager_access, 2)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.environment_restores.load(Ordering::SeqCst), 1);
     let response = router
         .clone()
         .oneshot(
@@ -1066,6 +1157,12 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.environment_reads.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(lifecycle(&environment_archive_path, environment_access, 1)?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.environment_archives.load(Ordering::SeqCst), 1);
     let response = router
         .clone()
         .oneshot(

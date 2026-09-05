@@ -365,6 +365,16 @@ pub struct ManagementEnvironmentUpdate {
     pub updated_at_micros: String,
 }
 
+/// Exact Environment archive or restore request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementEnvironmentLifecycleChange {
+    /// Required positive current configuration/state revision.
+    pub expected_revision: u64,
+    /// Caller-pinned canonical decimal lifecycle-change timestamp.
+    pub changed_at_micros: String,
+}
+
 /// One exact portable Product Environment projection.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -459,7 +469,7 @@ pub struct ManagementInstanceHealth {
 pub struct ManagementEnvironmentOperation {
     /// Correlated operation ID.
     pub operation_id: String,
-    /// `create`, `update`, or `materialize`.
+    /// `create`, `update`, `archive`, `restore`, or `materialize`.
     pub kind: String,
     /// Desired configuration revision produced or observed.
     pub configuration_revision: u64,
@@ -1212,6 +1222,26 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         &self,
         operation_id: OperationId,
         request: &ManagementEnvironmentUpdate,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let _ = (operation_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Archives the exact Environment through CAS and idempotency.
+    async fn environment_archive(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentLifecycleChange,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let _ = (operation_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Restores the exact Environment through CAS and idempotency.
+    async fn environment_restore(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentLifecycleChange,
     ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
         let _ = (operation_id, request);
         Err(ManagementProductError::NotFound)

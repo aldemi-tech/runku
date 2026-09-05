@@ -14,14 +14,14 @@ The following behavior is implemented and test-covered:
   lookup, and the storage-independent service;
 - `runku-environment-repository` implements the same contract over SQLite and PostgreSQL 16+ with
   bounded pools and checksum-protected append-only migrations;
-- create, get, bounded list, full-configuration update, and trusted materializer observation are
-  available through Rust APIs;
+- create, get, bounded list, full-configuration update, archive, restore, and trusted materializer
+  observation are available through Rust APIs;
 - the compact server composes the registry in the protected Product state database and reports its
   health through readiness;
 - authenticated exact-scope Management routes create, get, update, and reconcile operations using
   independent `environments:read` and `environments:manage` capabilities.
 
-Project-wide list, CLI commands, archive/restore, provider provisioning, and automatic population
+Project-wide list, CLI commands, provider provisioning, and automatic population
 of a registry record for pre-existing local roots remain outside this slice. A Product adapter owns
 one configured exact Environment: creation therefore uses the exact Environment URL and cannot
 allocate or infer an ID.
@@ -36,6 +36,9 @@ touching the registry:
   `Idempotency-Key: opn_*` to create the caller-selected canonical Environment;
 - `PUT .../environments/{environment}` requires `environments:manage`, the same idempotency header,
   and an exact positive `expectedRevision` for complete configuration replacement;
+- `POST .../environments/{environment}/archive` and `/restore` require `environments:manage`, the
+  same idempotency header, an exact positive `expectedRevision`, and a pinned
+  `changedAtMicros`; archive/restore operation lookup is identical to other lifecycle writes;
 - `GET .../environment-operations/{opn_*}` requires `environments:read` and reconciles an uncertain
   result without making a new write.
 
@@ -57,7 +60,7 @@ the service.
 | region | Logical lowercase label, 1–64 bytes; never a provider account, cell, or host |
 | purpose/protection/location | Reuses the existing Environment policy axes |
 | configuration revision | Positive compare-and-set revision; starts at 1 |
-| desired state | `active`; `archived` is reserved for the later archive state machine |
+| desired state | `active` or `archived`, changed only through revisioned lifecycle commands |
 | observed state | `pending`, `ready`, or `failed` |
 | observed revision | Exact desired revision for `ready`/`failed`; an older revision may remain visible while a new configuration is `pending` |
 
@@ -70,6 +73,14 @@ can distinguish “never materialized” from “updating a previously materiali
 the desired configuration and records `ready` or `failed` for the exact revision. It cannot create
 an unknown Environment. Provider capacity, placement, physical region identifiers, and DNS remain
 outside this portable Product record.
+
+Archive and restore preserve configuration and subordinate Product state. Each changes desired
+state, increments the same CAS revision, returns observation to `pending`, and retains the older
+observation until materialized. The compact server applies the local effect synchronously: archive
+stops the Product listener before recording `ready`; restore starts it when a Channel exists (or
+keeps a valid no-Release Environment idle) before recording `ready`. An archived root does not
+restart serving after process restart. Cloud provider drain, DNS, placement, and resource teardown
+remain Cloud lifecycle effects and must converge before Cloud presents its placement as ready.
 
 ## Rust service workflow
 
@@ -143,12 +154,17 @@ The schema is additive and independent from existing local/release/identity Envi
 rows. Future changes append a new migration; applied migration text/checksums must never be edited.
 Unknown future migration versions fail closed.
 
-Because no released process composes this repository yet, current compact backup and restore does
-not claim it as an active authority. A composition that adopts it must quiesce writers and back up
-the complete registry database, operation journal, migration rows, and the subordinate Product
-stores at one coordinated recovery point. Restoring only the registry or only subordinate stores is
-invalid. Rollback to a binary that does not understand an adopted registry must not resume writes;
-use the composition's documented forward recovery or verified coordinated restore.
+Schema v2 rebuilds only the operation journal constraint to admit the additive `archive` and
+`restore` kinds while copying every v1 operation unchanged. The Environment table already admitted
+both desired-state values. Migration remains transactional and checksum protected; after v2, an
+older binary must not resume writes to the same registry.
+
+The current source compact server composes this repository in Product state, so backup/restore must
+quiesce writers and capture the complete registry database, operation journal, migration rows, and
+subordinate Product stores at one coordinated recovery point. Restoring only the registry or only
+subordinate stores is invalid. Rollback to a binary that does not understand an adopted registry
+must not resume writes; use the composition's documented forward recovery or verified coordinated
+restore.
 
 ## Security and operational limits
 

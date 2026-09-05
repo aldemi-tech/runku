@@ -16,9 +16,10 @@ use runku_core::{
     ProjectId,
 };
 use runku_environments::{
-    Environment, EnvironmentCommand, EnvironmentError, EnvironmentLifecycle, EnvironmentOperation,
-    EnvironmentOperationResult, EnvironmentPage, EnvironmentPageRequest, EnvironmentRepository,
-    EnvironmentRepositoryBackend, EnvironmentRepositoryTelemetrySnapshot,
+    Environment, EnvironmentCommand, EnvironmentDesiredState, EnvironmentError,
+    EnvironmentLifecycle, EnvironmentOperation, EnvironmentOperationResult, EnvironmentPage,
+    EnvironmentPageRequest, EnvironmentRepository, EnvironmentRepositoryBackend,
+    EnvironmentRepositoryTelemetrySnapshot,
 };
 use runku_value::TimestampMicros;
 use sha2::{Digest, Sha256};
@@ -32,7 +33,13 @@ const MIGRATION_1: &[&str] = &[
     "CREATE TABLE runku_environment_operations (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, operation_id TEXT NOT NULL, command_digest BYTEA NOT NULL CHECK(length(command_digest) = 32), kind TEXT NOT NULL CHECK(kind IN ('create','update','materialize')), configuration_revision BIGINT NOT NULL CHECK(configuration_revision > 0), desired_state TEXT NOT NULL CHECK(desired_state IN ('active','archived')), observed_state TEXT NOT NULL CHECK(observed_state IN ('pending','ready','failed')), observed_configuration_revision BIGINT NULL CHECK(observed_configuration_revision IS NULL OR (observed_configuration_revision > 0 AND observed_configuration_revision <= configuration_revision)), completed_at_micros BIGINT NOT NULL CHECK(completed_at_micros >= 0), PRIMARY KEY(project_id, environment_id, operation_id), FOREIGN KEY(project_id, environment_id) REFERENCES runku_environments(project_id, environment_id) ON DELETE RESTRICT)",
     "CREATE INDEX runku_environments_by_project_id ON runku_environments(project_id, environment_id)",
 ];
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, MIGRATION_1)];
+const MIGRATION_2: &[&str] = &[
+    "ALTER TABLE runku_environment_operations RENAME TO runku_environment_operations_v1",
+    "CREATE TABLE runku_environment_operations (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, operation_id TEXT NOT NULL, command_digest BYTEA NOT NULL CHECK(length(command_digest) = 32), kind TEXT NOT NULL CHECK(kind IN ('create','update','materialize','archive','restore')), configuration_revision BIGINT NOT NULL CHECK(configuration_revision > 0), desired_state TEXT NOT NULL CHECK(desired_state IN ('active','archived')), observed_state TEXT NOT NULL CHECK(observed_state IN ('pending','ready','failed')), observed_configuration_revision BIGINT NULL CHECK(observed_configuration_revision IS NULL OR (observed_configuration_revision > 0 AND observed_configuration_revision <= configuration_revision)), completed_at_micros BIGINT NOT NULL CHECK(completed_at_micros >= 0), PRIMARY KEY(project_id, environment_id, operation_id), FOREIGN KEY(project_id, environment_id) REFERENCES runku_environments(project_id, environment_id) ON DELETE RESTRICT)",
+    "INSERT INTO runku_environment_operations(project_id,environment_id,operation_id,command_digest,kind,configuration_revision,desired_state,observed_state,observed_configuration_revision,completed_at_micros) SELECT project_id,environment_id,operation_id,command_digest,kind,configuration_revision,desired_state,observed_state,observed_configuration_revision,completed_at_micros FROM runku_environment_operations_v1",
+    "DROP TABLE runku_environment_operations_v1",
+];
+const MIGRATIONS: &[(i64, &[&str])] = &[(1, MIGRATION_1), (2, MIGRATION_2)];
 
 /// Operational role selected for repository composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -355,6 +362,38 @@ async fn apply(
                 *observed_at,
             )?;
             update_observation(&mut transaction, &next, *expected_revision).await?;
+            next
+        }
+        EnvironmentCommand::Archive {
+            expected_revision,
+            archived_at,
+        } => {
+            let current = load_environment_tx(&mut transaction, backend, scope)
+                .await?
+                .ok_or(EnvironmentError::NotFound)?;
+            let next = EnvironmentLifecycle::change_state(
+                &current,
+                *expected_revision,
+                EnvironmentDesiredState::Archived,
+                *archived_at,
+            )?;
+            update_environment(&mut transaction, &next, *expected_revision).await?;
+            next
+        }
+        EnvironmentCommand::Restore {
+            expected_revision,
+            restored_at,
+        } => {
+            let current = load_environment_tx(&mut transaction, backend, scope)
+                .await?
+                .ok_or(EnvironmentError::NotFound)?;
+            let next = EnvironmentLifecycle::change_state(
+                &current,
+                *expected_revision,
+                EnvironmentDesiredState::Active,
+                *restored_at,
+            )?;
+            update_environment(&mut transaction, &next, *expected_revision).await?;
             next
         }
     };
@@ -680,6 +719,8 @@ const fn command_time(command: &EnvironmentCommand) -> TimestampMicros {
         EnvironmentCommand::Create { created_at, .. } => *created_at,
         EnvironmentCommand::Update { updated_at, .. } => *updated_at,
         EnvironmentCommand::Materialize { observed_at, .. } => *observed_at,
+        EnvironmentCommand::Archive { archived_at, .. } => *archived_at,
+        EnvironmentCommand::Restore { restored_at, .. } => *restored_at,
     }
 }
 
@@ -981,6 +1022,60 @@ mod tests {
             migration_checksum(1, MIGRATION_1),
             migration_checksum(2, MIGRATION_1)
         );
+    }
+
+    #[tokio::test]
+    async fn schema_v2_preserves_v1_operations_and_admits_lifecycle_kinds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("migration-v1.sqlite3").display()
+        );
+        sqlx::any::install_default_drivers();
+        let pool = AnyPool::connect(&url).await?;
+        sqlx::query("CREATE TABLE runku_environment_schema_migrations(version BIGINT PRIMARY KEY, checksum TEXT NOT NULL, applied_at_micros BIGINT NOT NULL)")
+            .execute(&pool)
+            .await?;
+        for statement in MIGRATION_1 {
+            pool.execute(*statement).await?;
+        }
+        sqlx::query("INSERT INTO runku_environments(project_id,environment_id,name,slug,region,purpose,protection,location,workspace_targets_enabled,configuration_revision,desired_state,observed_state,observed_configuration_revision,created_at_micros,updated_at_micros,observed_at_micros) VALUES ('prj_fixture','env_fixture','Fixture','fixture','local','development','open','local',1,1,'active','pending',NULL,1,1,NULL)")
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO runku_environment_operations(project_id,environment_id,operation_id,command_digest,kind,configuration_revision,desired_state,observed_state,observed_configuration_revision,completed_at_micros) VALUES ('prj_fixture','env_fixture','opn_fixture',?,'create',1,'active','pending',NULL,1)")
+            .bind(vec![7_u8; 32])
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO runku_environment_schema_migrations(version,checksum,applied_at_micros) VALUES (1,?,1)")
+            .bind(migration_checksum(1, MIGRATION_1))
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+
+        let repository =
+            SqlEnvironmentRepository::connect_sqlite(&url, EnvironmentRepositoryConfig::LOCAL)
+                .await?;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runku_environment_operations")
+                .fetch_one(&repository.pool)
+                .await?,
+            1
+        );
+        sqlx::query("INSERT INTO runku_environment_operations(project_id,environment_id,operation_id,command_digest,kind,configuration_revision,desired_state,observed_state,observed_configuration_revision,completed_at_micros) VALUES ('prj_fixture','env_fixture','opn_archive',?,'archive',2,'archived','pending',1,2)")
+            .bind(vec![8_u8; 32])
+            .execute(&repository.pool)
+            .await?;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM runku_environment_schema_migrations"
+            )
+            .fetch_one(&repository.pool)
+            .await?,
+            2
+        );
+        repository.close().await;
+        Ok(())
     }
 
     #[test]

@@ -42,9 +42,10 @@ use crate::{
     ManagementBucketUpdate, ManagementCatalogQuery, ManagementCronActivationSet,
     ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataInsertRequest,
     ManagementDataQuery, ManagementDataReplaceRequest, ManagementEnvironmentCreate,
-    ManagementEnvironmentUpdate, ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct,
-    ManagementProductError, ManagementServingPolicySet, ManagementStorageAccessKeyIssue,
-    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, OidcClientConfiguration,
+    ManagementEnvironmentLifecycleChange, ManagementEnvironmentUpdate, ManagementLogPruneRequest,
+    ManagementLogQuery, ManagementProduct, ManagementProductError, ManagementServingPolicySet,
+    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
+    ManagementStorageAccessKeyRotate, OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -221,6 +222,14 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/environment-operations/{operation_id}",
             get(product_environment_operation),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/archive",
+            post(product_environment_archive),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/restore",
+            post(product_environment_restore),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/metrics",
@@ -564,6 +573,62 @@ async fn product_environment_operation(
         Err(response) => return *response,
     };
     match product.environment_operation(operation_id).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_environment_archive(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementEnvironmentLifecycleChange>,
+) -> Response {
+    product_environment_lifecycle(state, headers, project, environment, request, true).await
+}
+
+async fn product_environment_restore(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementEnvironmentLifecycleChange>,
+) -> Response {
+    product_environment_lifecycle(state, headers, project, environment, request, false).await
+}
+
+async fn product_environment_lifecycle(
+    state: HttpState,
+    headers: HeaderMap,
+    project: String,
+    environment: String,
+    request: ManagementEnvironmentLifecycleChange,
+    archive: bool,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::EnvironmentsManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let result = if archive {
+        product.environment_archive(operation_id, &request).await
+    } else {
+        product.environment_restore(operation_id, &request).await
+    };
+    match result {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }

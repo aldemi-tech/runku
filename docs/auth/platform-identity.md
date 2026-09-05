@@ -517,6 +517,7 @@ plus Runku's stricter verifier rules above.
 | `GET /v1/projects/{project}/environments/{environment}/status` | `releases:read` | reads a coherent Release/Channel snapshot |
 | `GET .../environments/{environment}` and `GET .../environment-operations/{opn_*}` | `environments:read` | reads portable desired/observed configuration or reconciles an uncertain lifecycle operation |
 | `POST` or `PUT .../environments/{environment}` | `environments:manage` + `Idempotency-Key: opn_*` | creates the exact configured scope or replaces its complete configuration using CAS |
+| `POST .../environments/{environment}/archive` or `/restore` | `environments:manage` + `Idempotency-Key: opn_*` | changes desired lifecycle through exact revision CAS; compact archive stops Product serving and restore restarts it when a Channel exists |
 | `GET .../serving-policy` and `GET .../serving-policy-operations/{opn_*}` | `releases:read` | reads desired/observed rollout state or reconciles an uncertain operation |
 | `GET .../schemas/compatibility` | `releases:read` | reads the shared canonical schema/index/Cron evidence for the desired serving set without source or customer data |
 | `PUT .../serving-policy` | `channels:promote` + `Idempotency-Key: opn_*` | replaces the complete compatible desired policy using exact CAS and materializes it for `environment:default` serving |

@@ -10,7 +10,7 @@ use runku_environment_repository::{
     EnvironmentRepositoryConfig, RepositoryRole, SqlEnvironmentRepository,
 };
 use runku_environments::{
-    EnvironmentCommand, EnvironmentConfiguration, EnvironmentError,
+    EnvironmentCommand, EnvironmentConfiguration, EnvironmentDesiredState, EnvironmentError,
     EnvironmentMaterializationOutcome, EnvironmentObservedState, EnvironmentPageRequest,
     EnvironmentRepository, EnvironmentRepositoryBackend, EnvironmentService,
 };
@@ -39,7 +39,7 @@ async fn sqlite_conformance_reopen_and_role_rejection() -> Result<(), Box<dyn Er
     let reopened =
         SqlEnvironmentRepository::connect_sqlite(&url, EnvironmentRepositoryConfig::LOCAL).await?;
     let restored = reopened.get(scope).await?.ok_or("environment missing")?;
-    assert_eq!(restored.configuration_revision, 2);
+    assert_eq!(restored.configuration_revision, 4);
     assert!(restored.is_converged());
     assert_eq!(
         reopened
@@ -246,6 +246,7 @@ async fn run_conformance(
             .await,
         Err(EnvironmentError::Conflict)
     );
+
     assert!(service.operation(scope, stale_operation).await?.is_none());
 
     service
@@ -281,6 +282,57 @@ async fn run_conformance(
             .await,
         Err(EnvironmentError::Conflict)
     );
+
+    let archive_operation = OperationId::generate();
+    let archived = service
+        .archive(scope, archive_operation, 2, TimestampMicros::new(106))
+        .await?;
+    assert_eq!(archived.operation.kind.as_str(), "archive");
+    assert_eq!(archived.operation.configuration_revision, 3);
+    assert_eq!(
+        archived.operation.desired_state,
+        EnvironmentDesiredState::Archived
+    );
+    assert!(
+        service
+            .archive(scope, archive_operation, 2, TimestampMicros::new(106))
+            .await?
+            .replayed
+    );
+    service
+        .materialize(
+            scope,
+            OperationId::generate(),
+            3,
+            EnvironmentMaterializationOutcome::Ready,
+            TimestampMicros::new(107),
+        )
+        .await?;
+    assert!(
+        service
+            .get(scope)
+            .await?
+            .ok_or("archived missing")?
+            .is_converged()
+    );
+    let restored = service
+        .restore(scope, OperationId::generate(), 3, TimestampMicros::new(108))
+        .await?;
+    assert_eq!(restored.operation.kind.as_str(), "restore");
+    assert_eq!(restored.operation.configuration_revision, 4);
+    assert_eq!(
+        restored.operation.desired_state,
+        EnvironmentDesiredState::Active
+    );
+    service
+        .materialize(
+            scope,
+            OperationId::generate(),
+            4,
+            EnvironmentMaterializationOutcome::Ready,
+            TimestampMicros::new(109),
+        )
+        .await?;
 
     let same_slug = EnvironmentScope::new(project_id, EnvironmentId::generate());
     assert_eq!(

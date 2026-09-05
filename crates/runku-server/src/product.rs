@@ -26,8 +26,9 @@ use runku_data_sqlite::{SqliteStore, SqliteStoreConfig};
 use runku_development::DevelopmentActor;
 use runku_environment_repository::{EnvironmentRepositoryConfig, SqlEnvironmentRepository};
 use runku_environments::{
-    Environment, EnvironmentConfiguration, EnvironmentError, EnvironmentOperation,
-    EnvironmentOperationKind, EnvironmentService,
+    Environment, EnvironmentConfiguration, EnvironmentDesiredState, EnvironmentError,
+    EnvironmentMaterializationOutcome, EnvironmentOperation, EnvironmentOperationKind,
+    EnvironmentService,
 };
 use runku_execution::{document_write_set_payload, plan_document_index_mutations};
 use runku_file_storage::{FileObjectStore, FileStorageLimits, FileUsageSink};
@@ -57,19 +58,20 @@ use runku_management_service::{
     ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
     ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementEnvironment,
     ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
-    ManagementEnvironmentOperation, ManagementEnvironmentResult, ManagementEnvironmentUpdate,
-    ManagementFunctionEntry, ManagementFunctionPage, ManagementHealthComponent,
-    ManagementInstanceHealth, ManagementIssuedStorageAccessKey, ManagementLogArchiveStatus,
-    ManagementLogPage, ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery,
-    ManagementMetric, ManagementMetrics, ManagementProduct, ManagementProductError,
-    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
-    ManagementScheduledInvocation, ManagementScheduledPage, ManagementSchemaIndex,
-    ManagementSchemaPage, ManagementSchemaTable, ManagementServingCompatibility,
-    ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
-    ManagementServingPolicySet, ManagementServingRelease, ManagementStorageAccessKey,
-    ManagementStorageAccessKeyConfiguration, ManagementStorageAccessKeyIssue,
-    ManagementStorageAccessKeyPage, ManagementStorageAccessKeyRevoke,
-    ManagementStorageAccessKeyRotate, ManagementStorageOperation, ManagementWorkspacePublish,
+    ManagementEnvironmentLifecycleChange, ManagementEnvironmentOperation,
+    ManagementEnvironmentResult, ManagementEnvironmentUpdate, ManagementFunctionEntry,
+    ManagementFunctionPage, ManagementHealthComponent, ManagementInstanceHealth,
+    ManagementIssuedStorageAccessKey, ManagementLogArchiveStatus, ManagementLogPage,
+    ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementMetric,
+    ManagementMetrics, ManagementProduct, ManagementProductError, ManagementReleaseOutcome,
+    ManagementReleaseStatus, ManagementResolvedTarget, ManagementScheduledInvocation,
+    ManagementScheduledPage, ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
+    ManagementServingCompatibility, ManagementServingOperation, ManagementServingPolicy,
+    ManagementServingPolicyResult, ManagementServingPolicySet, ManagementServingRelease,
+    ManagementStorageAccessKey, ManagementStorageAccessKeyConfiguration,
+    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyPage,
+    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, ManagementStorageOperation,
+    ManagementWorkspacePublish,
 };
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
@@ -279,7 +281,13 @@ impl ProductAdapter {
             Err(LocalReleaseError::NotFound) => false,
             Err(_) => return Err("SERVER_PRODUCT_ROOT_INVALID"),
         };
-        if has_channels {
+        let environment_active = adapter
+            .environments
+            .get(adapter.scope)
+            .await
+            .map_err(|_| "SERVER_PRODUCT_UNAVAILABLE")?
+            .is_none_or(|environment| environment.desired_state == EnvironmentDesiredState::Active);
+        if has_channels && environment_active {
             Box::pin(adapter.ensure_serving())
                 .await
                 .map_err(|_| "SERVER_PRODUCT_UNAVAILABLE")?;
@@ -311,6 +319,72 @@ impl ProductAdapter {
             );
         }
         Ok(())
+    }
+
+    async fn reconcile_environment_state(
+        &self,
+        desired_state: EnvironmentDesiredState,
+        revision: u64,
+        changed_at: TimestampMicros,
+    ) -> Result<(), ManagementProductError> {
+        let current = self
+            .environments
+            .get(self.scope)
+            .await
+            .map_err(map_environment)?
+            .ok_or(ManagementProductError::Corruption)?;
+        if current.configuration_revision != revision || current.desired_state != desired_state {
+            return Err(ManagementProductError::Conflict);
+        }
+        if current.is_converged() {
+            return Ok(());
+        }
+        match desired_state {
+            EnvironmentDesiredState::Archived => self.shutdown().await,
+            EnvironmentDesiredState::Active => {
+                let manager = LocalReleaseManager::open(&self.root)
+                    .await
+                    .map_err(map_release)?;
+                let has_channels = match manager.status().await {
+                    Ok(status) => !status.channels.is_empty(),
+                    Err(LocalReleaseError::NotFound) => false,
+                    Err(error) => return Err(map_release(error)),
+                };
+                if has_channels {
+                    self.ensure_serving().await?;
+                }
+            }
+        }
+        let materialized = self
+            .environments
+            .materialize(
+                self.scope,
+                OperationId::generate(),
+                revision,
+                EnvironmentMaterializationOutcome::Ready,
+                changed_at,
+            )
+            .await;
+        match materialized {
+            Ok(_) => Ok(()),
+            Err(EnvironmentError::Conflict | EnvironmentError::ResultUncertain) => {
+                let current = self
+                    .environments
+                    .get(self.scope)
+                    .await
+                    .map_err(map_environment)?
+                    .ok_or(ManagementProductError::Corruption)?;
+                if current.configuration_revision == revision
+                    && current.desired_state == desired_state
+                    && current.is_converged()
+                {
+                    Ok(())
+                } else {
+                    Err(ManagementProductError::ResultUncertain)
+                }
+            }
+            Err(error) => Err(map_environment(error)),
+        }
     }
 
     async fn effective_catalog(
@@ -932,6 +1006,76 @@ impl ManagementProduct for ProductAdapter {
             )
             .await
             .map_err(map_environment)?;
+        let environment = self
+            .environments
+            .get(self.scope)
+            .await
+            .map_err(map_environment)?
+            .ok_or(ManagementProductError::Corruption)?;
+        Ok(ManagementEnvironmentResult {
+            environment: management_environment(&environment),
+            operation_id: result.operation.operation_id.to_string(),
+            replayed: result.replayed,
+        })
+    }
+
+    async fn environment_archive(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentLifecycleChange,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let changed_at = parse_timestamp(&request.changed_at_micros)?;
+        let result = self
+            .environments
+            .archive(
+                self.scope,
+                operation_id,
+                request.expected_revision,
+                changed_at,
+            )
+            .await
+            .map_err(map_environment)?;
+        self.reconcile_environment_state(
+            EnvironmentDesiredState::Archived,
+            result.operation.configuration_revision,
+            changed_at,
+        )
+        .await?;
+        let environment = self
+            .environments
+            .get(self.scope)
+            .await
+            .map_err(map_environment)?
+            .ok_or(ManagementProductError::Corruption)?;
+        Ok(ManagementEnvironmentResult {
+            environment: management_environment(&environment),
+            operation_id: result.operation.operation_id.to_string(),
+            replayed: result.replayed,
+        })
+    }
+
+    async fn environment_restore(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentLifecycleChange,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let changed_at = parse_timestamp(&request.changed_at_micros)?;
+        let result = self
+            .environments
+            .restore(
+                self.scope,
+                operation_id,
+                request.expected_revision,
+                changed_at,
+            )
+            .await
+            .map_err(map_environment)?;
+        self.reconcile_environment_state(
+            EnvironmentDesiredState::Active,
+            result.operation.configuration_revision,
+            changed_at,
+        )
+        .await?;
         let environment = self
             .environments
             .get(self.scope)
@@ -2320,6 +2464,8 @@ fn management_environment_operation(
             EnvironmentOperationKind::Create => "create",
             EnvironmentOperationKind::Update => "update",
             EnvironmentOperationKind::Materialize => "materialize",
+            EnvironmentOperationKind::Archive => "archive",
+            EnvironmentOperationKind::Restore => "restore",
         }
         .to_owned(),
         configuration_revision: operation.configuration_revision,
@@ -3373,6 +3519,18 @@ export const hourly = cron({
         let directory = tempfile::tempdir()?;
         adapter(directory.path()).await?;
         let product = Box::pin(open_adapter(directory.path())).await?;
+        let release_id = product
+            .status()
+            .await?
+            .releases
+            .first()
+            .and_then(|release| release.get("releaseId"))
+            .and_then(Value::as_str)
+            .ok_or("missing lifecycle release")?
+            .to_owned();
+        product.release(&release_id, None).await?;
+        product.promote("stable", &release_id, Some(None)).await?;
+        assert!(product.process.lock().await.is_some());
         let create_operation = OperationId::generate();
         let configuration = ManagementEnvironmentConfiguration {
             name: "Development".to_owned(),
@@ -3458,6 +3616,45 @@ export const hourly = cron({
                 .await,
             Err(ManagementProductError::Conflict)
         );
+        let archive_operation = OperationId::generate();
+        let archived = product
+            .environment_archive(
+                archive_operation,
+                &ManagementEnvironmentLifecycleChange {
+                    expected_revision: 2,
+                    changed_at_micros: "1800000000000040".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(archived.environment.configuration_revision, 3);
+        assert_eq!(archived.environment.desired_state, "archived");
+        assert!(archived.environment.converged);
+        assert!(product.process.lock().await.is_none());
+        assert!(
+            product
+                .environment_archive(
+                    archive_operation,
+                    &ManagementEnvironmentLifecycleChange {
+                        expected_revision: 2,
+                        changed_at_micros: "1800000000000040".to_owned(),
+                    },
+                )
+                .await?
+                .replayed
+        );
+        let restored = product
+            .environment_restore(
+                OperationId::generate(),
+                &ManagementEnvironmentLifecycleChange {
+                    expected_revision: 3,
+                    changed_at_micros: "1800000000000050".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(restored.environment.configuration_revision, 4);
+        assert_eq!(restored.environment.desired_state, "active");
+        assert!(restored.environment.converged);
+        assert!(product.process.lock().await.is_some());
         product.shutdown().await;
         Ok(())
     }
