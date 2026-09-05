@@ -147,6 +147,12 @@ pub enum PlatformCapability {
     StorageRead,
     /// Create, configure, archive buckets and manage scoped Product storage keys.
     StorageManage,
+    /// Read code-owned Cron declarations and their current activation state.
+    CronRead,
+    /// Activate or deactivate deployed Cron declarations.
+    CronActivate,
+    /// Read durable Scheduled Invocation queue and history.
+    SchedulesRead,
     /// Query historical operational logs.
     LogsRead,
     /// Follow an operational log stream.
@@ -178,6 +184,9 @@ impl PlatformCapability {
             Self::CredentialsManage => "credentials:manage",
             Self::StorageRead => "storage:read",
             Self::StorageManage => "storage:manage",
+            Self::CronRead => "cron:read",
+            Self::CronActivate => "cron:activate",
+            Self::SchedulesRead => "schedules:read",
             Self::LogsRead => "logs:read",
             Self::LogsFollow => "logs:follow",
             Self::LogsPrune => "logs:prune",
@@ -207,6 +216,9 @@ impl PlatformCapability {
             "credentials:manage" => Ok(Self::CredentialsManage),
             "storage:read" => Ok(Self::StorageRead),
             "storage:manage" => Ok(Self::StorageManage),
+            "cron:read" => Ok(Self::CronRead),
+            "cron:activate" => Ok(Self::CronActivate),
+            "schedules:read" => Ok(Self::SchedulesRead),
             "logs:read" => Ok(Self::LogsRead),
             "logs:follow" => Ok(Self::LogsFollow),
             "logs:prune" => Ok(Self::LogsPrune),
@@ -234,6 +246,9 @@ impl PlatformCapability {
             Self::CredentialsManage,
             Self::StorageRead,
             Self::StorageManage,
+            Self::CronRead,
+            Self::CronActivate,
+            Self::SchedulesRead,
             Self::LogsRead,
             Self::LogsFollow,
             Self::LogsPrune,
@@ -328,6 +343,9 @@ impl OperatorRole {
                 C::CredentialsManage,
                 C::StorageRead,
                 C::StorageManage,
+                C::CronRead,
+                C::CronActivate,
+                C::SchedulesRead,
                 C::LogsRead,
                 C::LogsFollow,
                 C::LogsPrune,
@@ -345,6 +363,8 @@ impl OperatorRole {
                 C::DataWrite,
                 C::CredentialsRead,
                 C::StorageRead,
+                C::CronRead,
+                C::SchedulesRead,
                 C::LogsRead,
                 C::LogsFollow,
             ]
@@ -355,6 +375,8 @@ impl OperatorRole {
                 C::ReleasesRead,
                 C::CredentialsRead,
                 C::StorageRead,
+                C::CronRead,
+                C::SchedulesRead,
                 C::LogsRead,
                 C::LogsFollow,
                 C::DataRead,

@@ -17,13 +17,14 @@ use axum::{
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementApplicationClientList,
-    ManagementBucketPage, ManagementDataDocument, ManagementDataInsertRequest,
-    ManagementDataWriteResult, ManagementEnvironment, ManagementEnvironmentConfiguration,
-    ManagementHttpConfig, ManagementHttpExposure, ManagementLogArchiveStatus, ManagementLogPage,
-    ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
-    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
-    ManagementWorkspacePublish, OidcClientConfiguration, build_management_router,
-    build_management_router_with_product,
+    ManagementBucketPage, ManagementCronCatalog, ManagementCronQuery, ManagementDataDocument,
+    ManagementDataInsertRequest, ManagementDataWriteResult, ManagementEnvironment,
+    ManagementEnvironmentConfiguration, ManagementHttpConfig, ManagementHttpExposure,
+    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
+    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
+    ManagementScheduledPage, ManagementWorkspacePublish, OidcClientConfiguration,
+    build_management_router, build_management_router_with_product,
 };
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, ManagedSourceAuthority,
@@ -56,6 +57,8 @@ struct DataProbeProduct {
     credential_reads: AtomicUsize,
     storage_reads: AtomicUsize,
     environment_reads: AtomicUsize,
+    cron_reads: AtomicUsize,
+    scheduled_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -91,6 +94,40 @@ impl ManagementProduct for DataProbeProduct {
             created_at_micros: "1".to_owned(),
             updated_at_micros: "1".to_owned(),
             observed_at_micros: None,
+        })
+    }
+
+    async fn crons(
+        &self,
+        query: &ManagementCronQuery,
+    ) -> Result<ManagementCronCatalog, ManagementProductError> {
+        self.cron_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementCronCatalog {
+            version: 1,
+            target: ManagementResolvedTarget {
+                requested: query.target.clone(),
+                resolved: "release:rel_00000000000000000000000001".to_owned(),
+                release_id: "rel_00000000000000000000000001".to_owned(),
+                serving_revision: 1,
+                schema_contract_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+            },
+            activation_revision: 0,
+            crons: Vec::new(),
+        })
+    }
+
+    async fn scheduled(
+        &self,
+        _after: Option<&str>,
+        _limit: u16,
+    ) -> Result<ManagementScheduledPage, ManagementProductError> {
+        self.scheduled_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementScheduledPage {
+            version: 1,
+            scheduled: Vec::new(),
+            next: None,
         })
     }
 
@@ -685,6 +722,26 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_003),
         )
         .await?;
+    let automation_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "automation-reader".to_owned(),
+            },
+            OperatorName::from_str("Automation reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([
+                    PlatformCapability::CronRead,
+                    PlatformCapability::SchedulesRead,
+                ]),
+            }],
+            DeviceName::from_str("automation reader device")?,
+            TimestampMicros::new(1_900_000_000_000_005),
+        )
+        .await?;
     let product = Arc::new(DataProbeProduct {
         scope,
         reads: AtomicUsize::new(0),
@@ -692,6 +749,8 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         credential_reads: AtomicUsize::new(0),
         storage_reads: AtomicUsize::new(0),
         environment_reads: AtomicUsize::new(0),
+        cron_reads: AtomicUsize::new(0),
+        scheduled_reads: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -728,6 +787,16 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     );
     let environment_path = format!(
         "/v1/projects/{}/environments/{}",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let cron_path = format!(
+        "/v1/projects/{}/environments/{}/crons?target=workspace%3Alocal",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let scheduled_path = format!(
+        "/v1/projects/{}/environments/{}/scheduled?limit=10",
         scope.project_id(),
         scope.environment_id()
     );
@@ -827,6 +896,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
 
     let environment_access = environment_reader.login.access_token.expose();
     let response = router
+        .clone()
         .oneshot(
             Request::get(&environment_path)
                 .header(
@@ -838,6 +908,27 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.environment_reads.load(Ordering::SeqCst), 1);
+
+    let automation_access = automation_reader.login.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&cron_path)
+                .header(header::AUTHORIZATION, format!("Bearer {automation_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .oneshot(
+            Request::get(&scheduled_path)
+                .header(header::AUTHORIZATION, format!("Bearer {automation_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.cron_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(product.scheduled_reads.load(Ordering::SeqCst), 1);
 
     repository.close().await;
     Ok(())

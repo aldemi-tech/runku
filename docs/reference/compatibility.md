@@ -93,6 +93,10 @@ or `storage:manage` capabilities must upgrade Platform Identity and the Manageme
 older binaries do not recognize those capability names and fail closed. Storage quotas are encoded
 as canonical decimal strings so JavaScript clients do not lose integer precision. Application-key
 secrets remain one-time responses and are intentionally absent from idempotent replay payloads.
+The additive `cron:read`, `cron:activate`, and `schedules:read` names likewise require Identity and
+Management binaries that recognize the same catalog. The source line currently exposes only the
+read capabilities; `cron:activate` is reserved for the upcoming per-declaration CAS contract and
+must not be granted as if a network mutation already existed.
 
 Version 0.4.4 gives the two PostgreSQL roles unambiguous canonical configuration names:
 `RUNKU_IDENTITY_DATABASE_URL` for Platform Identity and `RUNKU_PLATFORM_DATABASE_URL` for Function

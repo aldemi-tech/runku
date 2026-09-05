@@ -53,6 +53,13 @@ pub trait ReadSnapshot: Send {
         id: ScheduledInvocationId,
     ) -> Result<Option<ScheduledInvocationRecord>, StoreError>;
 
+    /// Lists Scheduled Invocations in stable ID order after an optional exclusive cursor.
+    async fn list_scheduled(
+        &mut self,
+        after: Option<ScheduledInvocationId>,
+        limit: u32,
+    ) -> Result<Vec<ScheduledInvocationRecord>, StoreError>;
+
     /// Closes the read transaction explicitly.
     async fn close(self: Box<Self>) -> Result<(), StoreError>;
 }

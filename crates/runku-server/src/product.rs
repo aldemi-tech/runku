@@ -11,11 +11,13 @@ use async_trait::async_trait;
 use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_document_schema};
 use runku_core::{
     ApplicationClientId, ChannelName, CodeTarget, CredentialId, DocumentId, EnvironmentScope,
-    FunctionName, OperationId, OperatorId, OutboxEventId, ReleaseId, TableId,
+    FunctionName, OperationId, OperatorId, OutboxEventId, ReleaseId, ScheduledInvocationId,
+    TableId,
 };
+use runku_cron::{CronContext, CronError, CronRepository, CronRepositoryConfig, SqlCronRepository};
 use runku_data::{
     CommitBatch, DocumentMutation, ExpectedRevision, IndexRange, LogicalStore, OutboxAppend,
-    StoreError,
+    ScheduleStatus, ScheduledInvocationRecord, StoreError,
 };
 use runku_data_postgres::{PostgresStore, PostgresStoreConfig};
 use runku_data_sqlite::{SqliteStore, SqliteStoreConfig};
@@ -48,20 +50,22 @@ use runku_management_service::{
     ManagementBucketCreate, ManagementBucketLifecycle, ManagementBucketPage, ManagementBucketQuota,
     ManagementBucketResult, ManagementBucketUpdate, ManagementCatalogQuery,
     ManagementCreatedApplicationClient, ManagementCreatedApplicationCredential,
-    ManagementDataDeleteRequest, ManagementDataDocument, ManagementDataInsertRequest,
-    ManagementDataPage, ManagementDataQuery, ManagementDataReplaceRequest,
-    ManagementDataWriteResult, ManagementEnvironment, ManagementEnvironmentConfiguration,
-    ManagementEnvironmentCreate, ManagementEnvironmentOperation, ManagementEnvironmentResult,
-    ManagementEnvironmentUpdate, ManagementFunctionEntry, ManagementFunctionPage,
-    ManagementIssuedStorageAccessKey, ManagementLogArchiveStatus, ManagementLogPage,
-    ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
-    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
-    ManagementResolvedTarget, ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
-    ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
-    ManagementServingPolicySet, ManagementServingRelease, ManagementStorageAccessKey,
-    ManagementStorageAccessKeyConfiguration, ManagementStorageAccessKeyIssue,
-    ManagementStorageAccessKeyPage, ManagementStorageAccessKeyRevoke,
-    ManagementStorageAccessKeyRotate, ManagementStorageOperation, ManagementWorkspacePublish,
+    ManagementCronCatalog, ManagementCronEntry, ManagementCronQuery, ManagementDataDeleteRequest,
+    ManagementDataDocument, ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
+    ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementEnvironment,
+    ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
+    ManagementEnvironmentOperation, ManagementEnvironmentResult, ManagementEnvironmentUpdate,
+    ManagementFunctionEntry, ManagementFunctionPage, ManagementIssuedStorageAccessKey,
+    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
+    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
+    ManagementScheduledInvocation, ManagementScheduledPage, ManagementSchemaIndex,
+    ManagementSchemaPage, ManagementSchemaTable, ManagementServingOperation,
+    ManagementServingPolicy, ManagementServingPolicyResult, ManagementServingPolicySet,
+    ManagementServingRelease, ManagementStorageAccessKey, ManagementStorageAccessKeyConfiguration,
+    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyPage,
+    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, ManagementStorageOperation,
+    ManagementWorkspacePublish,
 };
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
@@ -100,6 +104,8 @@ pub struct ProductAdapter {
     data_store: Arc<dyn LogicalStore>,
     identity: LocalIdentityManager,
     environments: EnvironmentService,
+    cron: Arc<SqlCronRepository>,
+    cron_context: CronContext,
     serving: ServingPolicyService,
     storage: ObjectStorageService,
 }
@@ -172,6 +178,17 @@ impl ProductAdapter {
         )
         .await
         .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let cron_context = CronContext {
+            scope: state.scope(),
+            environment: state.environment(),
+        };
+        let cron_repository = SqlCronRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", paths.cron_database.display()),
+            CronRepositoryConfig::LOCAL,
+            cron_context,
+        )
+        .await
+        .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
         let storage_repository = SqlObjectStorageRepository::connect_sqlite(
             &format!("sqlite://{}?mode=rwc", paths.identity_database.display()),
             ObjectStorageRepositoryConfig::LOCAL,
@@ -200,6 +217,8 @@ impl ProductAdapter {
             data_store,
             identity,
             environments: EnvironmentService::new(Arc::new(environment_repository)),
+            cron: Arc::new(cron_repository),
+            cron_context,
             serving: ServingPolicyService::new(Arc::new(serving_repository)),
             storage: ObjectStorageService::new(
                 Arc::new(storage_repository),
@@ -640,6 +659,7 @@ impl ManagementProduct for ProductAdapter {
             .await
             .map_err(map_identity)?;
         self.environments.health().await.map_err(map_environment)?;
+        self.cron.health().await.map_err(map_cron)?;
         self.serving.health().await.map_err(map_serving)?;
         self.storage.health().await.map_err(map_storage)
     }
@@ -722,6 +742,89 @@ impl ManagementProduct for ProductAdapter {
             .as_ref()
             .map(management_environment_operation)
             .ok_or(ManagementProductError::NotFound)
+    }
+
+    async fn crons(
+        &self,
+        query: &ManagementCronQuery,
+    ) -> Result<ManagementCronCatalog, ManagementProductError> {
+        let catalog = self.effective_catalog(&query.target).await?;
+        let snapshot = self
+            .cron
+            .snapshot(self.cron_context)
+            .await
+            .map_err(map_cron)?;
+        let mut crons = Vec::with_capacity(catalog.manifest.cron_definitions.len());
+        for definition in &catalog.manifest.cron_definitions {
+            let activation = snapshot
+                .activations
+                .iter()
+                .find(|activation| activation.name == definition.name);
+            let enabled = activation.is_some_and(|activation| {
+                activation.pinned_code.to_string() == catalog.target.resolved
+                    && activation.release_id == catalog.manifest.release_id
+                    && activation.schedule == definition.schedule
+                    && activation.function == definition.function
+                    && activation.args == definition.args
+            });
+            crons.push(ManagementCronEntry {
+                name: definition.name.to_string(),
+                schedule: definition.schedule.to_string(),
+                function: definition.function.to_string(),
+                args: WireValueV1::from_canonical(&definition.args)
+                    .map_err(|_| ManagementProductError::Corruption)?,
+                enabled,
+                activation_revision: activation.map(|value| value.activation_revision),
+                active_pinned_code: activation.map(|value| value.pinned_code.to_string()),
+                next_tick_micros: activation.map(|value| value.next_tick.get().to_string()),
+            });
+        }
+        Ok(ManagementCronCatalog {
+            version: 1,
+            target: catalog.target,
+            activation_revision: snapshot.repository_revision,
+            crons,
+        })
+    }
+
+    async fn scheduled(
+        &self,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementScheduledPage, ManagementProductError> {
+        if !(1..=200).contains(&limit) {
+            return Err(ManagementProductError::Invalid);
+        }
+        let after = after
+            .map(str::parse::<ScheduledInvocationId>)
+            .transpose()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let mut snapshot = self
+            .data_store
+            .begin_read(self.scope)
+            .await
+            .map_err(map_store)?;
+        let mut records = snapshot
+            .list_scheduled(after, u32::from(limit) + 1)
+            .await
+            .map_err(map_store)?;
+        snapshot.close().await.map_err(map_store)?;
+        let has_more = records.len() > usize::from(limit);
+        if has_more {
+            let _ = records.pop();
+        }
+        let next = has_more
+            .then(|| records.last().map(|record| record.id.to_string()))
+            .flatten();
+        let scheduled = records
+            .iter()
+            .map(management_scheduled_invocation)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ManagementScheduledPage {
+            version: 1,
+            scheduled,
+            next,
+        })
     }
 
     async fn serving_policy(&self) -> Result<ManagementServingPolicy, ManagementProductError> {
@@ -2107,6 +2210,30 @@ fn management_storage_operation(operation: &ObjectStorageOperation) -> Managemen
     }
 }
 
+fn management_scheduled_invocation(
+    record: &ScheduledInvocationRecord,
+) -> Result<ManagementScheduledInvocation, ManagementProductError> {
+    Ok(ManagementScheduledInvocation {
+        scheduled_invocation_id: record.id.to_string(),
+        pinned_code: record.pinned_code.to_string(),
+        function: record.function.to_string(),
+        args: WireValueV1::from_canonical(&record.args)
+            .map_err(|_| ManagementProductError::Corruption)?,
+        execute_at_micros: record.execute_at.get().to_string(),
+        status: match record.status {
+            ScheduleStatus::Pending => "pending",
+            ScheduleStatus::Running => "running",
+            ScheduleStatus::Succeeded => "succeeded",
+            ScheduleStatus::Failed => "failed",
+            ScheduleStatus::Cancelled => "cancelled",
+        }
+        .to_owned(),
+        attempts: record.attempts,
+        last_error_code: record.last_error_code.clone(),
+        commit_sequence: record.commit_sequence.to_string(),
+    })
+}
+
 fn parse_canonical_u64(value: &str) -> Result<u64, ManagementProductError> {
     let parsed = value
         .parse::<u64>()
@@ -2518,6 +2645,18 @@ const fn map_environment(error: EnvironmentError) -> ManagementProductError {
     }
 }
 
+const fn map_cron(error: CronError) -> ManagementProductError {
+    match error {
+        CronError::InvalidInput | CronError::InvalidManifest | CronError::LimitExceeded => {
+            ManagementProductError::Invalid
+        }
+        CronError::Conflict | CronError::LeaseLost => ManagementProductError::Conflict,
+        CronError::Unavailable => ManagementProductError::Unavailable,
+        CronError::ResultUncertain => ManagementProductError::ResultUncertain,
+        CronError::Corruption | CronError::Unsupported => ManagementProductError::Corruption,
+    }
+}
+
 const fn map_storage(error: ObjectStorageError) -> ManagementProductError {
     match error {
         ObjectStorageError::InvalidInput | ObjectStorageError::LimitExceeded => {
@@ -2572,6 +2711,23 @@ export const list = query({
 export const summary = query({
   auth: "none", visibility: "internal", capabilities: ["db:read"],
   args: v.null(), returns: v.null(), async handler() { return null },
+})
+"#;
+
+    const SCHEDULED_FUNCTIONS: &str = r#"
+import { mutation, v } from "@runku/server"
+export const insert = mutation({
+  auth: "none", visibility: "internal", capabilities: ["db:write"],
+  args: v.null(), returns: v.null(), async handler() { return null },
+})
+"#;
+
+    const CRONS: &str = r#"
+import { cron, value } from "@runku/server"
+export const hourly = cron({
+  schedule: "0 * * * *",
+  function: "functions.insert",
+  args: null,
 })
 "#;
 
@@ -2682,6 +2838,75 @@ export const summary = query({
             .execute(&mut connection)
             .await?;
         connection.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_cron_catalog_and_scheduled_history_are_authoritative_and_bounded() -> TestResult
+    {
+        use runku_data::ScheduledInvocationInsert;
+
+        let directory = tempfile::tempdir()?;
+        adapter(directory.path()).await?;
+        std::fs::write(
+            directory.path().join("runku/functions.ts"),
+            SCHEDULED_FUNCTIONS,
+        )?;
+        std::fs::write(directory.path().join("runku/crons.ts"), CRONS)?;
+        let (state, _) = load_local(directory.path()).await?;
+        let output = build_project(
+            directory.path(),
+            Path::new("runku"),
+            state.project_id,
+            BuildMetadata::generate(TimestampMicros::new(1_800_000_000_000_100)),
+        )?;
+        let published = publish_local(
+            directory.path(),
+            &"local".parse()?,
+            &DevelopmentActor::from_str("console-cron-test")?,
+            &std::fs::read(output.manifest_path)?,
+            &std::fs::read(output.artifact_path)?,
+        )
+        .await?;
+        let product = Box::pin(open_adapter(directory.path())).await?;
+        let target = "workspace:local".to_owned();
+        let crons = product
+            .crons(&ManagementCronQuery {
+                target: target.clone(),
+            })
+            .await?;
+        assert_eq!(crons.crons.len(), 1);
+        assert_eq!(crons.crons[0].name, "crons.hourly");
+        assert!(crons.crons[0].enabled);
+        assert_eq!(
+            crons.crons[0].active_pinned_code,
+            Some(format!("dev_revision:{}", published.revision_id))
+        );
+
+        let scheduled_id = ScheduledInvocationId::generate();
+        let mut batch = CommitBatch::new(product.scope, OperationId::generate());
+        batch.push_schedule(ScheduledInvocationInsert {
+            id: scheduled_id,
+            pinned_code: runku_core::PinnedCode::DevRevision(published.revision_id),
+            function: "functions.insert".parse()?,
+            args: CanonicalValue::Null,
+            execute_at: TimestampMicros::new(1_800_000_000_100_000),
+            idempotency_key: Some("console-history".to_owned()),
+        });
+        product.data_store.commit(&batch).await?;
+        let page = product.scheduled(None, 1).await?;
+        assert_eq!(page.scheduled.len(), 1);
+        assert_eq!(
+            page.scheduled[0].scheduled_invocation_id,
+            scheduled_id.to_string()
+        );
+        assert_eq!(page.scheduled[0].status, "pending");
+        assert_eq!(page.scheduled[0].args, WireValueV1::Null {});
+        assert_eq!(
+            product.scheduled(None, 0).await,
+            Err(ManagementProductError::Invalid)
+        );
+        product.shutdown().await;
         Ok(())
     }
 

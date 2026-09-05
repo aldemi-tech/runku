@@ -4046,6 +4046,7 @@ dependencies = [
  "runku-build",
  "runku-contracts",
  "runku-core",
+ "runku-cron",
  "runku-data",
  "runku-data-postgres",
  "runku-data-sqlite",

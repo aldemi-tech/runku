@@ -32,6 +32,7 @@ Runku is currently pre-release.
 | Environment lifecycle authority | Domain service, SQLite/PostgreSQL repository, exact-scope create/get/update/operation Management API, and server composition implemented and test-covered; archive/restore and provider materialization remain separate gates |
 | Weighted serving-policy authority | Atomic/gradual desired policy, strict Release contract gate, observations, operation journal, audit, and authenticated Management API/server composition implemented; runtime routing is not yet attached |
 | Logical Object Storage authority | Revisioned bucket/access-key domain, SQLite/PostgreSQL repository, authenticated Management API, one-time secrets, and server composition implemented and test-covered; object bytes, provider adapters, S3-compatible data plane, native SDK, and CLI surfaces are not yet implemented |
+| Cron/Scheduled console reads | Authenticated code-derived Cron catalog and bounded Scheduled Invocation history are implemented over the same SQLite/PostgreSQL authorities; per-declaration activation remains pending |
 | Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
 | Compact Docker standalone installation | Release-packaged with PostgreSQL, secret files, probes, backup/verify/restore/upgrade, and guarded removal |
 | Embedded Operational Log history | SQLite hot tier, filesystem/S3 Parquet, DuckDB query, safe retention, and live stream implemented and test-covered |

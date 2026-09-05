@@ -39,11 +39,11 @@ use zeroize::Zeroizing;
 use crate::{
     ManagementApplicationClientCreate, ManagementApplicationCredentialCreate,
     ManagementApplicationCredentialRotate, ManagementBucketArchive, ManagementBucketCreate,
-    ManagementBucketUpdate, ManagementCatalogQuery, ManagementDataDeleteRequest,
-    ManagementDataInsertRequest, ManagementDataQuery, ManagementDataReplaceRequest,
-    ManagementEnvironmentCreate, ManagementEnvironmentUpdate, ManagementLogPruneRequest,
-    ManagementLogQuery, ManagementProduct, ManagementProductError, ManagementServingPolicySet,
-    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
+    ManagementBucketUpdate, ManagementCatalogQuery, ManagementCronQuery,
+    ManagementDataDeleteRequest, ManagementDataInsertRequest, ManagementDataQuery,
+    ManagementDataReplaceRequest, ManagementEnvironmentCreate, ManagementEnvironmentUpdate,
+    ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    ManagementServingPolicySet, ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
     ManagementStorageAccessKeyRotate, OidcClientConfiguration,
 };
 
@@ -303,6 +303,14 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/functions",
             get(product_functions),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/crons",
+            get(product_crons),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/scheduled",
+            get(product_scheduled),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/schema/tables",
@@ -1441,6 +1449,60 @@ async fn product_functions(
         Err(response) => return *response,
     };
     match product.functions(&query).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_crons(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Query(query): Query<ManagementCronQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CronRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.crons(&query).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_scheduled(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Query(query): Query<StoragePageQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::SchedulesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.scheduled(query.after.as_deref(), query.limit).await {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }

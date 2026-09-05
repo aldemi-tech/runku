@@ -205,6 +205,14 @@ impl ReadSnapshot for FakeSnapshot {
         Err(StoreError::Internal)
     }
 
+    async fn list_scheduled(
+        &mut self,
+        _after: Option<ScheduledInvocationId>,
+        _limit: u32,
+    ) -> Result<Vec<ScheduledInvocationRecord>, StoreError> {
+        Err(StoreError::Internal)
+    }
+
     async fn close(self: Box<Self>) -> Result<(), StoreError> {
         let _scope = self.scope;
         self.counts.lock().map_err(|_| StoreError::Internal)?.closed += 1;

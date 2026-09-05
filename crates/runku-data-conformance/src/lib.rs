@@ -135,6 +135,17 @@ pub async fn run_conformance(
         .ok_or(StoreError::NotFound)?;
     assert_eq!(scheduled.status, ScheduleStatus::Pending);
     assert_eq!(scheduled.commit_sequence, 1);
+    let scheduled_page = snapshot.list_scheduled(None, 200).await?;
+    assert!(scheduled_page.iter().any(|record| record.id == schedule));
+    assert!(
+        scheduled_page
+            .windows(2)
+            .all(|pair| pair[0].id < pair[1].id)
+    );
+    assert_eq!(
+        snapshot.list_scheduled(None, 0).await,
+        Err(StoreError::InvalidRange)
+    );
     let prefix = key_a.prefix(1).map_err(|_| StoreError::Internal)?;
     let entries = snapshot
         .scan_index(index, &IndexRange::prefix(&prefix)?, 100)
@@ -146,6 +157,7 @@ pub async fn run_conformance(
     let mut other = store.begin_read(other_scope).await?;
     assert!(other.get_document(table, document).await?.is_none());
     assert!(other.get_outbox(outbox).await?.is_none());
+    assert!(other.list_scheduled(None, 200).await?.is_empty());
     other.close().await?;
 
     assert_atomic_rollback(store, scope, table, document).await?;

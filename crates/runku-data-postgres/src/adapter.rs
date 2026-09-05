@@ -659,6 +659,43 @@ impl ReadSnapshot for PostgresSnapshot {
         row.as_ref().map(decode_schedule_row).transpose()
     }
 
+    async fn list_scheduled(
+        &mut self,
+        after: Option<ScheduledInvocationId>,
+        limit: u32,
+    ) -> Result<Vec<ScheduledInvocationRecord>, StoreError> {
+        if limit == 0 || limit > 201 {
+            return Err(StoreError::InvalidRange);
+        }
+        self.recorder.read();
+        let scope = self.scope;
+        let rows = if let Some(after) = after {
+            sqlx::query(
+                "SELECT scheduled_id, pinned_code, function_name, args_bytes, execute_at_micros, status, attempts, lease_generation, lease_owner, lease_until_micros, idempotency_key, last_error_code, commit_sequence \
+                 FROM runku_scheduled_invocations WHERE project_id = $1 AND environment_id = $2 AND scheduled_id > $3 ORDER BY scheduled_id LIMIT $4",
+            )
+            .bind(scope.project_id().to_string())
+            .bind(scope.environment_id().to_string())
+            .bind(after.to_string())
+            .bind(i64::from(limit))
+            .fetch_all(&mut **self.transaction()?)
+            .await
+            .map_err(map_sqlx_error)?
+        } else {
+            sqlx::query(
+                "SELECT scheduled_id, pinned_code, function_name, args_bytes, execute_at_micros, status, attempts, lease_generation, lease_owner, lease_until_micros, idempotency_key, last_error_code, commit_sequence \
+                 FROM runku_scheduled_invocations WHERE project_id = $1 AND environment_id = $2 ORDER BY scheduled_id LIMIT $3",
+            )
+            .bind(scope.project_id().to_string())
+            .bind(scope.environment_id().to_string())
+            .bind(i64::from(limit))
+            .fetch_all(&mut **self.transaction()?)
+            .await
+            .map_err(map_sqlx_error)?
+        };
+        rows.iter().map(decode_schedule_row).collect()
+    }
+
     async fn close(mut self: Box<Self>) -> Result<(), StoreError> {
         self.transaction
             .take()

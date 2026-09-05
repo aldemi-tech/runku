@@ -645,6 +645,86 @@ pub struct ManagementStorageOperation {
     pub completed_at_micros: String,
 }
 
+/// Query selecting one exact code target for the Cron catalog.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCronQuery {
+    /// Explicit `release:`, `channel:`, or `workspace:` target.
+    pub target: String,
+}
+
+/// One code-owned Cron declaration with its current activation projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCronEntry {
+    /// Stable logical Cron name.
+    pub name: String,
+    /// Canonical UTC schedule.
+    pub schedule: String,
+    /// Internal Mutation or Action destination.
+    pub function: String,
+    /// Canonical arguments copied into each tick.
+    pub args: WireValueV1,
+    /// Whether this exact declaration is active.
+    pub enabled: bool,
+    /// Activation repository revision, when enabled.
+    pub activation_revision: Option<u64>,
+    /// Immutable active code pin, when enabled.
+    pub active_pinned_code: Option<String>,
+    /// Next logical tick, when enabled.
+    pub next_tick_micros: Option<String>,
+}
+
+/// Complete bounded Cron catalog for one resolved target.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCronCatalog {
+    /// Wire version.
+    pub version: u8,
+    /// Exact resolved artifact metadata.
+    pub target: ManagementResolvedTarget,
+    /// Current activation repository revision.
+    pub activation_revision: u64,
+    /// Declarations in canonical name order.
+    pub crons: Vec<ManagementCronEntry>,
+}
+
+/// One non-secret Scheduled Invocation projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementScheduledInvocation {
+    /// Stable Scheduled Invocation ID.
+    pub scheduled_invocation_id: String,
+    /// Exact immutable code pin.
+    pub pinned_code: String,
+    /// Destination Mutation or Action.
+    pub function: String,
+    /// Canonical persisted arguments.
+    pub args: WireValueV1,
+    /// Next eligible execution time.
+    pub execute_at_micros: String,
+    /// `pending`, `running`, `succeeded`, `failed`, or `cancelled`.
+    pub status: String,
+    /// Number of durable claims.
+    pub attempts: u32,
+    /// Last bounded error code, when present.
+    pub last_error_code: Option<String>,
+    /// Commit sequence that created the record.
+    pub commit_sequence: String,
+}
+
+/// Stable bounded Scheduled Invocation page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementScheduledPage {
+    /// Wire version.
+    pub version: u8,
+    /// Scheduled Invocations ordered by stable ID.
+    pub scheduled: Vec<ManagementScheduledInvocation>,
+    /// Exclusive continuation cursor, absent at the end.
+    pub next: Option<String>,
+}
+
 impl std::error::Error for ManagementProductError {}
 
 /// Bounded catalog page query resolved against one explicit code target.
@@ -1247,6 +1327,25 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         operation_id: OperationId,
     ) -> Result<ManagementStorageOperation, ManagementProductError> {
         let _ = operation_id;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Reads code-owned Cron declarations and current activation state.
+    async fn crons(
+        &self,
+        query: &ManagementCronQuery,
+    ) -> Result<ManagementCronCatalog, ManagementProductError> {
+        let _ = query;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Lists one bounded stable Scheduled Invocation page.
+    async fn scheduled(
+        &self,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementScheduledPage, ManagementProductError> {
+        let _ = (after, limit);
         Err(ManagementProductError::NotFound)
     }
 

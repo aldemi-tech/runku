@@ -523,6 +523,8 @@ plus Runku's stricter verifier rules above.
 | Application Client/credential create, rotate, revoke, and delete routes | `credentials:manage` | manages exact-scope Product credentials; confidential material is returned once |
 | Bucket/key lists, bucket get, and storage-operation lookup | `storage:read` | reads provider-independent logical storage metadata only |
 | Bucket create/replace/archive and storage-key issue/rotate/revoke | `storage:manage` + `Idempotency-Key: opn_*` | applies exact-scope CAS/idempotency; Product key secrets appear once |
+| `GET .../crons?target=...` | `cron:read` | reads code-owned declarations plus current durable activation without exposing leases |
+| `GET .../scheduled?limit=...&after=...` | `schedules:read` | reads bounded durable queue/history in stable ID order without worker identity |
 | `GET .../functions` and `GET .../schema/tables` | `releases:read` | reads a bounded catalog from one verified effective artifact |
 | `POST .../data/query` and `GET .../data/documents/{table}/{document}` | `data:read` | reads logical documents through the canonical store and schema |
 | `POST .../data/documents/{table}` | `data:write` + `Idempotency-Key: opn_*` | inserts a schema-valid document with deterministic identity |

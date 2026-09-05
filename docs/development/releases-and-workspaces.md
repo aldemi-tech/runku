@@ -33,6 +33,20 @@ Workspace targets and development synchronization in production Environments.
 Scheduled invocations pin the exact Release or Dev Revision that created them. A later Channel move
 does not change pending work. Cron activation similarly materializes work from a versioned manifest.
 
+The authenticated Management API exposes two read-only console projections:
+
+- `GET /v1/projects/{project}/environments/{environment}/crons?target=...` resolves the target once,
+  verifies its artifact, returns code-owned declarations, and correlates each declaration with the
+  current durable activation. It requires `cron:read`.
+- `GET /v1/projects/{project}/environments/{environment}/scheduled?limit=...&after=...` returns at
+  most 200 records in stable Scheduled Invocation ID order. It requires `schedules:read`, exposes
+  canonical arguments and bounded error codes, and deliberately omits worker/lease identity.
+
+These reads use the same Cron repository and logical store as the running local process. The
+Management API does not create, edit, retry, or cancel Scheduled work. Per-declaration Cron
+enable/disable remains a separate state-model change; the current publish path still atomically
+activates the complete manifest.
+
 ## Remote publication safety
 
 Remote synchronization uses `rk_dev_*`, exact-origin HTTPS, bounded packages, artifact-first staged

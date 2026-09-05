@@ -19,6 +19,7 @@ base64.workspace = true
 runku-management-service = { path = "../runku-management-service" }
 runku-core = { path = "../runku-core" }
 runku-contracts = { path = "../runku-contracts" }
+runku-cron = { path = "../runku-cron" }
 runku-data = { path = "../runku-data" }
 runku-data-postgres = { path = "../runku-data-postgres" }
 runku-data-sqlite = { path = "../runku-data-sqlite" }
