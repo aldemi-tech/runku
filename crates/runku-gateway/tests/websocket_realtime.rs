@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use axum::http::{HeaderValue, header};
 use futures_util::{SinkExt, StreamExt};
 use runku_core::{
-    CodeTarget, EnvironmentId, EnvironmentScope, FunctionName, OutboxEventId, ProjectId, ReleaseId,
-    RequestId, TableId,
+    CodeTarget, EnvironmentId, EnvironmentScope, FunctionName, InvocationId, OutboxEventId,
+    ProjectId, ReleaseId, RequestId, TableId,
 };
 use runku_data::OutboxCursor;
 use runku_execution::{QueryOutcome, ReadDependency};
@@ -111,6 +111,7 @@ impl InvocationService for MockService {
         _call: InvokeCallV1,
     ) -> Result<GatewaySuccess, GatewayFailure> {
         Ok(GatewaySuccess {
+            invocation_id: InvocationId::generate(),
             release_id: self.release_id,
             value: CanonicalValue::Null,
             metadata: SuccessMetadataV1::Query {

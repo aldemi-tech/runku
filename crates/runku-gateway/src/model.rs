@@ -3,7 +3,7 @@
 use std::{fmt, str::FromStr};
 
 use async_trait::async_trait;
-use runku_core::{CodeTarget, FunctionName, ReleaseId, RequestId, SubscriptionId};
+use runku_core::{CodeTarget, FunctionName, InvocationId, ReleaseId, RequestId, SubscriptionId};
 use runku_execution::QueryOutcome;
 use runku_protocol::{ActionCallV1, MutationCallV1, PublicErrorV1, QueryCallV1, SuccessMetadataV1};
 use runku_realtime::SubscriptionSpec;
@@ -156,6 +156,8 @@ pub enum InvokeCallV1 {
 /// Semantic success returned to the transport after auth/routing/execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewaySuccess {
+    /// Exact server-generated invocation identity used by runtime and operational evidence.
+    pub invocation_id: InvocationId,
     /// Exact resolved immutable Release.
     pub release_id: ReleaseId,
     /// Canonical Function result.
@@ -169,6 +171,17 @@ pub struct GatewaySuccess {
 pub struct GatewayFailure {
     /// Validated public classification/code/retryability.
     pub error: PublicErrorV1,
+    /// Invocation identity when failure happened after runtime identity allocation.
+    pub invocation_id: Option<InvocationId>,
+}
+
+impl GatewayFailure {
+    /// Attaches the already allocated runtime invocation identity to a sanitized failure.
+    #[must_use]
+    pub const fn with_invocation_id(mut self, invocation_id: InvocationId) -> Self {
+        self.invocation_id = Some(invocation_id);
+        self
+    }
 }
 
 /// Semantic Product Base gateway injected into the framework-specific HTTP boundary.

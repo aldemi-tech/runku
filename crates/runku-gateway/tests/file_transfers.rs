@@ -12,7 +12,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use runku_core::{EnvironmentId, EnvironmentScope, ProjectId, ReleaseId};
+use runku_core::{EnvironmentId, EnvironmentScope, InvocationId, ProjectId, ReleaseId};
 use runku_file_storage::{FileObjectStore, FileStorageLimits, FileStorageService};
 use runku_gateway::{
     CorsOrigin, GatewayFailure, GatewayHttpConfig, GatewaySuccess, InvocationContext,
@@ -50,6 +50,7 @@ impl InvocationService for UnusedInvocationService {
             },
         };
         Ok(GatewaySuccess {
+            invocation_id: InvocationId::generate(),
             release_id: ReleaseId::generate(),
             value: CanonicalValue::Null,
             metadata,

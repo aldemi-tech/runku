@@ -41,6 +41,12 @@ Requests and nested cross-runtime calls carry request, invocation, Project, Envi
 Dev Revision, Function, and runtime identifiers. Payloads, bearer tokens, Application Keys, and
 secret values are excluded from logs and spans.
 
+For canonical Query, Mutation, and Action HTTP calls, `x-runku-request-id` is always present. Once
+the gateway has allocated runtime work, success and sanitized failure responses also expose the
+additive `x-runku-invocation-id` header. Its absence means the request failed before invocation
+allocation; it must not be interpreted as an unknown runtime effect. Both headers are CORS-exposed
+without changing the exact v1 JSON envelope.
+
 ## Runtime measurements
 
 Safe V8 records invocation duration, queue time, deadline outcome, V8-attributed memory, and Linux

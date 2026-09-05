@@ -592,10 +592,18 @@ where
             &success.value,
             success.metadata,
         ) {
-            Ok(body) => json_response(StatusCode::OK, body),
+            Ok(body) => {
+                invocation_response(json_response(StatusCode::OK, body), success.invocation_id)
+            }
             Err(error) => protocol_failure(request_id, error),
         },
-        Err(GatewayFailure { error }) => public_failure(request_id, error),
+        Err(GatewayFailure {
+            error,
+            invocation_id,
+        }) => invocation_id.map_or_else(
+            || public_failure(request_id, error),
+            |invocation_id| invocation_response(public_failure(request_id, error), invocation_id),
+        ),
     }
 }
 
@@ -813,6 +821,18 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response {
     response
 }
 
+fn invocation_response(
+    mut response: Response,
+    invocation_id: runku_core::InvocationId,
+) -> Response {
+    if let Ok(value) = HeaderValue::from_str(&invocation_id.to_string()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("x-runku-invocation-id"), value);
+    }
+    response
+}
+
 fn decorate(mut response: Response, request_id: RequestId, origin: Option<&str>) -> Response {
     if let Ok(value) = HeaderValue::from_str(&request_id.to_string()) {
         response
@@ -832,7 +852,7 @@ fn decorate(mut response: Response, request_id: RequestId, origin: Option<&str>)
         response.headers_mut().insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
             HeaderValue::from_static(
-                "content-length, content-range, content-type, etag, x-runku-file-id, x-runku-file-sha256, x-runku-request-id",
+                "content-length, content-range, content-type, etag, x-runku-file-id, x-runku-file-sha256, x-runku-invocation-id, x-runku-request-id",
             ),
         );
         response

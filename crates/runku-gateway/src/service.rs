@@ -881,6 +881,7 @@ impl ProductInvocationService {
         resolved: &ResolvedCode,
         function: &FunctionManifest,
         request_id: runku_core::RequestId,
+        invocation_id: InvocationId,
         arguments: runku_value::CanonicalValue,
         cancellation: runku_runtime::CancellationToken,
         identity: Arc<RequestIdentity>,
@@ -894,7 +895,7 @@ impl ProductInvocationService {
             self.config.scope,
             resolved.effective.release_id,
             request_id,
-            InvocationId::generate(),
+            invocation_id,
             function.id,
             Arc::clone(&resolved.manifest),
             artifact,
@@ -1066,20 +1067,28 @@ impl ProductInvocationService {
         let identity = self
             .authorize_function(&context.credentials, &function, now)
             .await?;
+        let invocation_id = InvocationId::generate();
         let request = self
             .invocation_request(
                 &resolved,
                 &function,
                 context.request_id,
+                invocation_id,
                 arguments,
                 context.cancellation,
                 identity,
             )
-            .await?;
+            .await
+            .map_err(|error| error.with_invocation_id(invocation_id))?;
         match requested_type {
             FunctionType::Query => {
-                let outcome = self.query.execute(request).await.map_err(map_query)?;
+                let outcome = self
+                    .query
+                    .execute(request)
+                    .await
+                    .map_err(|error| map_query(error).with_invocation_id(invocation_id))?;
                 Ok(GatewaySuccess {
+                    invocation_id,
                     release_id: resolved.effective.release_id,
                     value: outcome.value,
                     metadata: SuccessMetadataV1::Query {
@@ -1094,8 +1103,9 @@ impl ProductInvocationService {
                     .mutation
                     .execute(request, operation)
                     .await
-                    .map_err(map_mutation)?;
+                    .map_err(|error| map_mutation(error).with_invocation_id(invocation_id))?;
                 Ok(GatewaySuccess {
+                    invocation_id,
                     release_id: resolved.effective.release_id,
                     value: outcome.value,
                     metadata: SuccessMetadataV1::Mutation {
@@ -1106,8 +1116,13 @@ impl ProductInvocationService {
                 })
             }
             FunctionType::Action => {
-                let outcome = self.action.execute(request).await.map_err(map_action)?;
+                let outcome = self
+                    .action
+                    .execute(request)
+                    .await
+                    .map_err(|error| map_action(error).with_invocation_id(invocation_id))?;
                 Ok(GatewaySuccess {
+                    invocation_id,
                     release_id: resolved.effective.release_id,
                     value: outcome.value,
                     metadata: SuccessMetadataV1::Action {
@@ -1202,6 +1217,7 @@ impl RealtimeQueryService for ProductInvocationService {
                 &resolved,
                 &function,
                 context.request_id,
+                InvocationId::generate(),
                 arguments.clone(),
                 context.cancellation,
                 Arc::clone(&identity),
@@ -1259,6 +1275,7 @@ impl SubscriptionRunner for ProductInvocationService {
                 &resolved,
                 &function,
                 runku_core::RequestId::generate(),
+                InvocationId::generate(),
                 spec.arguments.clone(),
                 runku_runtime::CancellationToken::new(),
                 Arc::clone(&spec.identity),
@@ -1324,6 +1341,7 @@ impl ScheduledInvocationRunner for ProductInvocationService {
                 &resolved,
                 &function,
                 runku_core::RequestId::generate(),
+                InvocationId::generate(),
                 record.args.clone(),
                 runku_runtime::CancellationToken::new(),
                 identity,
@@ -1631,5 +1649,8 @@ fn failure(class: ErrorClassV1, code: &'static str, retryable: bool) -> GatewayF
         Ok(error) => error,
         Err(_) => runku_protocol::ProtocolError::InvalidResponse.public_error(),
     };
-    GatewayFailure { error }
+    GatewayFailure {
+        error,
+        invocation_id: None,
+    }
 }

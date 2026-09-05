@@ -105,6 +105,11 @@ canonical invocation still requires a separately scoped Application credential a
 functional principal. Existing grants are not backfilled; operator/developer role expansion affects
 only newly issued or source-reconciled grants, while custom grants remain exact.
 
+The post-0.4.5 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on
+both success and sanitized failure responses. The header is additive and CORS-exposed; the v1 JSON
+success/error envelopes remain byte-contract compatible with 0.4.5 SDK decoders. A failure before
+allocation has only `x-runku-request-id`.
+
 The post-0.4.5 Code Target grammar adds the exact `environment:default` value. Older SDKs reject it
 locally and older gateways reject it during decoding; explicit `release:`, `channel:`, and
 `workspace:` targets are unchanged. A default target is serveable only with an exactly converged

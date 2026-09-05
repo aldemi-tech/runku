@@ -13,7 +13,7 @@ use axum::{
     body::{Body, Bytes, to_bytes},
     http::{Request, StatusCode, header},
 };
-use runku_core::{CodeTarget, OperationId, ReleaseId, RequestId};
+use runku_core::{CodeTarget, InvocationId, OperationId, ReleaseId, RequestId};
 use runku_gateway::{
     CorsOrigin, GatewayFailure, GatewayHttpConfig, GatewaySuccess, InvocationContext,
     InvocationService, InvokeCallV1, build_router,
@@ -96,7 +96,12 @@ impl InvocationService for MockService {
 
         match &self.behavior {
             Behavior::Success => {}
-            Behavior::Failure(error) => return Err(GatewayFailure { error: *error }),
+            Behavior::Failure(error) => {
+                return Err(GatewayFailure {
+                    error: *error,
+                    invocation_id: Some(InvocationId::generate()),
+                });
+            }
             Behavior::Sleep { cancellation } => {
                 if let Ok(mut slot) = cancellation.lock() {
                     *slot = Some(context.cancellation.clone());
@@ -112,6 +117,7 @@ impl InvocationService for MockService {
         }
 
         Ok(GatewaySuccess {
+            invocation_id: InvocationId::generate(),
             release_id: release_id(),
             value: CanonicalValue::String("accepted".to_owned()),
             metadata: metadata_for(&call),
@@ -133,6 +139,7 @@ impl Error for TestFailure {}
 fn internal_failure() -> GatewayFailure {
     GatewayFailure {
         error: ProtocolError::InvalidResponse.public_error(),
+        invocation_id: None,
     }
 }
 
@@ -228,6 +235,11 @@ async fn all_call_kinds_use_v1_envelopes_and_propagate_redacted_credentials()
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert!(
+            response.headers()["x-runku-invocation-id"]
+                .to_str()?
+                .starts_with(InvocationId::PREFIX)
+        );
         let correlation = response.headers()["x-runku-request-id"]
             .to_str()?
             .to_owned();
@@ -272,6 +284,11 @@ async fn semantic_failures_are_sanitized_and_keep_service_status() -> Result<(),
         .oneshot(post("/v1/query", encode_query_call_v1(&query_call()?)?)?)
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        response.headers()["x-runku-invocation-id"]
+            .to_str()?
+            .starts_with(InvocationId::PREFIX)
+    );
     let error = decode_error_v1(&body_bytes(response).await?)?;
     assert_eq!(error.code, "FUNCTION_FORBIDDEN");
     assert_eq!(error.message, "The request is not permitted.");
@@ -296,6 +313,11 @@ async fn cors_is_exact_and_preflight_accepts_only_the_public_contract() -> Resul
     assert_eq!(
         response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
         ALLOWED_ORIGIN
+    );
+    assert!(
+        response.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS]
+            .to_str()?
+            .contains("x-runku-invocation-id")
     );
     assert_eq!(response.headers()[header::VARY], "Origin");
 
