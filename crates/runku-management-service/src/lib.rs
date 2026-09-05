@@ -15,6 +15,7 @@ pub use product::{
     OidcClientConfiguration,
 };
 pub use router::{
-    ExternalIdentityAuthenticator, ManagementHttpConfig, ManagementHttpExposure,
-    build_management_router, build_management_router_with_product, serve_management,
+    ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementHttpConfig,
+    ManagementHttpExposure, build_management_router, build_management_router_with_product,
+    serve_management,
 };

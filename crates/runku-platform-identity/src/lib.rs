@@ -24,8 +24,8 @@ pub use model::{
     OperatorSession, OperatorStatus, PlatformCapability, SessionStatus,
 };
 pub use repository::{
-    BootstrapCreate, ConsumedInvitation, IdempotentInvitationCreate, NewInvitation,
-    NewOperatorSession, PlatformIdentityBackend, PlatformIdentityRepository,
+    BootstrapCreate, ConsumedInvitation, IdempotentInvitationCreate, ManagedExternalLogin,
+    NewInvitation, NewOperatorSession, PlatformIdentityBackend, PlatformIdentityRepository,
     PlatformIdentityTelemetrySnapshot, RefreshedSession,
 };
 pub use service::{

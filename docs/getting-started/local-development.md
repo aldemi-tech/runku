@@ -51,25 +51,25 @@ the table, and download `SHA256SUMS`. Verify before extraction:
 ```sh
 # Linux example
 sha256sum --check SHA256SUMS --ignore-missing
-tar -xzf runku-v0.4.4-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 runku-v0.4.4-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
+tar -xzf runku-v0.4.5-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 runku-v0.4.5-x86_64-unknown-linux-gnu/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```sh
 # macOS example (verify the named file with the SHA256SUMS value)
-shasum -a 256 runku-v0.4.4-aarch64-apple-darwin.tar.gz
-tar -xzf runku-v0.4.4-aarch64-apple-darwin.tar.gz
+shasum -a 256 runku-v0.4.5-aarch64-apple-darwin.tar.gz
+tar -xzf runku-v0.4.5-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 0755 runku-v0.4.4-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
+install -m 0755 runku-v0.4.5-aarch64-apple-darwin/runku "$HOME/.local/bin/runku"
 runku --version
 ```
 
 ```powershell
 # Windows x86_64 example
-Get-FileHash .\runku-v0.4.4-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-Expand-Archive .\runku-v0.4.4-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
-& .\runku-cli\runku-v0.4.4-x86_64-pc-windows-msvc\runku.exe --version
+Get-FileHash .\runku-v0.4.5-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Expand-Archive .\runku-v0.4.5-x86_64-pc-windows-msvc.zip -DestinationPath .\runku-cli
+& .\runku-cli\runku-v0.4.5-x86_64-pc-windows-msvc\runku.exe --version
 ```
 
 Compare the printed Windows/macOS hash with the exact filename entry in `SHA256SUMS`. Move the
@@ -127,10 +127,11 @@ instead of using provisioner initialization directly:
 
 ```sh
 runku login
-runku link --project-id prj_... --environment-id env_...
+runku link
 ```
 
-`link` asks the current Management origin to authorize an exact status read before initializing
+`link` lists the current login's authorized environments and prompts when attached to a terminal;
+scripts can still pass both IDs explicitly. It asks the current Management origin to authorize an exact status read before initializing
 the directory. It then pins that origin in `.runku/management-link-v1.json`; later `--remote`
 commands reject a different login origin for the same root. IDs alone remain non-secret and grant
 no access. A denied link creates no local state.

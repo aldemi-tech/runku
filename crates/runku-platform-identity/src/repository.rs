@@ -68,6 +68,21 @@ pub struct ConsumedInvitation {
     pub session: NewOperatorSession,
 }
 
+/// Candidate identity, authoritative grants, and session supplied by a trusted OIDC gateway.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedExternalLogin {
+    /// Stable identity allocated if this external subject is new.
+    pub operator_id: OperatorId,
+    /// Name used only when the external subject is first enrolled.
+    pub operator_name: OperatorName,
+    /// Already verified external identity.
+    pub external_identity: ExternalOperatorIdentity,
+    /// Complete authoritative grant set to reconcile for this subject.
+    pub grants: Vec<OperatorGrant>,
+    /// New device session.
+    pub session: NewOperatorSession,
+}
+
 /// Atomic refresh replacement material.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefreshedSession {
@@ -199,6 +214,13 @@ pub trait PlatformIdentityRepository: fmt::Debug + Send + Sync {
         &self,
         identity: &ExternalOperatorIdentity,
         session: &NewOperatorSession,
+        now: TimestampMicros,
+    ) -> Result<OperatorContext, PlatformIdentityError>;
+
+    /// Creates or reconciles a trusted managed external identity and starts one session atomically.
+    async fn login_external_managed(
+        &self,
+        candidate: &ManagedExternalLogin,
         now: TimestampMicros,
     ) -> Result<OperatorContext, PlatformIdentityError>;
 

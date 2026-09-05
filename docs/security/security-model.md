@@ -140,10 +140,18 @@ successful Runku login.
 Remote project linking treats Project and Environment IDs as public identifiers, never as proof of
 ownership. `runku link` must obtain an authorized exact-scope Management status response before it
 creates local state, then pins that canonical Management origin in a non-secret local descriptor.
+Interactive discovery comes from authenticated `GET /v1/auth/resources`; an untrusted local list or
+typed display name never selects authority.
 Later remote commands refuse origin substitution for linked roots. Copying identifiers or locally
 minting Application credentials cannot create a remote operator grant or match credential digests
 stored by another Environment. A copied project directory remains sensitive because it can contain
 source, local data, and other credentials; the link descriptor itself contains none.
+
+Managed OIDC enrollment is disabled by default. When configured, it requires a separate
+high-entropy gateway credential in `runku-managed-enrollment`; Runku first verifies the external
+OIDC bearer, then atomically creates or reconciles only the complete bounded grants supplied by
+that trusted gateway. The native client cannot forward or choose this header. Self-Hosted OIDC
+without this explicit gateway trust remains invitation-gated on first enrollment.
 
 Initial-owner recovery is deliberately local and pre-enrollment only. It requires administrative
 access to PostgreSQL, the installation pepper, configuration, and protected state directory;

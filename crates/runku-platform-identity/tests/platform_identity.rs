@@ -5,9 +5,10 @@ use std::{str::FromStr as _, sync::Arc};
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, IdempotentInvitationResult,
-    InvitationStatus, OperatorName, OperatorRole, PlatformCapability, PlatformIdentityCrypto,
-    PlatformIdentityError, PlatformIdentityRepository, PlatformIdentityRepositoryConfig,
-    PlatformIdentityService, SessionTokenPolicy, SqlPlatformIdentityRepository,
+    InvitationStatus, OperatorGrant, OperatorName, OperatorRole, PlatformCapability,
+    PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository,
+    PlatformIdentityRepositoryConfig, PlatformIdentityService, SessionTokenPolicy,
+    SqlPlatformIdentityRepository,
 };
 use runku_value::TimestampMicros;
 
@@ -156,6 +157,92 @@ async fn bootstrap_invite_refresh_revoke_and_oidc_are_scope_safe()
 
     let sessions = repository.list_sessions(&owner.context).await?;
     assert_eq!(sessions.len(), 1);
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_oidc_enrollment_creates_and_reconciles_authoritative_project_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("managed.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let service = PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([19; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?;
+    let identity = ExternalOperatorIdentity {
+        provider_id: "cloud".to_owned(),
+        subject_id: "better-user-1".to_owned(),
+    };
+    let first_project = ProjectId::generate();
+    let second_project = ProjectId::generate();
+    let first = service
+        .login_with_managed_external_identity(
+            identity.clone(),
+            OperatorName::from_str("Cloud user")?,
+            vec![OperatorGrant {
+                scope: AccessScope::Project(first_project),
+                capabilities: OperatorRole::Developer.capabilities(),
+            }],
+            DeviceName::from_str("first device")?,
+            TimestampMicros::new(1_900_000_000_000_000),
+        )
+        .await?;
+    first.context.authorize(
+        AccessScope::Project(first_project),
+        PlatformCapability::ReleasesPublish,
+    )?;
+
+    let second = service
+        .login_with_managed_external_identity(
+            identity,
+            OperatorName::from_str("Ignored replacement name")?,
+            vec![OperatorGrant {
+                scope: AccessScope::Project(second_project),
+                capabilities: OperatorRole::Observer.capabilities(),
+            }],
+            DeviceName::from_str("second device")?,
+            TimestampMicros::new(1_900_000_000_000_001),
+        )
+        .await?;
+    assert_eq!(second.context.operator.id, first.context.operator.id);
+    assert!(
+        second.context.operator.authorization_revision
+            > first.context.operator.authorization_revision
+    );
+    assert_eq!(
+        second.context.authorize(
+            AccessScope::Project(first_project),
+            PlatformCapability::ReleasesRead
+        ),
+        Err(PlatformIdentityError::Forbidden),
+    );
+    second.context.authorize(
+        AccessScope::Project(second_project),
+        PlatformCapability::ReleasesRead,
+    )?;
+    assert_eq!(
+        second.context.authorize(
+            AccessScope::Project(second_project),
+            PlatformCapability::ReleasesPublish
+        ),
+        Err(PlatformIdentityError::Forbidden),
+    );
+    let refreshed_first = service
+        .authenticate(
+            &first.access_token,
+            TimestampMicros::new(1_900_000_000_000_002),
+        )
+        .await?;
+    assert_eq!(refreshed_first.grants, second.context.grants);
     repository.close().await;
     Ok(())
 }

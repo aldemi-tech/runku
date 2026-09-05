@@ -2,6 +2,21 @@
 
 All notable changes are documented in this file.
 
+## 0.4.5 - 2026-09-05
+
+### Added
+
+- Opt-in, separately authenticated managed OIDC enrollment lets a SaaS gateway create and
+  reconcile bounded Project grants without exposing invitation codes to users.
+- Authenticated `/v1/auth/resources` discovery and current grants in `/v1/auth/me`.
+- Parameterless `runku link` lists and prompts for accessible environments on an interactive
+  terminal; explicit IDs remain the non-interactive contract.
+
+### Security
+
+- Self-Hosted first enrollment remains invitation-gated unless the managed gateway secret is
+  explicitly configured.
+
 ## 0.4.4 - 2026-09-03
 
 ### Added

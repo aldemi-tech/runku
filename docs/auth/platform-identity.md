@@ -104,6 +104,8 @@ Configuration is strict:
 | `RUNKU_MANAGEMENT_TLS_TERMINATED` | no | exact `true` permits a non-loopback listener behind a trusted TLS boundary |
 | `RUNKU_PUBLIC_MANAGEMENT_URL` | no | canonical public HTTPS Management origin returned by login discovery; literal-loopback HTTP is local-only |
 | `RUNKU_PLATFORM_OIDC_CONFIG` | no | absolute path to a strict JSON file, at most 64 KiB |
+| `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN` | no | separate gateway secret, at least 32 bytes; enables managed first OIDC enrollment and authoritative grant reconciliation; requires OIDC |
+| `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN_FILE` | alternative | absolute one-line regular non-symlink file containing the same separate gateway secret |
 | `RUNKU_PRODUCT_ROOT` | no | absolute initialized Product Environment root exposed by authenticated lifecycle routes |
 | `RUNKU_PLATFORM_DATABASE_URL` | no | optional Environment-scoped PostgreSQL URL for Function documents, indexes, outbox, and schedules; sensitive; requires Product root |
 | `RUNKU_PLATFORM_DATABASE_URL_FILE` | alternative | path to a file containing the same Function platform URL; absolute, one-line, regular, non-symlinked |
@@ -329,8 +331,9 @@ Set its absolute path in `RUNKU_PLATFORM_OIDC_CONFIG`. The verifier requires:
   unknown-`kid` refresh.
 
 The IdP authenticates the human; Runku remains authoritative for grants, sessions, and resource
-scope. The first OIDC login must consume a Runku invitation so a verified external subject cannot
-self-enroll. The normal interactive flow is simply:
+scope. Self-Hosted first OIDC login must consume a Runku invitation so a verified external subject
+cannot self-enroll. A managed service can opt into the separate managed-enrollment gateway contract
+described below. The normal interactive flow is simply:
 
 ```sh
 runku login
@@ -392,6 +395,19 @@ RUNKU_EXTERNAL_OIDC_TOKEN='eyJ...' runku login \
 The external token is never written to Runku's credential file; only the resulting Runku access and
 rotating refresh session is stored. Runku does not retain the IdP password, authorization code,
 PKCE verifier, or external token.
+
+### Managed-service OIDC enrollment
+
+A SaaS control plane that already owns user and tenant membership may configure the same
+high-entropy secret as `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN` and authenticate its private
+`POST /v1/auth/oidc` hop with `runku-managed-enrollment: Bearer …`. After verifying the OIDC bearer,
+Runku accepts a bounded `managedEnrollment` object containing the operator name and complete
+Project-scoped role set. First login creates the external identity, grants, session, and audit
+atomically; later login replaces that subject's managed grants with the current authoritative set.
+The gateway header is never a user credential and must be stripped from public input. Without the
+configured secret, with a mismatched secret, or when both invitation and managed enrollment are
+sent, the request fails closed. This is why a Runku Cloud user needs only `runku login`, while an
+ordinary Self-Hosted installation still uses an invitation for first identity binding.
 
 Changing `providerId` creates a distinct trust namespace. Rotating `subjectPepper` makes existing
 links unresolvable. Treat either as an identity migration requiring overlap or re-enrollment; do
@@ -463,10 +479,11 @@ plus Runku's stricter verifier rules above.
 |---|---|---|
 | `GET /v1/auth/config` | none | returns versioned methods and an optional canonical Management origin; never returns secrets |
 | `POST /v1/auth/exchange` | single-use invitation in JSON body | creates operator/session atomically; do not replay after success |
-| `POST /v1/auth/oidc` | external bearer; invitation required only for first link | verifies OIDC and creates a Runku session |
+| `POST /v1/auth/oidc` | external bearer; first Self-Hosted link uses invitation, or a separately authenticated managed gateway supplies authoritative grants | verifies OIDC and creates/reconciles a Runku session |
 | `GET /v1/auth/oidc/config` | none | returns exact issuer and public native-client endpoints/ID/scopes/optional RFC 8707 resource; never returns secrets |
 | `POST /v1/auth/refresh` | current `rk_rt_v1_*` in JSON body | atomically rotates both tokens; reconcile an uncertain response before retry |
 | `GET /v1/auth/me` | `rk_at_v1_*` bearer | reloads current operator and grants; safe to retry |
+| `GET /v1/auth/resources` | `rk_at_v1_*` bearer | returns a bounded versioned catalog of linkable Product Environments; safe to retry |
 | `GET /v1/auth/sessions` | `rk_at_v1_*` bearer | lists non-secret sessions owned by the operator; safe to retry |
 | `DELETE /v1/auth/sessions/{ops_*}` | `rk_at_v1_*` bearer | revokes own session; another operator requires installation `operators:manage` |
 | `POST /v1/access/invitations` | `rk_at_v1_*` + delegated authority | with `Idempotency-Key: opn_*`, atomically creates or replays one issuance; code appears only on create |

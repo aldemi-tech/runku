@@ -74,8 +74,11 @@ literal-loopback HTTP origins. Redirects, URL credentials, paths, queries, fragm
 configuration, and remote plaintext HTTP are rejected.
 
 `login` exchanges one server-issued, single-use bootstrap/operator invitation or a configured
-external OIDC token for an independently revocable device session. First OIDC enrollment supplies
-an invitation plus browser/external authentication; a linked identity omits the invitation.
+external OIDC token for an independently revocable device session. Ordinary Self-Hosted first
+OIDC enrollment supplies an invitation; a linked identity omits it. A managed service may instead
+authenticate its gateway separately and derive the first operator grants from its current IdP and
+membership authority. In that managed flow the user runs plain `runku login`: no invitation
+environment variable is part of the SaaS experience.
 `--device` overrides the bounded audit label derived from the local computer name. `--code-env`
 must name an uppercase `RUNKU_*` variable; the code is never accepted as an argument.
 
@@ -159,12 +162,16 @@ fresh scope.
 
 ```sh
 runku login
-runku link [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT] \
-  --project-id prj_* --environment-id env_*
+runku link [--root PATH] [--workspace REF] [--listen LOOPBACK:PORT]
+
+# Non-interactive/CI alternative:
+runku link --project-id prj_* --environment-id env_*
 ```
 
 Use `link` for a customer- or operator-controlled directory that will issue remote lifecycle
-commands. It loads the current `runku login` profile and performs an authenticated `status` request
+commands. Without IDs, an interactive terminal loads the bounded authenticated resource catalog,
+shows the accessible Project/Environment choices, and prompts for one. Non-interactive callers
+must supply both IDs. It then performs an authenticated `status` request
 against the exact Project/Environment before creating any local Runku state. Authentication,
 current grants, and the selected installation's configured Product scope must all succeed. A
 rejected request leaves an uninitialized directory unchanged.

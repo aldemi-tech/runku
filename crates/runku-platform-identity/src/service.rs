@@ -9,9 +9,10 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     AccessScope, AccessToken, ConsumedInvitation, DeviceName, ExternalOperatorIdentity,
     GeneratedInvitationCode, IdempotentInvitationCreate, InvitationCode, InvitationKind,
-    InvitationStatus, NewInvitation, NewOperatorSession, OperatorContext, OperatorGrant,
-    OperatorInvitation, OperatorName, OperatorRole, PlatformCapability, PlatformIdentityCrypto,
-    PlatformIdentityError, PlatformIdentityRepository, RefreshToken, RefreshedSession,
+    InvitationStatus, ManagedExternalLogin, NewInvitation, NewOperatorSession, OperatorContext,
+    OperatorGrant, OperatorInvitation, OperatorName, OperatorRole, PlatformCapability,
+    PlatformIdentityCrypto, PlatformIdentityError, PlatformIdentityRepository, RefreshToken,
+    RefreshedSession,
 };
 
 /// Bounded lifetime policy for operator credentials.
@@ -362,6 +363,44 @@ impl PlatformIdentityService {
         let context = self
             .repository
             .login_external(identity, &session, now)
+            .await?;
+        Ok(LoginResult {
+            access_token: access.token,
+            refresh_token: refresh.token,
+            context,
+        })
+    }
+
+    /// Creates or reconciles a first-party gateway-managed OIDC operator and starts a session.
+    ///
+    /// The HTTP boundary must authenticate the gateway separately before invoking this method.
+    pub async fn login_with_managed_external_identity(
+        &self,
+        identity: ExternalOperatorIdentity,
+        operator_name: OperatorName,
+        mut grants: Vec<OperatorGrant>,
+        device_name: DeviceName,
+        now: TimestampMicros,
+    ) -> Result<LoginResult, PlatformIdentityError> {
+        identity.validate()?;
+        if grants.len() > 64 || grants.iter().any(|grant| grant.validate().is_err()) {
+            return Err(PlatformIdentityError::InvalidInput);
+        }
+        grants.sort_by_key(|grant| grant.scope);
+        if grants.windows(2).any(|pair| pair[0].scope == pair[1].scope) {
+            return Err(PlatformIdentityError::InvalidInput);
+        }
+        let (session, access, refresh) = self.new_session(device_name, now)?;
+        let candidate = ManagedExternalLogin {
+            operator_id: OperatorId::generate(),
+            operator_name,
+            external_identity: identity,
+            grants,
+            session,
+        };
+        let context = self
+            .repository
+            .login_external_managed(&candidate, now)
             .await?;
         Ok(LoginResult {
             access_token: access.token,

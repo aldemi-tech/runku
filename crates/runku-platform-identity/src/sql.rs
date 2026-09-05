@@ -26,11 +26,11 @@ use sqlx::{
 
 use crate::{
     AccessScope, BootstrapCreate, ConsumedInvitation, ExternalOperatorIdentity,
-    IdempotentInvitationCreate, InvitationKind, InvitationStatus, NewInvitation,
-    NewOperatorSession, Operator, OperatorContext, OperatorGrant, OperatorInvitation, OperatorName,
-    OperatorSession, OperatorStatus, PlatformCapability, PlatformIdentityBackend,
-    PlatformIdentityError, PlatformIdentityRepository, PlatformIdentityTelemetrySnapshot,
-    RefreshedSession, SessionStatus, key::PlatformDigest,
+    IdempotentInvitationCreate, InvitationKind, InvitationStatus, ManagedExternalLogin,
+    NewInvitation, NewOperatorSession, Operator, OperatorContext, OperatorGrant,
+    OperatorInvitation, OperatorName, OperatorSession, OperatorStatus, PlatformCapability,
+    PlatformIdentityBackend, PlatformIdentityError, PlatformIdentityRepository,
+    PlatformIdentityTelemetrySnapshot, RefreshedSession, SessionStatus, key::PlatformDigest,
 };
 
 const SCHEMA_VERSION: i64 = 2;
@@ -377,6 +377,14 @@ impl PlatformIdentityRepository for SqlPlatformIdentityRepository {
         now: TimestampMicros,
     ) -> Result<OperatorContext, PlatformIdentityError> {
         self.track(login_external(&self.pool, self.backend, identity, session, now).await)
+    }
+
+    async fn login_external_managed(
+        &self,
+        candidate: &ManagedExternalLogin,
+        now: TimestampMicros,
+    ) -> Result<OperatorContext, PlatformIdentityError> {
+        self.track(login_external_managed(&self.pool, self.backend, candidate, now).await)
     }
 
     async fn authenticate_access(
@@ -953,6 +961,84 @@ async fn login_external(
     )
     .await?;
     let context = load_context_tx(&mut tx, session.id).await?;
+    if context.operator.status != OperatorStatus::Active {
+        return Err(PlatformIdentityError::Unauthenticated);
+    }
+    tx.commit()
+        .await
+        .map_err(|error| map_commit_error(&error))?;
+    Ok(context)
+}
+
+async fn login_external_managed(
+    pool: &AnyPool,
+    backend: PlatformIdentityBackend,
+    candidate: &ManagedExternalLogin,
+    now: TimestampMicros,
+) -> Result<OperatorContext, PlatformIdentityError> {
+    candidate.external_identity.validate()?;
+    validate_new_session(&candidate.session)?;
+    if candidate.session.created_at != now
+        || candidate.grants.len() > 64
+        || candidate
+            .grants
+            .iter()
+            .any(|grant| grant.validate().is_err())
+        || candidate
+            .grants
+            .windows(2)
+            .any(|pair| pair[0].scope >= pair[1].scope)
+    {
+        return Err(PlatformIdentityError::InvalidInput);
+    }
+    let mut tx = begin_write(pool, backend).await?;
+    let existing = sqlx::query_scalar::<_, String>("SELECT operator_id FROM runku_operator_identities WHERE provider_id = $1 AND subject_id = $2")
+        .bind(&candidate.external_identity.provider_id)
+        .bind(&candidate.external_identity.subject_id)
+        .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
+    let was_existing = existing.is_some();
+    let operator_id = match existing {
+        Some(value) => value
+            .parse::<OperatorId>()
+            .map_err(|_| PlatformIdentityError::Corruption)?,
+        None => {
+            sqlx::query("INSERT INTO runku_operators (operator_id, name, status, created_at_micros, authorization_revision) VALUES ($1, $2, 'active', $3, 1)")
+                .bind(candidate.operator_id.to_string()).bind(candidate.operator_name.as_str()).bind(now.get())
+                .execute(&mut *tx).await.map_err(map_constraint_error)?;
+            sqlx::query("INSERT INTO runku_operator_identities (provider_id, subject_id, operator_id, created_at_micros) VALUES ($1, $2, $3, $4)")
+                .bind(&candidate.external_identity.provider_id).bind(&candidate.external_identity.subject_id)
+                .bind(candidate.operator_id.to_string()).bind(now.get()).execute(&mut *tx).await
+                .map_err(map_constraint_error)?;
+            candidate.operator_id
+        }
+    };
+    let current = load_grants_tx(&mut tx, operator_id).await?;
+    if current != candidate.grants {
+        sqlx::query("DELETE FROM runku_operator_grants WHERE operator_id = $1")
+            .bind(operator_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        for grant in &candidate.grants {
+            insert_grant(&mut tx, operator_id, grant, now, None).await?;
+        }
+        if was_existing {
+            sqlx::query("UPDATE runku_operators SET authorization_revision = authorization_revision + 1 WHERE operator_id = $1")
+                .bind(operator_id.to_string()).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        }
+        sqlx::query("UPDATE runku_platform_meta SET initialized = TRUE, authorization_revision = authorization_revision + 1 WHERE singleton_id = 1")
+            .execute(&mut *tx).await.map_err(map_sqlx_error)?;
+    }
+    insert_session(&mut tx, operator_id, &candidate.session).await?;
+    audit(
+        &mut tx,
+        Some(operator_id),
+        Some(operator_id),
+        "oidc.managed-login",
+        now,
+    )
+    .await?;
+    let context = load_context_tx(&mut tx, candidate.session.id).await?;
     if context.operator.status != OperatorStatus::Active {
         return Err(PlatformIdentityError::Unauthenticated);
     }

@@ -20,6 +20,8 @@ runku-protocol = { path = "../runku-protocol" }
 runku-value = { path = "../runku-value" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+subtle = "=2.6.1"
 tokio = { workspace = true, features = ["net", "sync", "time"] }
 url.workspace = true
 zeroize.workspace = true

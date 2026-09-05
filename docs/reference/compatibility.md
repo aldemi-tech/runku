@@ -13,19 +13,24 @@ Runku versions contracts at every boundary that can outlive one process:
 Unknown versions fail closed. A client-selected Release is served only while its contract and
 runtime remain supported. Channel routing cannot silently replace an explicit incompatible Release.
 
-The source line reports version `0.4.4` and has not established a general stable compatibility
-window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.4 supports a
+The source line reports version `0.4.5` and has not established a general stable compatibility
+window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.5 supports a
 deliberate forward upgrade from that floor.
 Tagged releases coordinate the CLI, both TypeScript SDKs, Linux compact server binaries, and the
 compact server image. Agent, distributed deployment, protocol, storage, and runtime support windows
 remain separate distribution gates.
+
+Version 0.4.5 adds only additive auth response fields and endpoints. A 0.4.5 CLI can still link
+non-interactively to an older server with explicit IDs; parameterless interactive linking requires
+the new resource catalog. Managed enrollment is disabled unless both gateway and server configure
+their separate shared secret, so upgrading invitation-only Self-Hosted preserves its policy.
 
 ## Pre-release matrix
 
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.4` alone |
+| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.5` alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
 | TypeScript packages | `@runku/client`, `@runku/server`, and `@runku/cli` update together |

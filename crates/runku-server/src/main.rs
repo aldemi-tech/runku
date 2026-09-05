@@ -29,8 +29,8 @@ use runku_identity_provider::{
     ProviderNetworkConfig,
 };
 use runku_management_service::{
-    ExternalIdentityAuthenticator, JwtExternalIdentityAuthenticator, ManagementHttpConfig,
-    ManagementHttpExposure, ManagementProduct, OidcClientConfiguration,
+    ExternalIdentityAuthenticator, JwtExternalIdentityAuthenticator, ManagedEnrollmentKey,
+    ManagementHttpConfig, ManagementHttpExposure, ManagementProduct, OidcClientConfiguration,
     build_management_router_with_product, serve_management,
 };
 use runku_observability::{
@@ -143,6 +143,7 @@ async fn run() -> Result<(), &'static str> {
         max_concurrent_requests: 1_024,
         exposure: config.exposure,
         public_management_endpoint: config.public_management_endpoint.clone(),
+        managed_enrollment_key: config.managed_enrollment_key.clone(),
     };
     let external = external_authenticator(config.oidc.as_ref())?;
     let product_adapter = match config.product_root.as_ref() {
@@ -211,6 +212,7 @@ struct ServerConfig {
     listen: SocketAddr,
     exposure: ManagementHttpExposure,
     public_management_endpoint: Option<String>,
+    managed_enrollment_key: Option<ManagedEnrollmentKey>,
     oidc: Option<OidcConfig>,
     product_root: Option<PathBuf>,
     platform_database_url: Option<Zeroizing<String>>,
@@ -291,6 +293,15 @@ impl ServerConfig {
             .ok()
             .map(|path| load_oidc(Path::new(&path)))
             .transpose()?;
+        let managed_enrollment_key = optional_secret("RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN")?
+            .map(|secret| {
+                ManagedEnrollmentKey::new(&secret)
+                    .map_err(|_| "SERVER_MANAGED_ENROLLMENT_TOKEN_INVALID")
+            })
+            .transpose()?;
+        if managed_enrollment_key.is_some() && oidc.is_none() {
+            return Err("SERVER_MANAGED_ENROLLMENT_REQUIRES_OIDC");
+        }
         let product_root = env::var_os("RUNKU_PRODUCT_ROOT")
             .map(PathBuf::from)
             .map(|path| {
@@ -361,6 +372,7 @@ impl ServerConfig {
             listen,
             exposure,
             public_management_endpoint,
+            managed_enrollment_key,
             oidc,
             product_root,
             platform_database_url,

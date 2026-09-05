@@ -28,6 +28,8 @@ use runku_platform_identity::{
 use runku_protocol::DEVELOPMENT_PUBLISH_MAX_BYTES;
 use runku_value::TimestampMicros;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 use tokio::{
     net::TcpListener,
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -42,6 +44,32 @@ use crate::{
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+const MANAGED_ENROLLMENT_HEADER: &str = "runku-managed-enrollment";
+
+/// Digest-backed credential accepted only from a trusted managed OIDC enrollment gateway.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ManagedEnrollmentKey([u8; 32]);
+
+impl std::fmt::Debug for ManagedEnrollmentKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ManagedEnrollmentKey([REDACTED])")
+    }
+}
+
+impl ManagedEnrollmentKey {
+    /// Builds a key from at least 32 bytes of high-entropy secret material.
+    pub fn new(secret: &str) -> Result<Self, PlatformIdentityError> {
+        if secret.as_bytes().len() < 32 || secret.trim() != secret {
+            return Err(PlatformIdentityError::InvalidInput);
+        }
+        Ok(Self(Sha256::digest(secret.as_bytes()).into()))
+    }
+
+    fn matches(&self, secret: &str) -> bool {
+        let digest: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+        bool::from(self.0.ct_eq(&digest))
+    }
+}
 
 /// Explicit exposure policy for a plaintext listener.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +90,8 @@ pub struct ManagementHttpConfig {
     /// Optional canonical public Management API origin returned during login discovery.
     /// When absent, clients use the exact origin they queried.
     pub public_management_endpoint: Option<String>,
+    /// Optional separate gateway secret enabling managed first-login enrollment and grant sync.
+    pub managed_enrollment_key: Option<ManagedEnrollmentKey>,
 }
 
 impl ManagementHttpConfig {
@@ -95,6 +125,7 @@ struct HttpState {
     product: Option<Arc<dyn ManagementProduct>>,
     oidc_client: Option<OidcClientConfiguration>,
     public_management_endpoint: Option<String>,
+    managed_enrollment_key: Option<ManagedEnrollmentKey>,
     admission: Arc<Semaphore>,
 }
 
@@ -136,6 +167,7 @@ pub fn build_management_router_with_product(
         product,
         oidc_client,
         public_management_endpoint: config.public_management_endpoint,
+        managed_enrollment_key: config.managed_enrollment_key,
         admission: Arc::new(Semaphore::new(config.max_concurrent_requests)),
     };
     Ok(Router::new()
@@ -145,6 +177,7 @@ pub fn build_management_router_with_product(
         .route("/v1/auth/config", get(auth_config))
         .route("/v1/auth/oidc/config", get(oidc_config))
         .route("/v1/auth/me", get(me))
+        .route("/v1/auth/resources", get(resources))
         .route("/v1/auth/sessions", get(sessions))
         .route("/v1/auth/sessions/{session_id}", delete(revoke_session))
         .route("/v1/access/invitations", post(invite))
@@ -773,6 +806,21 @@ struct RefreshRequest {
 struct OidcRequest {
     device_name: String,
     invitation_code: Option<String>,
+    managed_enrollment: Option<ManagedEnrollmentRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagedEnrollmentRequest {
+    operator_name: String,
+    grants: Vec<ManagedGrantRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManagedGrantRequest {
+    role: String,
+    scope: ScopeRequest,
 }
 
 #[derive(Deserialize)]
@@ -809,6 +857,30 @@ struct MeResponse {
     session_id: String,
     device_name: String,
     authorization_revision: u64,
+    grants: Vec<GrantResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantResponse {
+    scope: ScopeResponse,
+    capabilities: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourcesResponse {
+    version: u8,
+    resources: Vec<ResourceResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceResponse {
+    project_id: String,
+    project_name: String,
+    environment_id: String,
+    environment_name: String,
 }
 
 #[derive(Serialize)]
@@ -935,13 +1007,53 @@ async fn oidc(
         Ok(device) => device,
         Err(error) => return failure(error),
     };
-    let result = if let Some(code) = request.invitation_code {
+    let result = if request.invitation_code.is_some() && request.managed_enrollment.is_some() {
+        Err(PlatformIdentityError::InvalidInput)
+    } else if let Some(code) = request.invitation_code {
         let code = Zeroizing::new(code);
         match InvitationCode::from_str(&code) {
             Ok(code) => {
                 state
                     .identity
                     .login_with_invitation(&code, device, Some(identity), timestamp)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    } else if let Some(managed) = request.managed_enrollment {
+        let trusted = managed_bearer(&headers).is_some_and(|secret| {
+            state
+                .managed_enrollment_key
+                .as_ref()
+                .is_some_and(|key| key.matches(secret))
+        });
+        if !trusted {
+            return failure(PlatformIdentityError::Unauthenticated);
+        }
+        let name = match OperatorName::from_str(&managed.operator_name) {
+            Ok(name) => name,
+            Err(error) => return failure(error),
+        };
+        let grants = managed
+            .grants
+            .into_iter()
+            .map(|grant| {
+                let role = parse_role(&grant.role)?;
+                let scope = parse_scope(&grant.scope)?;
+                if !matches!(scope, AccessScope::Project(_)) {
+                    return Err(PlatformIdentityError::InvalidInput);
+                }
+                Ok(runku_platform_identity::OperatorGrant {
+                    scope,
+                    capabilities: role.capabilities(),
+                })
+            })
+            .collect::<Result<Vec<_>, PlatformIdentityError>>();
+        match grants {
+            Ok(grants) => {
+                state
+                    .identity
+                    .login_with_managed_external_identity(identity, name, grants, device, timestamp)
                     .await
             }
             Err(error) => Err(error),
@@ -958,6 +1070,13 @@ async fn oidc(
     }
 }
 
+fn managed_bearer(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(MANAGED_ENROLLMENT_HEADER)?.to_str().ok()?;
+    value
+        .strip_prefix("Bearer ")
+        .filter(|secret| !secret.is_empty() && secret.len() <= 16 * 1024)
+}
+
 async fn me(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     let context = match authenticate(&state, &headers).await {
         Ok(context) => context,
@@ -971,6 +1090,55 @@ async fn me(State(state): State<HttpState>, headers: HeaderMap) -> Response {
             session_id: context.session.id.to_string(),
             device_name: context.session.device_name.to_string(),
             authorization_revision: context.operator.authorization_revision,
+            grants: context
+                .grants
+                .into_iter()
+                .map(|grant| GrantResponse {
+                    scope: scope_response(grant.scope),
+                    capabilities: grant
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.as_str())
+                        .collect(),
+                })
+                .collect(),
+        },
+        false,
+    )
+}
+
+async fn resources(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    let context = match authenticate(&state, &headers).await {
+        Ok(context) => context,
+        Err(error) => return failure(error),
+    };
+    let resources = state
+        .product
+        .as_ref()
+        .filter(|product| {
+            context
+                .authorize(
+                    AccessScope::Environment(product.scope()),
+                    PlatformCapability::ReleasesRead,
+                )
+                .is_ok()
+        })
+        .map(|product| {
+            let scope = product.scope();
+            ResourceResponse {
+                project_id: scope.project_id().to_string(),
+                project_name: scope.project_id().to_string(),
+                environment_id: scope.environment_id().to_string(),
+                environment_name: scope.environment_id().to_string(),
+            }
+        })
+        .into_iter()
+        .collect();
+    json(
+        StatusCode::OK,
+        &ResourcesResponse {
+            version: 1,
+            resources,
         },
         false,
     )
@@ -1046,12 +1214,9 @@ async fn invite(
         Ok(name) => name,
         Err(error) => return failure(error),
     };
-    let role = match request.role.as_str() {
-        "owner" => OperatorRole::Owner,
-        "operator" => OperatorRole::Operator,
-        "developer" => OperatorRole::Developer,
-        "observer" => OperatorRole::Observer,
-        _ => return failure(PlatformIdentityError::InvalidInput),
+    let role = match parse_role(&request.role) {
+        Ok(role) => role,
+        Err(error) => return failure(error),
     };
     let scope = match parse_scope(&request.scope) {
         Ok(scope) => scope,
@@ -1099,6 +1264,16 @@ async fn invite(
             true,
         ),
         Err(error) => failure(error),
+    }
+}
+
+fn parse_role(value: &str) -> Result<OperatorRole, PlatformIdentityError> {
+    match value {
+        "owner" => Ok(OperatorRole::Owner),
+        "operator" => Ok(OperatorRole::Operator),
+        "developer" => Ok(OperatorRole::Developer),
+        "observer" => Ok(OperatorRole::Observer),
+        _ => Err(PlatformIdentityError::InvalidInput),
     }
 }
 

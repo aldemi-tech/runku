@@ -63,7 +63,7 @@ install-cli-check:
 	@install_root=$$(mktemp -d); \
 	trap 'rm -rf "$$install_root"' EXIT; \
 	$(MAKE) --no-print-directory install-cli CARGO_INSTALL_ROOT="$$install_root"; \
-	"$$install_root/bin/runku" --version | rg -x 'runku 0\.4\.4'; \
+	"$$install_root/bin/runku" --version | rg -x 'runku 0\.4\.5'; \
 	"$$install_root/bin/runku" --help | rg -F 'runku dev [--root PATH]'
 
 cli-package-check: js-install

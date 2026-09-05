@@ -575,6 +575,22 @@ struct CreatedDevelopmentCredentialWire<'a> {
     secret_shown_once: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LinkResourcesWire {
+    version: u8,
+    resources: Vec<LinkResourceWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LinkResourceWire {
+    project_id: String,
+    project_name: String,
+    environment_id: String,
+    environment_name: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DevelopmentLifecycleWire {
@@ -3339,10 +3355,14 @@ async fn remote_link(
     root: &Path,
     workspace: WorkspaceRef,
     listen: std::net::SocketAddr,
-    scope: EnvironmentScope,
+    scope: Option<EnvironmentScope>,
 ) -> Result<(), CliFailure> {
-    preflight_link_state(root, &workspace, listen, scope).await?;
     let mut client = ManagementClient::load()?;
+    let scope = match scope {
+        Some(scope) => scope,
+        None => select_link_scope(&mut client).await?,
+    };
+    preflight_link_state(root, &workspace, listen, scope).await?;
     validate_management_link(root, scope, &client.endpoint)?;
     let url = client.url(&product_path(scope, "/status"))?;
     let response = client
@@ -3365,6 +3385,100 @@ async fn remote_link(
         state.workspace_id,
     );
     Ok(())
+}
+
+async fn select_link_scope(client: &mut ManagementClient) -> Result<EnvironmentScope, CliFailure> {
+    if !std::io::stdin().is_terminal() {
+        return Err(CliFailure {
+            code: "PLATFORM_LINK_SELECTION_REQUIRED",
+            exit: EXIT_USAGE,
+        });
+    }
+    let url = client.url("/v1/auth/resources")?;
+    let response = client
+        .request(reqwest::Method::GET, url, None, None)
+        .await
+        .map_err(|failure| CliFailure {
+            code: if failure.code == "PLATFORM_REQUEST_INVALID" {
+                "PLATFORM_LINK_RESOURCE_CATALOG_UNAVAILABLE"
+            } else {
+                failure.code
+            },
+            exit: failure.exit,
+        })?;
+    let bytes = bounded_response(response, 256 * 1024).await?;
+    let catalog: LinkResourcesWire = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
+        code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
+        exit: EXIT_CORRUPT,
+    })?;
+    if catalog.version != 1 || catalog.resources.len() > 1_024 {
+        return Err(CliFailure {
+            code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
+            exit: EXIT_CORRUPT,
+        });
+    }
+    if catalog.resources.is_empty() {
+        return Err(CliFailure {
+            code: "PLATFORM_LINK_RESOURCE_NONE",
+            exit: EXIT_AUTH,
+        });
+    }
+    let mut options = Vec::with_capacity(catalog.resources.len());
+    let mut unique = BTreeSet::new();
+    eprintln!("Available Runku environments:");
+    for (index, resource) in catalog.resources.into_iter().enumerate() {
+        if resource.project_name.is_empty()
+            || resource.project_name.len() > 256
+            || resource.environment_name.is_empty()
+            || resource.environment_name.len() > 256
+        {
+            return Err(CliFailure {
+                code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+        let scope = EnvironmentScope::new(
+            resource.project_id.parse().map_err(|_| CliFailure {
+                code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
+                exit: EXIT_CORRUPT,
+            })?,
+            resource.environment_id.parse().map_err(|_| CliFailure {
+                code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
+                exit: EXIT_CORRUPT,
+            })?,
+        );
+        if !unique.insert(scope) {
+            return Err(CliFailure {
+                code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
+                exit: EXIT_CORRUPT,
+            });
+        }
+        eprintln!(
+            "  {}. {} / {}  ({} / {})",
+            index + 1,
+            resource.project_name,
+            resource.environment_name,
+            scope.project_id(),
+            scope.environment_id(),
+        );
+        options.push(scope);
+    }
+    let answer = prompt_line("Select an environment [1]: ")?;
+    let selected = if answer.trim().is_empty() {
+        1
+    } else {
+        answer.trim().parse::<usize>().map_err(|_| CliFailure {
+            code: "PLATFORM_LINK_SELECTION_INVALID",
+            exit: EXIT_USAGE,
+        })?
+    };
+    options
+        .get(selected.saturating_sub(1))
+        .copied()
+        .ok_or(CliFailure {
+            code: "PLATFORM_LINK_SELECTION_INVALID",
+            exit: EXIT_USAGE,
+        })
 }
 
 async fn preflight_link_state(

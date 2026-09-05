@@ -15,11 +15,12 @@ use axum::{
 };
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
-    ExternalIdentityAuthenticator, ManagementHttpConfig, ManagementHttpExposure,
-    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
-    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementWorkspacePublish,
-    OidcClientConfiguration, build_management_router, build_management_router_with_product,
+    ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementHttpConfig,
+    ManagementHttpExposure, ManagementLogArchiveStatus, ManagementLogPage,
+    ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
+    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
+    ManagementWorkspacePublish, OidcClientConfiguration, build_management_router,
+    build_management_router_with_product,
 };
 use runku_platform_identity::{
     BootstrapResult, ExternalOperatorIdentity, OperatorName, PlatformIdentityCrypto,
@@ -32,6 +33,9 @@ use tower::ServiceExt as _;
 
 #[derive(Debug)]
 struct RejectingExternalIdentity;
+
+#[derive(Debug)]
+struct AcceptingExternalIdentity;
 
 #[derive(Debug)]
 struct ArchiveStatusProduct {
@@ -137,6 +141,115 @@ impl ExternalIdentityAuthenticator for RejectingExternalIdentity {
     }
 }
 
+#[async_trait]
+impl ExternalIdentityAuthenticator for AcceptingExternalIdentity {
+    async fn authenticate(
+        &self,
+        bearer: &str,
+        _now: TimestampMicros,
+    ) -> Result<ExternalOperatorIdentity, PlatformIdentityError> {
+        if bearer != "verified-external-token" {
+            return Err(PlatformIdentityError::Unauthenticated);
+        }
+        Ok(ExternalOperatorIdentity {
+            provider_id: "cloud".to_owned(),
+            subject_id: "better-user-1".to_owned(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn managed_oidc_requires_gateway_secret_and_exposes_linkable_resources()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("managed-http.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let identity = Arc::new(PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([47; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?);
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let product = Arc::new(ArchiveStatusProduct {
+        scope,
+        calls: AtomicUsize::new(0),
+        healthy: AtomicBool::new(true),
+    });
+    let router = build_management_router_with_product(
+        ManagementHttpConfig {
+            max_concurrent_requests: 8,
+            exposure: ManagementHttpExposure::LoopbackPlaintext,
+            public_management_endpoint: None,
+            managed_enrollment_key: Some(ManagedEnrollmentKey::new(&"m".repeat(32))?),
+        },
+        identity,
+        Some(Arc::new(AcceptingExternalIdentity)),
+        Some(product),
+        None,
+    )?;
+    let request_body = json!({
+        "deviceName": "managed-device",
+        "managedEnrollment": {
+            "operatorName": "Cloud user",
+            "grants": [{
+                "role": "developer",
+                "scope": {"kind": "project", "projectId": scope.project_id(), "environmentId": null}
+            }]
+        }
+    })
+    .to_string();
+    let denied = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/oidc")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer verified-external-token")
+                .body(Body::from(request_body.clone()))?,
+        )
+        .await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let accepted = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/oidc")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer verified-external-token")
+                .header(
+                    "runku-managed-enrollment",
+                    format!("Bearer {}", "m".repeat(32)),
+                )
+                .body(Body::from(request_body))?,
+        )
+        .await?;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let login: Value = serde_json::from_slice(&to_bytes(accepted.into_body(), 16 * 1024).await?)?;
+    let access = login["accessToken"]
+        .as_str()
+        .ok_or("missing access token")?;
+    let resources = router
+        .oneshot(
+            Request::get("/v1/auth/resources")
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(resources.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&to_bytes(resources.into_body(), 16 * 1024).await?)?;
+    assert_eq!(body["version"], 1);
+    assert_eq!(
+        body["resources"][0]["projectId"],
+        scope.project_id().to_string()
+    );
+    repository.close().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn readiness_requires_the_attached_product_store() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
@@ -163,6 +276,7 @@ async fn readiness_requires_the_attached_product_store() -> Result<(), Box<dyn s
             max_concurrent_requests: 8,
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
+            managed_enrollment_key: None,
         },
         identity,
         None,
@@ -219,6 +333,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             max_concurrent_requests: 8,
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
+            managed_enrollment_key: None,
         },
         identity.clone(),
         None,
@@ -236,6 +351,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             max_concurrent_requests: 8,
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: Some("https://api.runku.example".to_owned()),
+            managed_enrollment_key: None,
         },
         identity.clone(),
         Some(Arc::new(RejectingExternalIdentity)),
@@ -312,6 +428,7 @@ async fn bootstrap_exchange_returns_no_store_session_usable_for_me()
             max_concurrent_requests: 8,
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
+            managed_enrollment_key: None,
         },
         identity.clone(),
         None,
@@ -514,6 +631,7 @@ async fn invitation_operation_is_reconcilable_conflict_safe_and_revocable()
             max_concurrent_requests: 8,
             exposure: ManagementHttpExposure::LoopbackPlaintext,
             public_management_endpoint: None,
+            managed_enrollment_key: None,
         },
         identity,
         None,
