@@ -64,12 +64,12 @@ use runku_management_service::{
     ManagementMetric, ManagementMetrics, ManagementProduct, ManagementProductError,
     ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
     ManagementScheduledInvocation, ManagementScheduledPage, ManagementSchemaIndex,
-    ManagementSchemaPage, ManagementSchemaTable, ManagementServingOperation,
-    ManagementServingPolicy, ManagementServingPolicyResult, ManagementServingPolicySet,
-    ManagementServingRelease, ManagementStorageAccessKey, ManagementStorageAccessKeyConfiguration,
-    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyPage,
-    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, ManagementStorageOperation,
-    ManagementWorkspacePublish,
+    ManagementSchemaPage, ManagementSchemaTable, ManagementServingCompatibility,
+    ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
+    ManagementServingPolicySet, ManagementServingRelease, ManagementStorageAccessKey,
+    ManagementStorageAccessKeyConfiguration, ManagementStorageAccessKeyIssue,
+    ManagementStorageAccessKeyPage, ManagementStorageAccessKeyRevoke,
+    ManagementStorageAccessKeyRotate, ManagementStorageOperation, ManagementWorkspacePublish,
 };
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
@@ -1102,6 +1102,43 @@ impl ManagementProduct for ProductAdapter {
             .as_ref()
             .map(management_serving_policy)
             .ok_or(ManagementProductError::NotFound)
+    }
+
+    async fn serving_compatibility(
+        &self,
+    ) -> Result<ManagementServingCompatibility, ManagementProductError> {
+        let record = self
+            .serving
+            .get(self.scope)
+            .await
+            .map_err(map_serving)?
+            .ok_or(ManagementProductError::NotFound)?;
+        let first = record
+            .desired_policy
+            .releases()
+            .first()
+            .copied()
+            .ok_or(ManagementProductError::Corruption)?;
+        let contracts = first.contracts();
+        Ok(ManagementServingCompatibility {
+            version: 1,
+            policy_revision: record.policy_revision,
+            compatible: true,
+            converged: record.is_converged(),
+            schema_contract_hash: contracts.schema.to_string(),
+            index_contract_hash: contracts.indexes.to_string(),
+            cron_declarations_hash: contracts.cron_declarations.to_string(),
+            releases: record
+                .desired_policy
+                .releases()
+                .iter()
+                .map(|entry| ManagementServingRelease {
+                    release_id: entry.release_id().to_string(),
+                    weight_percent: entry.weight_percent(),
+                })
+                .collect(),
+            diagnostics: Vec::new(),
+        })
     }
 
     async fn serving_policy_set(
@@ -3765,6 +3802,15 @@ export const hourly = cron({
         assert!(replay.replayed);
         assert_eq!(replay.policy, first.policy);
         assert_eq!(product.serving_policy().await?, first.policy);
+        let compatibility = product.serving_compatibility().await?;
+        assert!(compatibility.compatible);
+        assert!(compatibility.converged);
+        assert_eq!(compatibility.policy_revision, 1);
+        assert_eq!(compatibility.releases, first.policy.releases);
+        assert_eq!(compatibility.schema_contract_hash.len(), 64);
+        assert_eq!(compatibility.index_contract_hash.len(), 64);
+        assert_eq!(compatibility.cron_declarations_hash.len(), 64);
+        assert!(compatibility.diagnostics.is_empty());
         let operation = product.serving_operation(operation_id).await?;
         assert_eq!(operation.kind, "setDesired");
         assert_eq!(operation.policy_revision, 1);

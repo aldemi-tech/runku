@@ -259,6 +259,10 @@ pub fn build_management_router_with_product(
             get(product_serving_operation),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/schemas/compatibility",
+            get(product_serving_compatibility),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{environment_id}/buckets",
             get(product_buckets).post(product_bucket_create),
         )
@@ -417,6 +421,32 @@ async fn product_metrics(
         Err(response) => return *response,
     };
     match product.metrics().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_serving_compatibility(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.serving_compatibility().await {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }

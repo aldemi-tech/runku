@@ -105,6 +105,12 @@ locally and older gateways reject it during decoding; explicit `release:`, `chan
 weighted policy. Mutation routing is derived from `OperationId`, so the same logical retry cannot
 select a different Release.
 
+`GET .../schemas/compatibility` is an additive authenticated projection of the evidence already
+enforced by the serving registry. It requires `releases:read` and returns the desired policy
+revision, convergence, Release weights, and the common schema/index/Cron hashes. Persisted v1 sets
+are always compatible because an incompatible mutation is rejected atomically; clients must still
+check `converged` before treating the set as active traffic.
+
 The post-0.4.5 Management API also adds exact-Environment `metrics` and `instances/healthz` reads.
 They reuse the existing `usage:read` and `environments:read` capabilities respectively, so no grant
 migration is required. Metric values are canonical decimal strings rather than JSON numbers, and

@@ -281,6 +281,30 @@ pub struct ManagementServingPolicyResult {
     pub replayed: bool,
 }
 
+/// Compatibility evidence shared by every Release in one desired serving set.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementServingCompatibility {
+    /// Wire version.
+    pub version: u8,
+    /// Positive desired serving-policy revision.
+    pub policy_revision: u64,
+    /// True because incompatible desired sets are rejected before persistence.
+    pub compatible: bool,
+    /// Whether the exact desired revision is observed on the serving path.
+    pub converged: bool,
+    /// Shared canonical schema contract hash.
+    pub schema_contract_hash: String,
+    /// Shared canonical logical-index contract hash.
+    pub index_contract_hash: String,
+    /// Shared canonical ordered Cron-declaration hash.
+    pub cron_declarations_hash: String,
+    /// Canonical Release-ID-ordered weighted set.
+    pub releases: Vec<ManagementServingRelease>,
+    /// Stable blocker codes; empty for every persisted v1 policy.
+    pub diagnostics: Vec<String>,
+}
+
 /// Durable serving operation projection used after an uncertain response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1282,6 +1306,13 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
 
     /// Reads the exact Environment desired/observed serving policy.
     async fn serving_policy(&self) -> Result<ManagementServingPolicy, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Reads the canonical compatibility evidence for the desired serving set.
+    async fn serving_compatibility(
+        &self,
+    ) -> Result<ManagementServingCompatibility, ManagementProductError> {
         Err(ManagementProductError::NotFound)
     }
 

@@ -25,8 +25,9 @@ use runku_management_service::{
     ManagementLogPage, ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery,
     ManagementMetric, ManagementMetrics, ManagementProduct, ManagementProductError,
     ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
-    ManagementScheduledPage, ManagementWorkspacePublish, OidcClientConfiguration,
-    build_management_router, build_management_router_with_product,
+    ManagementScheduledPage, ManagementServingCompatibility, ManagementServingRelease,
+    ManagementWorkspacePublish, OidcClientConfiguration, build_management_router,
+    build_management_router_with_product,
 };
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, ManagedSourceAuthority,
@@ -64,6 +65,7 @@ struct DataProbeProduct {
     scheduled_reads: AtomicUsize,
     metrics_reads: AtomicUsize,
     instance_health_reads: AtomicUsize,
+    compatibility_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -98,6 +100,29 @@ impl ManagementProduct for DataProbeProduct {
                 name: "runtime".to_owned(),
                 status: "ready".to_owned(),
             }],
+        })
+    }
+
+    async fn serving_compatibility(
+        &self,
+    ) -> Result<ManagementServingCompatibility, ManagementProductError> {
+        self.compatibility_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementServingCompatibility {
+            version: 1,
+            policy_revision: 2,
+            compatible: true,
+            converged: true,
+            schema_contract_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            index_contract_hash:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            cron_declarations_hash:
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+            releases: vec![ManagementServingRelease {
+                release_id: "rel_00000000000000000000000001".to_owned(),
+                weight_percent: 100,
+            }],
+            diagnostics: Vec::new(),
         })
     }
 
@@ -824,6 +849,23 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_007),
         )
         .await?;
+    let release_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "release-reader".to_owned(),
+            },
+            OperatorName::from_str("Release reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::ReleasesRead]),
+            }],
+            DeviceName::from_str("release reader device")?,
+            TimestampMicros::new(1_900_000_000_000_008),
+        )
+        .await?;
     let product = Arc::new(DataProbeProduct {
         scope,
         reads: AtomicUsize::new(0),
@@ -836,6 +878,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         scheduled_reads: AtomicUsize::new(0),
         metrics_reads: AtomicUsize::new(0),
         instance_health_reads: AtomicUsize::new(0),
+        compatibility_reads: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -897,6 +940,11 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     );
     let instance_health_path = format!(
         "/v1/projects/{}/environments/{}/instances/healthz",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let compatibility_path = format!(
+        "/v1/projects/{}/environments/{}/schemas/compatibility",
         scope.project_id(),
         scope.environment_id()
     );
@@ -1031,6 +1079,31 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.instance_health_reads.load(Ordering::SeqCst), 1);
+
+    let release_access = release_reader.login.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&compatibility_path)
+                .header(header::AUTHORIZATION, format!("Bearer {release_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.compatibility_reads.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&compatibility_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {environment_access}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.compatibility_reads.load(Ordering::SeqCst), 1);
 
     let usage_access = usage_reader.login.access_token.expose();
     let response = router
