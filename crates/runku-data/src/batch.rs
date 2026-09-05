@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{EnvironmentScope, FunctionName, PinnedCode, StoreError};
 
+const MAX_INTENT_CONTEXT_BYTES: usize = 1_024;
+
 /// Hard v1 limits applied before opening a write transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommitLimits {
@@ -181,6 +183,7 @@ pub struct CommitBatch {
     indexes: Vec<IndexMutation>,
     outbox: Vec<OutboxAppend>,
     schedules: Vec<ScheduledInvocationInsert>,
+    intent_context: Option<Vec<u8>>,
 }
 
 impl CommitBatch {
@@ -195,6 +198,7 @@ impl CommitBatch {
             indexes: Vec::new(),
             outbox: Vec::new(),
             schedules: Vec::new(),
+            intent_context: None,
         }
     }
 
@@ -221,6 +225,15 @@ impl CommitBatch {
     /// Appends one Scheduled Invocation insert.
     pub fn push_schedule(&mut self, schedule: ScheduledInvocationInsert) {
         self.schedules.push(schedule);
+    }
+
+    /// Binds additional versioned intent bytes into the idempotency digest without persisting
+    /// them as application data.
+    ///
+    /// Existing callers that omit this field retain the exact historical v1 digest. Administrative
+    /// surfaces use it to bind a write to the immutable schema/code target resolved for the call.
+    pub fn set_intent_context(&mut self, context: Vec<u8>) {
+        self.intent_context = Some(context);
     }
 
     /// Returns the explicit tenant scope.
@@ -283,6 +296,9 @@ impl CommitBatch {
             || self.indexes.len() > CommitLimits::V1.indexes
             || self.outbox.len() > CommitLimits::V1.outbox
             || self.schedules.len() > CommitLimits::V1.schedules
+            || self.intent_context.as_ref().is_some_and(|context| {
+                context.is_empty() || context.len() > MAX_INTENT_CONTEXT_BYTES
+            })
         {
             return Err(StoreError::LimitExceeded);
         }
@@ -464,6 +480,11 @@ impl CommitBatch {
             }
         }
 
+        if let Some(context) = &self.intent_context {
+            hash_bytes(&mut hash, b"RUNKU_COMMIT_INTENT_CONTEXT_V1")?;
+            hash_bytes(&mut hash, context)?;
+        }
+
         Ok(hash.finalize().into())
     }
 
@@ -588,6 +609,27 @@ mod tests {
             observed_revision: None,
         });
         assert_ne!(first.digest()?, third.digest()?);
+
+        let historical = first.digest()?;
+        let mut bound = first.clone();
+        bound.set_intent_context(b"RUNKU_DATA_ADMIN_V1\0release:one".to_vec());
+        assert_ne!(bound.digest()?, historical);
+        let mut another_target = first;
+        another_target.set_intent_context(b"RUNKU_DATA_ADMIN_V1\0release:two".to_vec());
+        assert_ne!(bound.digest()?, another_target.digest()?);
         Ok(())
+    }
+
+    #[test]
+    fn intent_context_is_bounded_and_cannot_be_empty() {
+        let mut batch = CommitBatch::new(scope(), OperationId::from_ulid(Ulid::from(3_u128)));
+        batch.push_outbox(OutboxAppend {
+            event_id: OutboxEventId::from_ulid(Ulid::from(4_u128)),
+            payload: CanonicalValue::Null,
+        });
+        batch.set_intent_context(Vec::new());
+        assert_eq!(batch.validate(), Err(StoreError::LimitExceeded));
+        batch.set_intent_context(vec![0; MAX_INTENT_CONTEXT_BYTES + 1]);
+        assert_eq!(batch.validate(), Err(StoreError::LimitExceeded));
     }
 }

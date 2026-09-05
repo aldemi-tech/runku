@@ -277,10 +277,10 @@ checks capabilities and scope, not the role label.
 
 | Role | Capabilities |
 |---|---|
-| `owner` | installation, Project, Environment, operator, Release, Channel, credential, log, usage, and backup management |
-| `operator` | Environment, Release, Channel, credential, log, usage, and backup operations; no installation/operator ownership |
-| `developer` | read/publish Releases, promote Channels, read credential metadata, read/follow logs |
-| `observer` | read Releases, credential metadata, logs, and usage |
+| `owner` | installation, Project, Environment, operator, Release, Channel, credential, Data Admin, log, usage, and backup management |
+| `operator` | Environment, Release, Channel, credential, Data Admin, log, usage, and backup operations; no installation/operator ownership |
+| `developer` | read/publish Releases, promote Channels, read/write Data Admin, read credential metadata, read/follow logs |
+| `observer` | read Releases, Data Admin, credential metadata, logs, and usage |
 
 An installation grant contains every Project and Environment. A Project grant contains that Project
 and its Environments. An Environment grant contains only the exact Project/Environment pair. A
@@ -288,9 +288,15 @@ Project or Environment grant never authorizes installation-wide work or a siblin
 
 Every lifecycle request reloads current grants. `releases:publish` protects publication and Release
 validation; `channels:promote` protects promotion and rollback; `releases:read` protects status;
+Function/schema catalogs; `data:read` protects logical reads; `data:write` protects logical writes;
 `logs:read` protects snapshots; and `logs:follow` protects streaming. The URL's Project and
 Environment are checked against both the grant and configured Product Environment before product
 state is accessed.
+
+The Data Admin capabilities are additive source-line capabilities. Existing 0.4.5 durable grants
+are not backfilled or reinterpreted and therefore gain no document access after upgrade. Reissue or
+replace a grant deliberately to opt in. Role expansion only affects newly issued/reconciled grants;
+custom grants retain exactly their stored capability set.
 
 ## Configure external OIDC
 
@@ -494,14 +500,20 @@ plus Runku's stricter verifier rules above.
 | `PUT /v1/projects/{project}/environments/{environment}/channels/{channel}` | `channels:promote` | promotes through exact optional CAS |
 | `POST /v1/projects/{project}/environments/{environment}/channels/{channel}/rollback` | `channels:promote` | rolls back through required exact-current CAS |
 | `GET /v1/projects/{project}/environments/{environment}/status` | `releases:read` | reads a coherent Release/Channel snapshot |
+| `GET .../functions` and `GET .../schema/tables` | `releases:read` | reads a bounded catalog from one verified effective artifact |
+| `POST .../data/query` and `GET .../data/documents/{table}/{document}` | `data:read` | reads logical documents through the canonical store and schema |
+| `POST .../data/documents/{table}` | `data:write` + `Idempotency-Key: opn_*` | inserts a schema-valid document with deterministic identity |
+| `PUT` or `DELETE .../data/documents/{table}/{document}` | `data:write` + `Idempotency-Key: opn_*` | applies exact OCC and supports safe identical replay |
 | `GET .../logs` | `logs:read` | reads one bounded exact-scope page |
 | `GET .../logs/follow` | `logs:follow` | streams NDJSON and rechecks the session/grant during the connection |
 | `GET /health/live` | none | process liveness only |
 | `GET /health/ready` | none | bounded authoritative PostgreSQL health |
 
-JSON bodies are limited to 16 KiB; the canonical publication route has the protocol's explicit
-manifest/artifact bound. Authorization headers are limited to 16 KiB, JSON rejects unknown fields,
-and semantic request concurrency is bounded. Secret-bearing responses use `no-store`. All
+Ordinary JSON bodies are limited to 16 KiB; Data Admin document bodies are limited to 12 MiB so the
+canonical value envelope can reach its documented bound, and the publication route has the
+protocol's explicit manifest/artifact bound. Authorization headers are limited to 16 KiB, JSON
+rejects unknown fields, and semantic request concurrency is bounded. Data responses and
+secret-bearing responses use `no-store`. All
 Management API access reloads current grants; a stale token does not freeze old authorization
 indefinitely.
 

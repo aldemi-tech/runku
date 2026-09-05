@@ -25,6 +25,15 @@ non-interactively to an older server with explicit IDs; parameterless interactiv
 the new resource catalog. Managed enrollment is disabled unless both gateway and server configure
 their separate shared secret, so upgrading invitation-only Self-Hosted preserves its policy.
 
+The post-0.4.5 source line adds versioned Function/schema catalog and logical Data Admin Management
+endpoints without changing existing endpoint or persisted-row meanings. It also adds explicit
+`data:read` and `data:write` Platform capabilities. Existing grants are intentionally not backfilled
+and receive no new document authority; administrators must opt in by issuing/reconciling an updated
+grant. Newly expanded role presets may include Data Admin authority, while custom grants remain
+exact. Older clients can ignore the additive endpoints and capabilities. Data writes reuse the
+existing logical operation journal and storage schemas, so no migration or release-version change
+is introduced by this source change.
+
 ## Pre-release matrix
 
 | Boundary | Current rule |
@@ -41,7 +50,7 @@ their separate shared secret, so upgrading invitation-only Self-Hosted preserves
 | Compact server | Linux GNU ARM64/x86_64 binary and multi-platform OCI image; one attached Product Environment, Safe V8 profile |
 | Compact deployment | Dedicated Linux host, Compose v2, one active Environment writer, PostgreSQL 16, host TLS proxy, backup/empty restore |
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
-| Platform Identity | Management HTTP v1, native OIDC configuration, authenticated Product lifecycle/log stream, schema v2; no mixed-version or downgrade window |
+| Platform Identity | Management HTTP v1, native OIDC configuration, authenticated Product lifecycle/catalog/Data Admin/log stream, schema v2; no mixed-version or downgrade window |
 
 The source line adds optional `runku init --project-id/--environment-id` flags as a compatible CLI
 extension. Existing invocations keep generated IDs. Provisioners that use the extension must require

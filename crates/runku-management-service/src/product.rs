@@ -1,7 +1,8 @@
 //! Framework-independent authenticated product-management boundary.
 
 use async_trait::async_trait;
-use runku_core::EnvironmentScope;
+use runku_core::{EnvironmentScope, OperationId};
+use runku_protocol::WireValueV1;
 use serde::{Deserialize, Serialize};
 
 /// Public native-application OIDC settings used by `runku login --browser`.
@@ -32,10 +33,248 @@ pub enum ManagementProductError {
     NotFound,
     /// A compare-and-set or lifecycle precondition failed.
     Conflict,
+    /// An idempotency key was reused for a different logical intent.
+    OperationIdReused,
+    /// A logical document does not satisfy the effective schema.
+    Validation,
     /// Durable product storage is unavailable.
     Unavailable,
     /// Durable state failed an integrity check.
     Corruption,
+}
+
+impl std::fmt::Display for ManagementProductError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Invalid => "product request is invalid",
+            Self::NotFound => "product resource was not found",
+            Self::Conflict => "product operation conflicted",
+            Self::OperationIdReused => "product operation ID was reused",
+            Self::Validation => "product data validation failed",
+            Self::Unavailable => "product dependency is unavailable",
+            Self::Corruption => "product state is corrupt",
+        })
+    }
+}
+
+impl std::error::Error for ManagementProductError {}
+
+/// Bounded catalog page query resolved against one explicit code target.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCatalogQuery {
+    /// Explicit `release:`, `channel:`, or `workspace:` target.
+    pub target: String,
+    /// Exclusive stable logical cursor.
+    pub after: Option<String>,
+    /// Page size in `1..=200`.
+    pub limit: u16,
+}
+
+/// Metadata proving which immutable artifact supplied a catalog or Data Admin operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementResolvedTarget {
+    /// Target supplied by the operator.
+    pub requested: String,
+    /// Immutable `release:` or `dev_revision:` pin selected once.
+    pub resolved: String,
+    /// Release manifest identity containing the effective schema and Functions.
+    pub release_id: String,
+    /// Repository revision used to resolve a moving target.
+    pub serving_revision: u64,
+    /// Exact logical schema contract digest.
+    pub schema_contract_hash: String,
+}
+
+/// One Function projected from an integrity-checked effective artifact.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementFunctionEntry {
+    /// Stable Function identity.
+    pub function_id: String,
+    /// Logical Function name.
+    pub name: String,
+    /// `query`, `mutation`, or `action`.
+    pub kind: String,
+    /// `public` or `internal`.
+    pub visibility: String,
+    /// Functional principal policy.
+    pub auth: String,
+    /// `safe-v8` or `full-node`.
+    pub runtime: String,
+    /// Ordered declared Function capabilities.
+    pub capabilities: Vec<String>,
+    /// Canonical arguments Contract v1.
+    pub arguments: serde_json::Value,
+    /// Canonical result Contract v1.
+    pub result: serde_json::Value,
+}
+
+/// One bounded Function catalog page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementFunctionPage {
+    /// Wire response version.
+    pub version: u8,
+    /// Exact resolved target metadata.
+    pub target: ManagementResolvedTarget,
+    /// Function entries ordered by logical name.
+    pub functions: Vec<ManagementFunctionEntry>,
+    /// Exclusive cursor for another page, absent at end.
+    pub next: Option<String>,
+}
+
+/// One logical index belonging to a schema table.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementSchemaIndex {
+    /// Stable logical Index identity.
+    pub index_id: String,
+    /// Logical Index name.
+    pub name: String,
+    /// Ordered object-property paths.
+    pub fields: Vec<Vec<String>>,
+}
+
+/// One table projected from the effective logical schema.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementSchemaTable {
+    /// Stable logical Table identity.
+    pub table_id: String,
+    /// Logical Table name.
+    pub name: String,
+    /// Canonical document Contract v1.
+    pub document: serde_json::Value,
+    /// Ordered logical indexes for this table.
+    pub indexes: Vec<ManagementSchemaIndex>,
+}
+
+/// One bounded effective-schema page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementSchemaPage {
+    /// Wire response version.
+    pub version: u8,
+    /// Exact resolved target metadata.
+    pub target: ManagementResolvedTarget,
+    /// Tables ordered by stable identity.
+    pub tables: Vec<ManagementSchemaTable>,
+    /// Exclusive Table ID cursor for another page, absent at end.
+    pub next: Option<String>,
+}
+
+/// One logical document projected without physical storage details.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataDocument {
+    /// Stable logical Table identity.
+    pub table_id: String,
+    /// Logical Table name resolved from the effective schema.
+    pub table: String,
+    /// Opaque Document identity.
+    pub document_id: String,
+    /// Positive OCC revision encoded as decimal text.
+    pub revision: String,
+    /// Environment commit sequence encoded as decimal text.
+    pub commit_sequence: String,
+    /// Creation timestamp in microseconds encoded as decimal text.
+    pub created_at_micros: String,
+    /// Last-update timestamp in microseconds encoded as decimal text.
+    pub updated_at_micros: String,
+    /// Lossless Canonical Value v1 projection.
+    pub value: WireValueV1,
+}
+
+/// Bounded logical-index query used by the Data Explorer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataQuery {
+    /// Explicit code target supplying the trusted schema.
+    pub target: String,
+    /// Logical table name.
+    pub table: String,
+    /// Logical index name within the table.
+    pub index: String,
+    /// Optional leading compound-key components; empty scans the complete logical index.
+    #[serde(default)]
+    pub prefix: Vec<WireValueV1>,
+    /// Result bound in `1..=200`.
+    pub limit: u16,
+}
+
+/// Result of one bounded logical-index query.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataPage {
+    /// Wire response version.
+    pub version: u8,
+    /// Exact resolved target metadata.
+    pub target: ManagementResolvedTarget,
+    /// Snapshot sequence shared by every returned document.
+    pub snapshot_sequence: String,
+    /// Documents ordered by logical index key and Document ID.
+    pub documents: Vec<ManagementDataDocument>,
+    /// True when the bounded scan may have additional entries.
+    pub truncated: bool,
+}
+
+/// Insert request; the Document ID is derived deterministically from `Idempotency-Key`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataInsertRequest {
+    /// Explicit code target supplying the trusted schema.
+    pub target: String,
+    /// Complete logical document value.
+    pub value: WireValueV1,
+}
+
+/// OCC replace request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataReplaceRequest {
+    /// Explicit code target supplying the trusted schema.
+    pub target: String,
+    /// Exact current positive revision encoded as decimal text.
+    pub expected_revision: String,
+    /// Complete value observed at `expectedRevision`, used to derive trusted old index entries and
+    /// to make an exact retry reconstruct the original commit batch.
+    pub previous_value: WireValueV1,
+    /// Complete replacement document value.
+    pub value: WireValueV1,
+}
+
+/// OCC delete request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataDeleteRequest {
+    /// Explicit code target supplying the trusted schema.
+    pub target: String,
+    /// Exact current positive revision encoded as decimal text.
+    pub expected_revision: String,
+    /// Complete value observed at `expectedRevision`, required for index removal and exact replay.
+    pub previous_value: WireValueV1,
+}
+
+/// Known result of an idempotent Data Admin write.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataWriteResult {
+    /// Wire response version.
+    pub version: u8,
+    /// Exact resolved target metadata.
+    pub target: ManagementResolvedTarget,
+    /// Affected logical Table identity.
+    pub table_id: String,
+    /// Affected Document identity.
+    pub document_id: String,
+    /// New revision, absent after delete.
+    pub revision: Option<String>,
+    /// Environment commit sequence encoded as decimal text.
+    pub commit_sequence: String,
+    /// True when recovered from the operation journal.
+    pub replayed: bool,
 }
 
 /// Result of an authenticated Workspace publication.
@@ -209,6 +448,79 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
 
     /// Reads one coherent release and Channel snapshot.
     async fn status(&self) -> Result<ManagementReleaseStatus, ManagementProductError>;
+
+    /// Lists Functions from one exact effective artifact.
+    async fn functions(
+        &self,
+        query: &ManagementCatalogQuery,
+    ) -> Result<ManagementFunctionPage, ManagementProductError> {
+        let _ = query;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Lists tables and indexes from one exact effective artifact.
+    async fn schema_tables(
+        &self,
+        query: &ManagementCatalogQuery,
+    ) -> Result<ManagementSchemaPage, ManagementProductError> {
+        let _ = query;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Gets one logical document using the exact target schema.
+    async fn data_get(
+        &self,
+        target: &str,
+        table: &str,
+        document_id: &str,
+    ) -> Result<ManagementDataDocument, ManagementProductError> {
+        let _ = (target, table, document_id);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Runs one bounded logical-index query.
+    async fn data_query(
+        &self,
+        request: &ManagementDataQuery,
+    ) -> Result<ManagementDataPage, ManagementProductError> {
+        let _ = request;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Inserts one schema-validated logical document idempotently.
+    async fn data_insert(
+        &self,
+        operation_id: OperationId,
+        table: &str,
+        request: &ManagementDataInsertRequest,
+    ) -> Result<ManagementDataWriteResult, ManagementProductError> {
+        let _ = (operation_id, table, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Replaces one schema-validated logical document with exact OCC.
+    async fn data_replace(
+        &self,
+        operation_id: OperationId,
+        table: &str,
+        document_id: &str,
+        request: &ManagementDataReplaceRequest,
+    ) -> Result<ManagementDataWriteResult, ManagementProductError> {
+        let _ = (operation_id, table, document_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Deletes one logical document with exact OCC.
+    async fn data_delete(
+        &self,
+        operation_id: OperationId,
+        table: &str,
+        document_id: &str,
+        request: &ManagementDataDeleteRequest,
+    ) -> Result<ManagementDataWriteResult, ManagementProductError> {
+        let _ = (operation_id, table, document_id, request);
+        Err(ManagementProductError::NotFound)
+    }
 
     /// Reads one exact-scope operational-log page.
     async fn logs(

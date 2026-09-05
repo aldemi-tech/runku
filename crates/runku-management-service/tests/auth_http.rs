@@ -1,6 +1,7 @@
 //! Management HTTP contract coverage for bootstrap exchange and authenticated identity.
 
 use std::{
+    collections::BTreeSet,
     str::FromStr as _,
     sync::{
         Arc,
@@ -15,7 +16,8 @@ use axum::{
 };
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
-    ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementHttpConfig,
+    ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementDataDocument,
+    ManagementDataInsertRequest, ManagementDataWriteResult, ManagementHttpConfig,
     ManagementHttpExposure, ManagementLogArchiveStatus, ManagementLogPage,
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
     ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
@@ -23,9 +25,10 @@ use runku_management_service::{
     build_management_router_with_product,
 };
 use runku_platform_identity::{
-    BootstrapResult, ExternalOperatorIdentity, OperatorName, PlatformIdentityCrypto,
-    PlatformIdentityError, PlatformIdentityRepository, PlatformIdentityRepositoryConfig,
-    PlatformIdentityService, SessionTokenPolicy, SqlPlatformIdentityRepository,
+    AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, OperatorGrant,
+    OperatorName, PlatformCapability, PlatformIdentityCrypto, PlatformIdentityError,
+    PlatformIdentityRepository, PlatformIdentityRepositoryConfig, PlatformIdentityService,
+    SessionTokenPolicy, SqlPlatformIdentityRepository,
 };
 use runku_value::TimestampMicros;
 use serde_json::{Value, json};
@@ -42,6 +45,102 @@ struct ArchiveStatusProduct {
     scope: EnvironmentScope,
     calls: AtomicUsize,
     healthy: AtomicBool,
+}
+
+#[derive(Debug)]
+struct DataProbeProduct {
+    scope: EnvironmentScope,
+    reads: AtomicUsize,
+    writes: AtomicUsize,
+}
+
+#[async_trait]
+impl ManagementProduct for DataProbeProduct {
+    fn scope(&self) -> EnvironmentScope {
+        self.scope
+    }
+
+    async fn health(&self) -> Result<(), ManagementProductError> {
+        Ok(())
+    }
+
+    async fn publish(
+        &self,
+        _actor: &str,
+        _request: &[u8],
+    ) -> Result<ManagementWorkspacePublish, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn release(
+        &self,
+        _release_id: &str,
+        _against: Option<&str>,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn promote(
+        &self,
+        _channel: &str,
+        _release_id: &str,
+        _expected: Option<Option<&str>>,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn rollback(
+        &self,
+        _channel: &str,
+        _expected: &str,
+        _target: &str,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn status(&self) -> Result<ManagementReleaseStatus, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn data_get(
+        &self,
+        _target: &str,
+        _table: &str,
+        _document_id: &str,
+    ) -> Result<ManagementDataDocument, ManagementProductError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn data_insert(
+        &self,
+        _operation_id: OperationId,
+        _table: &str,
+        _request: &ManagementDataInsertRequest,
+    ) -> Result<ManagementDataWriteResult, ManagementProductError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn logs(
+        &self,
+        _query: &ManagementLogQuery,
+    ) -> Result<ManagementLogPage, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn log_archive_status(
+        &self,
+    ) -> Result<ManagementLogArchiveStatus, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
+
+    async fn log_prune(
+        &self,
+        _request: &ManagementLogPruneRequest,
+    ) -> Result<ManagementLogPruneResult, ManagementProductError> {
+        Err(ManagementProductError::Invalid)
+    }
 }
 
 #[async_trait]
@@ -294,6 +393,126 @@ async fn readiness_requires_the_attached_product_store() -> Result<(), Box<dyn s
         .oneshot(Request::get("/health/ready").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn data_admin_http_enforces_independent_least_privilege_capabilities()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("data-admin-auth.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let identity = Arc::new(PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([53; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?);
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let environment_manager = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "environment-manager".to_owned(),
+            },
+            OperatorName::from_str("Environment manager")?,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::EnvironmentsManage]),
+            }],
+            DeviceName::from_str("manager device")?,
+            TimestampMicros::new(1_900_000_000_000_000),
+        )
+        .await?;
+    let data_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "data-reader".to_owned(),
+            },
+            OperatorName::from_str("Data reader")?,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::DataRead]),
+            }],
+            DeviceName::from_str("reader device")?,
+            TimestampMicros::new(1_900_000_000_000_001),
+        )
+        .await?;
+    let product = Arc::new(DataProbeProduct {
+        scope,
+        reads: AtomicUsize::new(0),
+        writes: AtomicUsize::new(0),
+    });
+    let router = build_management_router_with_product(
+        ManagementHttpConfig {
+            max_concurrent_requests: 8,
+            exposure: ManagementHttpExposure::LoopbackPlaintext,
+            public_management_endpoint: None,
+            managed_enrollment_key: None,
+        },
+        identity,
+        None,
+        Some(product.clone()),
+        None,
+    )?;
+    let document_path = format!(
+        "/v1/projects/{}/environments/{}/data/documents/notes/doc_test?target=workspace:local",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let insert_path = format!(
+        "/v1/projects/{}/environments/{}/data/documents/notes",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let insert = |access: &str| {
+        Request::post(&insert_path)
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", OperationId::generate().to_string())
+            .body(Body::from(
+                json!({"target":"workspace:local", "value":{"type":"null"}}).to_string(),
+            ))
+    };
+
+    let manager_access = environment_manager.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&document_path)
+                .header(header::AUTHORIZATION, format!("Bearer {manager_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = router.clone().oneshot(insert(manager_access)?).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(product.writes.load(Ordering::SeqCst), 0);
+
+    let reader_access = data_reader.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&document_path)
+                .header(header::AUTHORIZATION, format!("Bearer {reader_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(product.reads.load(Ordering::SeqCst), 1);
+    let response = router.oneshot(insert(reader_access)?).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.writes.load(Ordering::SeqCst), 0);
+
     repository.close().await;
     Ok(())
 }

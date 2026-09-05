@@ -230,6 +230,9 @@ exit `4` means another operator changed the Channel; re-read status before takin
 | Operation | Required capability | Exact scope |
 |---|---|---|
 | status | `releases:read` | URL Project/Environment |
+| Function/schema catalogs | `releases:read` | URL Project/Environment plus exact code target |
+| Data Admin get/query | `data:read` | URL Project/Environment plus exact code target/schema |
+| Data Admin insert/replace/delete | `data:write` | same scope plus exact `opn_*` intent and OCC where applicable |
 | publish and Release validation | `releases:publish` | URL Project/Environment |
 | promote and rollback | `channels:promote` | URL Project/Environment |
 | log snapshot | `logs:read` | URL Project/Environment |
@@ -240,7 +243,9 @@ exit `4` means another operator changed the Channel; re-read status before takin
 Authentication occurs before the Product adapter is called. A valid operator without the
 capability receives `403`; a malformed/expired/revoked session receives `401`; a different
 configured Product scope is not opened. Product errors are sanitized as invalid, not found,
-conflict, unavailable, or corruption without leaking paths, tokens, source, or stored values.
+conflict, operation-ID reuse, schema validation, unavailable, or corruption without leaking paths,
+tokens, source, or stored values. Existing 0.4.5 grants do not acquire `data:*` implicitly; opt in
+by updating the intended grant instead of widening `environments:manage`.
 
 Recovery rules:
 

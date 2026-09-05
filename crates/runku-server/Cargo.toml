@@ -18,11 +18,14 @@ async-trait.workspace = true
 base64.workspace = true
 runku-management-service = { path = "../runku-management-service" }
 runku-core = { path = "../runku-core" }
+runku-contracts = { path = "../runku-contracts" }
 runku-data = { path = "../runku-data" }
 runku-data-postgres = { path = "../runku-data-postgres" }
+runku-data-sqlite = { path = "../runku-data-sqlite" }
 runku-development = { path = "../runku-development" }
 runku-gateway = { path = "../runku-gateway" }
 runku-file-storage = { path = "../runku-file-storage" }
+runku-execution = { path = "../runku-execution" }
 runku-identity = { path = "../runku-identity" }
 runku-identity-provider = { path = "../runku-identity-provider" }
 runku-platform-identity = { path = "../runku-platform-identity" }
@@ -30,6 +33,7 @@ runku-local = { path = "../runku-local" }
 runku-observability = { path = "../runku-observability" }
 runku-protocol = { path = "../runku-protocol" }
 runku-releases = { path = "../runku-releases" }
+runku-schema = { path = "../runku-schema" }
 runku-value = { path = "../runku-value" }
 reqwest.workspace = true
 serde.workspace = true
@@ -42,4 +46,6 @@ zeroize.workspace = true
 workspace = true
 
 [dev-dependencies]
+runku-build = { path = "../runku-build" }
+sqlx.workspace = true
 tempfile.workspace = true

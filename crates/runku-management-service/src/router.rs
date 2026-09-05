@@ -37,11 +37,13 @@ use tokio::{
 use zeroize::Zeroizing;
 
 use crate::{
-    ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    OidcClientConfiguration,
+    ManagementCatalogQuery, ManagementDataDeleteRequest, ManagementDataInsertRequest,
+    ManagementDataQuery, ManagementDataReplaceRequest, ManagementLogPruneRequest,
+    ManagementLogQuery, ManagementProduct, ManagementProductError, OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
+const MAX_DATA_ADMIN_BODY_BYTES: usize = 12 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 const MANAGED_ENROLLMENT_HEADER: &str = "runku-managed-enrollment";
@@ -58,8 +60,12 @@ impl std::fmt::Debug for ManagedEnrollmentKey {
 
 impl ManagedEnrollmentKey {
     /// Builds a key from at least 32 bytes of high-entropy secret material.
+    ///
+    /// # Errors
+    ///
+    /// Rejects short or surrounding-whitespace-bearing secrets.
     pub fn new(secret: &str) -> Result<Self, PlatformIdentityError> {
-        if secret.as_bytes().len() < 32 || secret.trim() != secret {
+        if secret.len() < 32 || secret.trim() != secret {
             return Err(PlatformIdentityError::InvalidInput);
         }
         Ok(Self(Sha256::digest(secret.as_bytes()).into()))
@@ -208,6 +214,29 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/status",
             get(product_status),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/functions",
+            get(product_functions),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/schema/tables",
+            get(product_schema_tables),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/data/query",
+            post(product_data_query).layer(DefaultBodyLimit::max(MAX_DATA_ADMIN_BODY_BYTES)),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/data/documents/{table}",
+            post(product_data_insert).layer(DefaultBodyLimit::max(MAX_DATA_ADMIN_BODY_BYTES)),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/data/documents/{table}/{document_id}",
+            get(product_data_get)
+                .put(product_data_replace)
+                .delete(product_data_delete)
+                .layer(DefaultBodyLimit::max(MAX_DATA_ADMIN_BODY_BYTES)),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/logs",
@@ -522,6 +551,212 @@ async fn product_status(
     }
 }
 
+async fn product_functions(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Query(query): Query<ManagementCatalogQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.functions(&query).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_schema_tables(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Query(query): Query<ManagementCatalogQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.schema_tables(&query).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DataGetQuery {
+    target: String,
+}
+
+async fn product_data_get(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, table, document_id)): Path<(String, String, String, String)>,
+    Query(query): Query<DataGetQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::DataRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.data_get(&query.target, &table, &document_id).await {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_data_query(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementDataQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::DataRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.data_query(&request).await {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_data_insert(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, table)): Path<(String, String, String)>,
+    Json(request): Json<ManagementDataInsertRequest>,
+) -> Response {
+    product_data_write_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        |product, operation| async move { product.data_insert(operation, &table, &request).await },
+    )
+    .await
+}
+
+async fn product_data_replace(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, table, document_id)): Path<(String, String, String, String)>,
+    Json(request): Json<ManagementDataReplaceRequest>,
+) -> Response {
+    product_data_write_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        |product, operation| async move {
+            product
+                .data_replace(operation, &table, &document_id, &request)
+                .await
+        },
+    )
+    .await
+}
+
+async fn product_data_delete(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, table, document_id)): Path<(String, String, String, String)>,
+    Json(request): Json<ManagementDataDeleteRequest>,
+) -> Response {
+    product_data_write_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        |product, operation| async move {
+            product
+                .data_delete(operation, &table, &document_id, &request)
+                .await
+        },
+    )
+    .await
+}
+
+async fn product_data_write_context<F, Fut>(
+    state: &HttpState,
+    headers: &HeaderMap,
+    project: &str,
+    environment: &str,
+    operation: F,
+) -> Response
+where
+    F: FnOnce(Arc<dyn ManagementProduct>, OperationId) -> Fut,
+    Fut: Future<Output = Result<crate::ManagementDataWriteResult, ManagementProductError>>,
+{
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, _) = match product_context(
+        state,
+        headers,
+        project,
+        environment,
+        PlatformCapability::DataWrite,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match operation(product, operation_id).await {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
 async fn product_logs(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -747,6 +982,13 @@ fn product_failure(error: ManagementProductError) -> Response {
         ManagementProductError::Invalid => (StatusCode::BAD_REQUEST, "PRODUCT_REQUEST_INVALID"),
         ManagementProductError::NotFound => (StatusCode::NOT_FOUND, "PRODUCT_NOT_FOUND"),
         ManagementProductError::Conflict => (StatusCode::CONFLICT, "PRODUCT_CONFLICT"),
+        ManagementProductError::OperationIdReused => {
+            (StatusCode::CONFLICT, "PRODUCT_OPERATION_ID_REUSED")
+        }
+        ManagementProductError::Validation => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PRODUCT_DATA_VALIDATION_FAILED",
+        ),
         ManagementProductError::Unavailable => {
             (StatusCode::SERVICE_UNAVAILABLE, "PRODUCT_UNAVAILABLE")
         }
@@ -1347,6 +1589,10 @@ fn optional_invitation_operation(
             .map_err(|_| PlatformIdentityError::InvalidInput),
         _ => Err(PlatformIdentityError::InvalidInput),
     }
+}
+
+fn required_operation(headers: &HeaderMap) -> Result<OperationId, PlatformIdentityError> {
+    optional_invitation_operation(headers)?.ok_or(PlatformIdentityError::InvalidInput)
 }
 
 fn invitation_operation_json(

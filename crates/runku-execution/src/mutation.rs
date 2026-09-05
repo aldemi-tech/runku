@@ -561,7 +561,7 @@ fn mutation_batch(
     schedules: Vec<ScheduledInvocationInsert>,
 ) -> Result<CommitBatch, MutationExecutionError> {
     let has_documents = !documents.is_empty();
-    let payload = write_set_payload(&documents, &indexes);
+    let payload = document_write_set_payload(&documents, &indexes);
     let mut batch = CommitBatch::new(scope, operation_id);
     for read in reads {
         batch.push_read(read);
@@ -582,7 +582,15 @@ fn mutation_batch(
     Ok(batch)
 }
 
-fn write_set_payload(documents: &[DocumentMutation], indexes: &[IndexMutation]) -> CanonicalValue {
+/// Builds the canonical Realtime invalidation payload for a trusted logical document commit.
+///
+/// Administrative writes use the same payload as Function Mutations so active subscriptions are
+/// invalidated only after the authoritative commit.
+#[must_use]
+pub fn document_write_set_payload(
+    documents: &[DocumentMutation],
+    indexes: &[IndexMutation],
+) -> CanonicalValue {
     let writes = documents
         .iter()
         .map(|mutation| {
@@ -658,10 +666,28 @@ fn plan_indexes(
     schema: &SchemaCatalog,
     buffered: &BufferedMutation,
 ) -> Result<Vec<IndexMutation>, MutationExecutionError> {
+    plan_document_index_mutations(schema, &buffered.writes, &buffered.old_values)
+}
+
+/// Derives trusted logical-index changes for document writes against one exact schema catalog.
+///
+/// `old_values` must contain the snapshot value observed for every write identity. The returned
+/// mutations are adapter-independent and are suitable for the same atomic [`CommitBatch`] as the
+/// document writes.
+///
+/// # Errors
+///
+/// Returns a stable schema/storage category when indexed values are unsupported or a revision
+/// cannot advance.
+pub fn plan_document_index_mutations<'a>(
+    schema: &SchemaCatalog,
+    writes: impl IntoIterator<Item = &'a DocumentMutation>,
+    old_values: &BTreeMap<(TableId, DocumentId), Option<CanonicalValue>>,
+) -> Result<Vec<IndexMutation>, MutationExecutionError> {
     let mut indexes = Vec::new();
-    for mutation in &buffered.writes {
+    for mutation in writes {
         let key = (mutation.table_id(), mutation.document_id());
-        let old_value = buffered.old_values.get(&key).and_then(Option::as_ref);
+        let old_value = old_values.get(&key).and_then(Option::as_ref);
         let (new_value, new_revision) = match mutation {
             DocumentMutation::Upsert {
                 expected, value, ..

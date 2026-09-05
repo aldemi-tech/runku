@@ -57,6 +57,7 @@ deployment.
 | Bootstrap operator access | [Platform operator identity](docs/auth/platform-identity.md) |
 | Operate a Product through `runku login` | [Authenticated remote lifecycle](docs/operations/remote-lifecycle.md) |
 | Use Realtime and transactional data | [Data and Realtime](docs/data/data-and-realtime.md) |
+| Build an operator console over Function/schema catalogs and logical Data Admin | [Data Admin](docs/data/data-and-realtime.md#management-data-admin) |
 | Publish, promote, or roll back code | [Releases and Workspaces](docs/development/releases-and-workspaces.md) |
 | Evaluate self-hosting | [Self-hosting overview](docs/self-hosting/overview.md) |
 | Install the compact self-hosted product | [Docker standalone installation](deployments/docker/README.md) |

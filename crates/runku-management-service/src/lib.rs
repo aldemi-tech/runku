@@ -9,10 +9,14 @@ mod router;
 
 pub use oidc::JwtExternalIdentityAuthenticator;
 pub use product::{
-    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
-    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementWorkspacePublish,
-    OidcClientConfiguration,
+    ManagementCatalogQuery, ManagementDataDeleteRequest, ManagementDataDocument,
+    ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
+    ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementFunctionEntry,
+    ManagementFunctionPage, ManagementLogArchiveStatus, ManagementLogPage,
+    ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
+    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
+    ManagementResolvedTarget, ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
+    ManagementWorkspacePublish, OidcClientConfiguration,
 };
 pub use router::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementHttpConfig,

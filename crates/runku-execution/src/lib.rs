@@ -15,6 +15,7 @@ pub use action::{
 };
 pub use mutation::{
     MutationExecutionError, MutationExecutor, MutationOutcome, MutationTelemetrySnapshot,
+    document_write_set_payload, plan_document_index_mutations,
 };
 pub use query::{
     DependencyBound, ExecutionError, QueryExecutor, QueryOutcome, QueryTelemetrySnapshot,

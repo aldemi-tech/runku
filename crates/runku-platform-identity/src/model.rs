@@ -75,6 +75,10 @@ pub enum PlatformCapability {
     ReleasesPublish,
     /// Promote or roll back channels.
     ChannelsPromote,
+    /// Read logical application documents through the administrative boundary.
+    DataRead,
+    /// Insert, replace, or delete logical application documents.
+    DataWrite,
     /// Read non-secret credential metadata.
     CredentialsRead,
     /// Create, rotate, revoke, or delete credentials.
@@ -103,6 +107,8 @@ impl PlatformCapability {
             Self::ReleasesRead => "releases:read",
             Self::ReleasesPublish => "releases:publish",
             Self::ChannelsPromote => "channels:promote",
+            Self::DataRead => "data:read",
+            Self::DataWrite => "data:write",
             Self::CredentialsRead => "credentials:read",
             Self::CredentialsManage => "credentials:manage",
             Self::LogsRead => "logs:read",
@@ -127,6 +133,8 @@ impl PlatformCapability {
             "releases:read" => Ok(Self::ReleasesRead),
             "releases:publish" => Ok(Self::ReleasesPublish),
             "channels:promote" => Ok(Self::ChannelsPromote),
+            "data:read" => Ok(Self::DataRead),
+            "data:write" => Ok(Self::DataWrite),
             "credentials:read" => Ok(Self::CredentialsRead),
             "credentials:manage" => Ok(Self::CredentialsManage),
             "logs:read" => Ok(Self::LogsRead),
@@ -149,6 +157,8 @@ impl PlatformCapability {
             Self::ReleasesRead,
             Self::ReleasesPublish,
             Self::ChannelsPromote,
+            Self::DataRead,
+            Self::DataWrite,
             Self::CredentialsRead,
             Self::CredentialsManage,
             Self::LogsRead,
@@ -238,6 +248,8 @@ impl OperatorRole {
                 C::ReleasesRead,
                 C::ReleasesPublish,
                 C::ChannelsPromote,
+                C::DataRead,
+                C::DataWrite,
                 C::CredentialsRead,
                 C::CredentialsManage,
                 C::LogsRead,
@@ -252,6 +264,8 @@ impl OperatorRole {
                 C::ReleasesRead,
                 C::ReleasesPublish,
                 C::ChannelsPromote,
+                C::DataRead,
+                C::DataWrite,
                 C::CredentialsRead,
                 C::LogsRead,
                 C::LogsFollow,
@@ -263,6 +277,7 @@ impl OperatorRole {
                 C::CredentialsRead,
                 C::LogsRead,
                 C::LogsFollow,
+                C::DataRead,
                 C::UsageRead,
             ]
             .into_iter()
@@ -451,5 +466,72 @@ impl OperatorContext {
         } else {
             Err(PlatformIdentityError::Forbidden)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runku_core::{EnvironmentId, OperatorId, OperatorSessionId};
+
+    fn context(
+        capabilities: impl IntoIterator<Item = PlatformCapability>,
+    ) -> Result<OperatorContext, PlatformIdentityError> {
+        let operator_id = OperatorId::generate();
+        let now = TimestampMicros::new(1_800_000_000_000_000);
+        Ok(OperatorContext {
+            operator: Operator {
+                id: operator_id,
+                name: "bounded operator".parse()?,
+                status: OperatorStatus::Active,
+                created_at: now,
+                authorization_revision: 1,
+            },
+            session: OperatorSession {
+                id: OperatorSessionId::generate(),
+                operator_id,
+                device_name: "device".parse()?,
+                status: SessionStatus::Active,
+                created_at: now,
+                last_used_at: now,
+                access_expires_at: TimestampMicros::new(now.get() + 1),
+                refresh_expires_at: TimestampMicros::new(now.get() + 2),
+            },
+            grants: vec![OperatorGrant {
+                scope: AccessScope::Environment(EnvironmentScope::new(
+                    ProjectId::generate(),
+                    EnvironmentId::generate(),
+                )),
+                capabilities: capabilities.into_iter().collect(),
+            }],
+        })
+    }
+
+    #[test]
+    fn data_authority_is_not_implied_by_environment_management_or_read_access()
+    -> Result<(), PlatformIdentityError> {
+        let environment_manager = context([PlatformCapability::EnvironmentsManage])?;
+        let scope = environment_manager.grants[0].scope;
+        assert_eq!(
+            environment_manager.authorize(scope, PlatformCapability::DataRead),
+            Err(PlatformIdentityError::Forbidden)
+        );
+        assert_eq!(
+            environment_manager.authorize(scope, PlatformCapability::DataWrite),
+            Err(PlatformIdentityError::Forbidden)
+        );
+
+        let reader = context([PlatformCapability::DataRead])?;
+        let scope = reader.grants[0].scope;
+        assert!(
+            reader
+                .authorize(scope, PlatformCapability::DataRead)
+                .is_ok()
+        );
+        assert_eq!(
+            reader.authorize(scope, PlatformCapability::DataWrite),
+            Err(PlatformIdentityError::Forbidden)
+        );
+        Ok(())
     }
 }

@@ -24,8 +24,9 @@ pub use identity::{
     LocalCreatedCredential, LocalCredentialMetadata, LocalIdentityError, LocalIdentityManager,
 };
 pub use lifecycle::{
-    LocalChannelExpectation, LocalChannelStatus, LocalCompatibilityDiagnostic, LocalReleaseError,
-    LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatus, LocalReleaseStatusReport,
+    LocalChannelExpectation, LocalChannelStatus, LocalCodeResolution, LocalCompatibilityDiagnostic,
+    LocalReleaseError, LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatus,
+    LocalReleaseStatusReport,
 };
 pub use logs::{LocalLogError, LocalLogManager};
 pub use otel::{LocalOtlpError, LocalOtlpExporter, LocalOtlpReport};

@@ -3,11 +3,16 @@
 use std::{path::Path, time::SystemTime};
 
 use runku_compatibility::{CompatibilityEngine, CompatibilityReport, ReleasePackage};
-use runku_core::{ChannelName, OperationId, ReleaseId};
+use runku_core::{ChannelName, CodeTarget, OperationId, PinnedCode, ReleaseId};
+use runku_development::{
+    DevelopmentContext, DevelopmentRepository, DevelopmentRepositoryConfig,
+    SqlDevelopmentRepository,
+};
 use runku_release_repository::{RepositoryConfig, SqlReleaseRepository};
 use runku_releases::{
     ArtifactStore, FilesystemArtifactStore, FilesystemStoreRole, ReleaseCommand, ReleaseError,
-    ReleaseRepository, ReleaseStatus, ServingSnapshot, encode_release_manifest,
+    ReleaseManifestV1, ReleaseRepository, ReleaseRouter, ReleaseStatus, ServingSnapshot,
+    encode_release_manifest,
 };
 use runku_value::TimestampMicros;
 use sha2::{Digest, Sha256};
@@ -111,6 +116,19 @@ pub struct LocalReleaseStatusReport {
     pub releases: Vec<LocalReleaseStatus>,
     /// Channels in stable name order.
     pub channels: Vec<LocalChannelStatus>,
+}
+
+/// One exact code target resolved with its immutable manifest and verified artifact bytes.
+#[derive(Clone, Debug)]
+pub struct LocalCodeResolution {
+    /// Repository revision used to resolve the moving target.
+    pub serving_revision: u64,
+    /// Immutable Release or Development Revision selected for the operation lifetime.
+    pub pinned_code: PinnedCode,
+    /// Canonical manifest belonging to the selected code identity.
+    pub manifest: ReleaseManifestV1,
+    /// Content-addressed artifact bytes verified by the artifact store.
+    pub artifact_bytes: Vec<u8>,
 }
 
 /// Optional operator precondition for a Channel promotion.
@@ -348,6 +366,71 @@ impl LocalReleaseManager {
             default_channel,
             releases,
             channels,
+        })
+    }
+
+    /// Resolves a Release, Channel, or Workspace exactly once and loads its immutable artifact.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown, empty, non-servable, cross-scope, corrupt, or unavailable targets without
+    /// falling back to a default or latest Release.
+    pub async fn resolve_code(
+        &self,
+        target: &CodeTarget,
+    ) -> Result<LocalCodeResolution, LocalReleaseError> {
+        let (serving_revision, pinned_code, manifest) = match target {
+            CodeTarget::Release(_) | CodeTarget::Channel(_) => {
+                let snapshot = self.snapshot().await?;
+                let effective = ReleaseRouter::new(snapshot)
+                    .resolve(target)
+                    .map_err(map_repository)?;
+                let manifest = self
+                    .repository
+                    .manifest(self.state.scope(), effective.release_id)
+                    .await
+                    .map_err(map_repository)?;
+                (
+                    effective.serving_revision,
+                    PinnedCode::Release(effective.release_id),
+                    manifest,
+                )
+            }
+            CodeTarget::Workspace(workspace) => {
+                let context = DevelopmentContext {
+                    scope: self.state.scope(),
+                    environment: self.state.environment(),
+                };
+                let repository = SqlDevelopmentRepository::connect_sqlite(
+                    &sqlite_url(&self.paths.development_database),
+                    DevelopmentRepositoryConfig::LOCAL,
+                    context,
+                )
+                .await
+                .map_err(map_development)?;
+                let resolved = repository
+                    .snapshot(context)
+                    .await
+                    .map_err(map_development)?
+                    .resolve(workspace)
+                    .map_err(map_development)?;
+                (
+                    resolved.serving_revision,
+                    resolved.pinned_code(),
+                    resolved.manifest,
+                )
+            }
+        };
+        let artifact_bytes = self
+            .artifacts
+            .get(&manifest.artifact)
+            .await
+            .map_err(map_repository)?;
+        Ok(LocalCodeResolution {
+            serving_revision,
+            pinned_code,
+            manifest,
+            artifact_bytes,
         })
     }
 
@@ -681,6 +764,24 @@ fn map_repository(error: ReleaseError) -> LocalReleaseError {
         | ReleaseError::ReleaseNotServable
         | ReleaseError::WorkspaceUnsupported
         | ReleaseError::Internal => LocalReleaseError::InvalidRequest,
+    }
+}
+
+fn map_development(error: runku_development::DevelopmentError) -> LocalReleaseError {
+    match error {
+        runku_development::DevelopmentError::WorkspaceNotFound
+        | runku_development::DevelopmentError::WorkspaceEmpty
+        | runku_development::DevelopmentError::RevisionNotFound => LocalReleaseError::NotFound,
+        runku_development::DevelopmentError::Conflict => LocalReleaseError::Conflict,
+        runku_development::DevelopmentError::Unavailable
+        | runku_development::DevelopmentError::ResultUncertain => LocalReleaseError::Unavailable,
+        runku_development::DevelopmentError::Corruption
+        | runku_development::DevelopmentError::InvalidSnapshot
+        | runku_development::DevelopmentError::InvalidRevision => LocalReleaseError::Corruption,
+        runku_development::DevelopmentError::InvalidInput
+        | runku_development::DevelopmentError::PolicyDenied
+        | runku_development::DevelopmentError::LimitExceeded
+        | runku_development::DevelopmentError::Unsupported => LocalReleaseError::InvalidRequest,
     }
 }
 

@@ -42,6 +42,15 @@ Remote log follow rechecks `logs:follow` during the single streaming connection,
 revocation or grant removal stops future records. Operator tokens never authorize Product
 invocation, and `rk_pub_*`/`rk_sec_*`/`rk_dev_*` never authorize management operations.
 
+Logical Data Admin uses independent `data:read` and `data:write` capabilities.
+`environments:manage` does not imply either capability, and Function `db:*` capabilities do not
+cross into Management. The server resolves an explicit code target to an integrity-checked
+immutable artifact before accepting table/index/value input, derives index and outbox mutations
+internally, and commits through the same Environment-scoped `LogicalStore` used by Functions.
+Write operation IDs are bound to requested and resolved target, schema digest, document intent,
+and OCC precondition, preventing replay against a changed alias or schema. Responses never expose
+physical SQL, paths, credentials, or another Environment's records.
+
 Archived logs retain the exact Project/Environment namespace in subjects, object paths, manifests,
 and queries. Serving and worker NATS identities are separate; remote NATS requires TLS and rejects
 URL credentials. S3 credentials are never accepted through CLI arguments. Immutable manifest

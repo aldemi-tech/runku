@@ -57,8 +57,11 @@ invitation operations, device sessions, and security audit in PostgreSQL. Applic
 development credentials cannot cross into it. The exposed source Management API covers
 bootstrap/login/session/invitation issue-reconcile-revoke and,
 when one Product Environment is attached, capability-scoped Workspace publication, Release and
-Channel lifecycle, status, and Operational Log snapshot/stream operations. It does not yet compose
-every distributed management domain named above.
+Channel lifecycle, status, effective Function/schema catalog reads, logical Data Admin
+query/get/insert/replace/delete, and Operational Log snapshot/stream operations. Data Admin shares
+the attached Environment's canonical `LogicalStore`, schema validation, index planner, atomic
+outbox, OCC, and operation journal; it has no private SQL or Function-capability bypass. It does not
+yet compose every distributed management domain named above.
 
 The attached Environment independently selects SQLite or an exact-scope PostgreSQL `LogicalStore`.
 The latter persists an atomic singleton Project/Environment binding before use and is checked by

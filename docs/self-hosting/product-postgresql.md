@@ -7,8 +7,8 @@ outbox, and scheduling semantics as local SQLite.
 
 ## Exact boundary
 
-`RUNKU_PLATFORM_DATABASE_URL` selects PostgreSQL for Function documents, indexes, idempotent
-Mutation operations/results, the transactional outbox, and scheduled invocations. It does not move every
+`RUNKU_PLATFORM_DATABASE_URL` selects PostgreSQL for Function and Management Data Admin documents,
+indexes, idempotent Mutation operations/results, the transactional outbox, and scheduled invocations. It does not move every
 Product repository out of `RUNKU_PRODUCT_ROOT`: Project/Environment identity, Releases, Channels,
 Workspaces, Application Clients/keys, Cron metadata, artifacts, file metadata, and the Operational
 Log hot tier still use their documented Product-root repositories. Application file bytes and
@@ -109,10 +109,14 @@ here.
 The explicit source campaign starts the pinned PostgreSQL 16 fixture, races two different scopes
 against one empty migrated database, proves that exactly one binding wins, executes a real
 authenticated Mutation through `LocalProcess`, reads the committed document from PostgreSQL,
-reopens the winning scope, and rejects the losing scope:
+reopens the winning scope, and rejects the losing scope. The focused console-core test additionally
+opens the Product adapter on an isolated PostgreSQL database and proves Data Admin insert/get/index
+query through the same logical contract:
 
 ```sh
 make product-postgres-check
+RUNKU_TEST_POSTGRES_URL='postgres://runku:runku_local_test_only@127.0.0.1:55432/runku_test' \
+  cargo test -p runku-server console_data_admin_uses_the_same_postgres_logical_store_contract --locked
 ```
 
 This is component and composition conformance. It does not establish a database vendor SLA,
