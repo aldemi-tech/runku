@@ -135,6 +135,8 @@ pub enum PlatformCapability {
     ReleasesPublish,
     /// Promote or roll back channels.
     ChannelsPromote,
+    /// Invoke deployed Functions through an independently authorized application identity.
+    FunctionsInvoke,
     /// Read logical application documents through the administrative boundary.
     DataRead,
     /// Insert, replace, or delete logical application documents.
@@ -178,6 +180,7 @@ impl PlatformCapability {
             Self::ReleasesRead => "releases:read",
             Self::ReleasesPublish => "releases:publish",
             Self::ChannelsPromote => "channels:promote",
+            Self::FunctionsInvoke => "functions:invoke",
             Self::DataRead => "data:read",
             Self::DataWrite => "data:write",
             Self::CredentialsRead => "credentials:read",
@@ -210,6 +213,7 @@ impl PlatformCapability {
             "releases:read" => Ok(Self::ReleasesRead),
             "releases:publish" => Ok(Self::ReleasesPublish),
             "channels:promote" => Ok(Self::ChannelsPromote),
+            "functions:invoke" => Ok(Self::FunctionsInvoke),
             "data:read" => Ok(Self::DataRead),
             "data:write" => Ok(Self::DataWrite),
             "credentials:read" => Ok(Self::CredentialsRead),
@@ -240,6 +244,7 @@ impl PlatformCapability {
             Self::ReleasesRead,
             Self::ReleasesPublish,
             Self::ChannelsPromote,
+            Self::FunctionsInvoke,
             Self::DataRead,
             Self::DataWrite,
             Self::CredentialsRead,
@@ -337,6 +342,7 @@ impl OperatorRole {
                 C::ReleasesRead,
                 C::ReleasesPublish,
                 C::ChannelsPromote,
+                C::FunctionsInvoke,
                 C::DataRead,
                 C::DataWrite,
                 C::CredentialsRead,
@@ -359,6 +365,7 @@ impl OperatorRole {
                 C::ReleasesRead,
                 C::ReleasesPublish,
                 C::ChannelsPromote,
+                C::FunctionsInvoke,
                 C::DataRead,
                 C::DataWrite,
                 C::CredentialsRead,
@@ -629,6 +636,20 @@ mod tests {
         assert_eq!(
             environment_manager.authorize(scope, PlatformCapability::StorageManage),
             Err(PlatformIdentityError::Forbidden)
+        );
+        assert_eq!(
+            environment_manager.authorize(scope, PlatformCapability::FunctionsInvoke),
+            Err(PlatformIdentityError::Forbidden)
+        );
+        assert!(
+            OperatorRole::Developer
+                .capabilities()
+                .contains(&PlatformCapability::FunctionsInvoke)
+        );
+        assert!(
+            !OperatorRole::Observer
+                .capabilities()
+                .contains(&PlatformCapability::FunctionsInvoke)
         );
 
         let reader = context([PlatformCapability::DataRead])?;

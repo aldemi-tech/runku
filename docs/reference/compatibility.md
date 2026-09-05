@@ -99,6 +99,12 @@ Management binaries that recognize the same catalog. The post-0.4.5 source line 
 durable disabled-definition intent. After that migration, an older binary must not serve the same
 Cron repository. Declaration editing and Scheduled retry/cancel remain outside this contract.
 
+The additive `functions:invoke` Platform capability is intended for an operator-facing Runner BFF.
+It authorizes only the human control-plane step and never authenticates Product code by itself: the
+canonical invocation still requires a separately scoped Application credential and any declared
+functional principal. Existing grants are not backfilled; operator/developer role expansion affects
+only newly issued or source-reconciled grants, while custom grants remain exact.
+
 The post-0.4.5 Code Target grammar adds the exact `environment:default` value. Older SDKs reject it
 locally and older gateways reject it during decoding; explicit `release:`, `channel:`, and
 `workspace:` targets are unchanged. A default target is serveable only with an exactly converged

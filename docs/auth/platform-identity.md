@@ -278,9 +278,9 @@ checks capabilities and scope, not the role label.
 
 | Role | Capabilities |
 |---|---|
-| `owner` | installation, Project, Environment, operator, Release, Channel, credential, Data Admin, log, usage, and backup management |
-| `operator` | Environment, Release, Channel, credential, Data Admin, log, usage, and backup operations; no installation/operator ownership |
-| `developer` | read/publish Releases, promote Channels, read/write Data Admin, read credential metadata, read/follow logs |
+| `owner` | installation, Project, Environment, operator, Release, Channel, Function invocation, credential, Data Admin, log, usage, and backup management |
+| `operator` | Environment, Release, Channel, Function invocation, credential, Data Admin, log, usage, and backup operations; no installation/operator ownership |
+| `developer` | read/publish Releases, promote Channels, invoke Functions, read/write Data Admin, read credential metadata, read/follow logs |
 | `observer` | read Releases, Data Admin, credential metadata, logs, and usage |
 
 An installation grant contains every Project and Environment. A Project grant contains that Project
@@ -289,15 +289,17 @@ Project or Environment grant never authorizes installation-wide work or a siblin
 
 Every lifecycle request reloads current grants. `releases:publish` protects publication and Release
 validation; `channels:promote` protects promotion and rollback; `releases:read` protects status;
-Function/schema catalogs; `data:read` protects logical reads; `data:write` protects logical writes;
+Function/schema catalogs; `functions:invoke` authorizes a human/BFF to attempt the canonical
+Product invocation path but never replaces its separately scoped Application identity;
+`data:read` protects logical reads; `data:write` protects logical writes;
 `logs:read` protects snapshots; and `logs:follow` protects streaming. The URL's Project and
 Environment are checked against both the grant and configured Product Environment before product
 state is accessed.
 
-The Data Admin capabilities are additive source-line capabilities. Existing 0.4.5 durable grants
-are not backfilled or reinterpreted and therefore gain no document access after upgrade. Reissue or
-replace a grant deliberately to opt in. Role expansion only affects newly issued/reconciled grants;
-custom grants retain exactly their stored capability set.
+The Data Admin and Function invocation capabilities are additive source-line capabilities. Existing
+0.4.5 durable grants are not backfilled or reinterpreted and therefore gain no document or Runner
+access after upgrade. Reissue or replace a grant deliberately to opt in. Role expansion only
+affects newly issued/reconciled grants; custom grants retain exactly their stored capability set.
 
 ## Configure external OIDC
 
