@@ -9,7 +9,12 @@ mod router;
 
 pub use oidc::JwtExternalIdentityAuthenticator;
 pub use product::{
-    ManagementCatalogQuery, ManagementDataDeleteRequest, ManagementDataDocument,
+    ManagementApplicationClient, ManagementApplicationClientCreate,
+    ManagementApplicationClientList, ManagementApplicationCredential,
+    ManagementApplicationCredentialCreate, ManagementApplicationCredentialLifecycle,
+    ManagementApplicationCredentialList, ManagementApplicationCredentialRotate,
+    ManagementCatalogQuery, ManagementCreatedApplicationClient,
+    ManagementCreatedApplicationCredential, ManagementDataDeleteRequest, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
     ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementFunctionEntry,
     ManagementFunctionPage, ManagementLogArchiveStatus, ManagementLogPage,

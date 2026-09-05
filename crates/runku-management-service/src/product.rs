@@ -41,6 +41,8 @@ pub enum ManagementProductError {
     Unavailable,
     /// Durable state failed an integrity check.
     Corruption,
+    /// A write may have committed but its result could not be confirmed.
+    ResultUncertain,
 }
 
 impl std::fmt::Display for ManagementProductError {
@@ -53,8 +55,165 @@ impl std::fmt::Display for ManagementProductError {
             Self::Validation => "product data validation failed",
             Self::Unavailable => "product dependency is unavailable",
             Self::Corruption => "product state is corrupt",
+            Self::ResultUncertain => "product operation result is uncertain",
         })
     }
+}
+
+/// One non-secret Application Client projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationClient {
+    /// Stable Application Client ID.
+    pub client_id: String,
+    /// Operator-facing name.
+    pub name: String,
+    /// `public` or `confidential`.
+    pub kind: String,
+    /// `active` or `disabled`.
+    pub status: String,
+    /// Ordered maximum scopes.
+    pub scopes: Vec<String>,
+    /// Creation time encoded as canonical decimal microseconds.
+    pub created_at_micros: String,
+}
+
+/// Bounded complete Application Client list for one Environment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationClientList {
+    /// Wire version.
+    pub version: u8,
+    /// Complete identity configuration revision.
+    pub configuration_revision: u64,
+    /// Stable-ID ordered clients.
+    pub clients: Vec<ManagementApplicationClient>,
+}
+
+/// Create request with a caller-generated stable ID for exact retry semantics.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationClientCreate {
+    /// Caller-generated canonical `app_*` ID.
+    pub client_id: String,
+    /// Operator-facing name.
+    pub name: String,
+    /// `public` or `confidential`.
+    pub kind: String,
+    /// Non-empty maximum scope set.
+    pub scopes: Vec<String>,
+    /// Caller-pinned canonical creation time in microseconds for exact replay.
+    pub created_at_micros: String,
+}
+
+/// Created or exactly replayed Application Client.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCreatedApplicationClient {
+    /// Wire version.
+    pub version: u8,
+    /// Complete identity configuration revision.
+    pub configuration_revision: u64,
+    /// Non-secret client metadata.
+    pub client: ManagementApplicationClient,
+    /// True when identical durable content already existed.
+    pub replayed: bool,
+}
+
+/// One non-secret Application Credential projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationCredential {
+    /// Stable credential ID.
+    pub credential_id: String,
+    /// Stable owning client.
+    pub client_id: String,
+    /// `publishable` or `secret`.
+    pub kind: String,
+    /// Operator-facing label.
+    pub label: String,
+    /// `active` or `revoked`.
+    pub status: String,
+    /// Ordered effective scopes.
+    pub scopes: Vec<String>,
+    /// Creation time encoded as canonical decimal microseconds.
+    pub created_at_micros: String,
+    /// Optional expiry encoded as canonical decimal microseconds.
+    pub expires_at_micros: Option<String>,
+    /// Optional revocation time encoded as canonical decimal microseconds.
+    pub revoked_at_micros: Option<String>,
+}
+
+/// Complete non-secret credential list for one client.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationCredentialList {
+    /// Wire version.
+    pub version: u8,
+    /// Complete identity configuration revision.
+    pub configuration_revision: u64,
+    /// Stable-ID ordered credentials; deleted tombstones are excluded.
+    pub credentials: Vec<ManagementApplicationCredential>,
+}
+
+/// Credential creation request with explicit non-retry semantics for confidential material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationCredentialCreate {
+    /// Caller-generated canonical `crd_*` ID.
+    pub credential_id: String,
+    /// Operator-facing label.
+    pub label: String,
+    /// Non-empty effective scope set.
+    pub scopes: Vec<String>,
+    /// Optional expiry encoded as canonical decimal microseconds.
+    pub expires_at_micros: Option<String>,
+    /// Caller-pinned canonical creation time in microseconds.
+    pub created_at_micros: String,
+}
+
+/// Credential rotation request; the source remains unchanged.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationCredentialRotate {
+    /// Caller-generated replacement `crd_*` ID.
+    pub replacement_credential_id: String,
+    /// Operator-facing replacement label.
+    pub label: String,
+    /// Optional replacement expiry encoded as canonical decimal microseconds.
+    pub expires_at_micros: Option<String>,
+    /// Caller-pinned canonical replacement creation time in microseconds.
+    pub created_at_micros: String,
+}
+
+/// Newly created material. Secret keys appear only on the successful creation response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCreatedApplicationCredential {
+    /// Complete identity configuration revision after creation.
+    pub configuration_revision: u64,
+    /// Non-secret durable metadata.
+    pub credential: ManagementApplicationCredential,
+    /// External publishable or confidential key material.
+    pub key: String,
+    /// True only for deterministically re-derivable publishable keys.
+    pub recoverable: bool,
+    /// True only when confidential material is being shown for the first and only time.
+    pub secret_shown_once: bool,
+}
+
+/// Idempotent irreversible credential lifecycle result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementApplicationCredentialLifecycle {
+    /// Complete identity configuration revision.
+    pub configuration_revision: u64,
+    /// Operated credential ID.
+    pub credential_id: String,
+    /// `revoked` or `deleted`.
+    pub status: String,
+    /// True when the target state was already durable.
+    pub replayed: bool,
 }
 
 impl std::error::Error for ManagementProductError {}
@@ -414,6 +573,84 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
     /// dependency failure rather than only Platform Identity health.
     async fn health(&self) -> Result<(), ManagementProductError> {
         Ok(())
+    }
+
+    /// Lists non-secret Application Clients.
+    async fn application_clients(
+        &self,
+    ) -> Result<ManagementApplicationClientList, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Creates or exactly replays one Application Client.
+    async fn application_client_create(
+        &self,
+        request: &ManagementApplicationClientCreate,
+    ) -> Result<ManagementCreatedApplicationClient, ManagementProductError> {
+        let _ = request;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Lists non-secret credentials for one exact client.
+    async fn application_credentials(
+        &self,
+        client_id: &str,
+    ) -> Result<ManagementApplicationCredentialList, ManagementProductError> {
+        let _ = client_id;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Creates one independently revocable Application Credential.
+    async fn application_credential_create(
+        &self,
+        client_id: &str,
+        request: &ManagementApplicationCredentialCreate,
+    ) -> Result<ManagementCreatedApplicationCredential, ManagementProductError> {
+        let _ = (client_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Re-derives one non-secret publishable key after checking its durable digest.
+    async fn application_credential_reveal(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+    ) -> Result<ManagementCreatedApplicationCredential, ManagementProductError> {
+        let _ = (client_id, credential_id);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Creates one replacement with the source credential's exact scopes.
+    async fn application_credential_rotate(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+        request: &ManagementApplicationCredentialRotate,
+    ) -> Result<ManagementCreatedApplicationCredential, ManagementProductError> {
+        let _ = (client_id, credential_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Irreversibly revokes one credential idempotently.
+    async fn application_credential_revoke(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+        revoked_at_micros: i64,
+    ) -> Result<ManagementApplicationCredentialLifecycle, ManagementProductError> {
+        let _ = (client_id, credential_id, revoked_at_micros);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Tombstones one already-revoked credential idempotently.
+    async fn application_credential_delete(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+        deleted_at_micros: i64,
+    ) -> Result<ManagementApplicationCredentialLifecycle, ManagementProductError> {
+        let _ = (client_id, credential_id, deleted_at_micros);
+        Err(ManagementProductError::NotFound)
     }
 
     /// Publishes one canonical package request.

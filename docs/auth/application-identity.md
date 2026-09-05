@@ -83,3 +83,29 @@ Secret material is revealed once and belongs in a secret manager. Lost secret ke
 not recovered. For exposure, scope by client/credential/Environment, rotate/revoke, inspect
 correlated logs, rotate downstream secrets when needed, and preserve evidence. Log pruning does not
 revoke credentials or erase exported/backed-up copies.
+
+## Authenticated Management API
+
+The Management API exposes the same durable Application Client and credential repository used by
+the Product gateway. Every route is scoped by the exact Project and Environment in its path and
+requires an `rk_at_*` operator session; Application Keys never authorize these routes.
+
+| Method and path suffix | Capability | Semantics |
+|---|---|---|
+| `GET /application-clients` | `credentials:read` | Complete non-secret client list |
+| `POST /application-clients` | `credentials:manage` | Create or exactly replay a caller-ID-pinned client |
+| `GET /application-clients/{client}/credentials` | `credentials:read` | Complete non-secret credential list |
+| `POST /application-clients/{client}/credentials` | `credentials:manage` | Create a caller-ID-pinned credential |
+| `POST .../{credential}/reveal` | `credentials:read` | Re-derive only a publishable key after digest verification |
+| `POST .../{credential}/rotate` | `credentials:manage` | Create a replacement while preserving the source |
+| `POST .../{credential}/revoke` | `credentials:manage` | Idempotently and irreversibly revoke |
+| `DELETE .../{credential}` | `credentials:manage` | Tombstone an already-revoked credential |
+
+All suffixes are below
+`/v1/projects/{projectId}/environments/{environmentId}/application-clients`. Creation requests pin
+canonical IDs and timestamps so clients can distinguish exact replay from conflicting reuse.
+Public-key creation is repeatable because the key is deterministically re-derived and verified.
+Confidential-key creation and rotation are deliberately not retried after an ambiguous transport
+failure: the server never stores plaintext and a second random value conflicts with the durable
+digest. Use a new replacement ID or rotate after inspecting the non-secret list. Responses carrying
+key material and every error response are `Cache-Control: no-store`.

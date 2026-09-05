@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_document_schema};
 use runku_core::{
-    ChannelName, CodeTarget, DocumentId, EnvironmentScope, FunctionName, OperationId,
-    OutboxEventId, ReleaseId, TableId,
+    ApplicationClientId, ChannelName, CodeTarget, CredentialId, DocumentId, EnvironmentScope,
+    FunctionName, OperationId, OutboxEventId, ReleaseId, TableId,
 };
 use runku_data::{
     CommitBatch, DocumentMutation, ExpectedRevision, IndexRange, LogicalStore, OutboxAppend,
@@ -23,13 +23,23 @@ use runku_development::DevelopmentActor;
 use runku_execution::{document_write_set_payload, plan_document_index_mutations};
 use runku_file_storage::{FileObjectStore, FileStorageLimits, FileUsageSink};
 use runku_gateway::CorsOrigin;
+use runku_identity::{
+    ApplicationClient, ApplicationClientName, ApplicationClientStatus, ApplicationScope,
+    ClientKind, CredentialKind, CredentialLabel, CredentialLifecycleResult, CredentialStatus,
+};
 use runku_local::{
-    LocalChannelExpectation, LocalCodeResolution, LocalLogError, LocalLogManager, LocalProcess,
+    LocalChannelExpectation, LocalCodeResolution, LocalCreatedCredential, LocalCredentialMetadata,
+    LocalIdentityError, LocalIdentityManager, LocalLogError, LocalLogManager, LocalProcess,
     LocalProcessConfig, LocalPublishError, LocalReleaseError, LocalReleaseManager,
     LocalReleaseOutcome, LocalReleaseStatusReport, load_local, publish_local_if_head,
 };
 use runku_management_service::{
-    ManagementCatalogQuery, ManagementDataDeleteRequest, ManagementDataDocument,
+    ManagementApplicationClient, ManagementApplicationClientCreate,
+    ManagementApplicationClientList, ManagementApplicationCredential,
+    ManagementApplicationCredentialCreate, ManagementApplicationCredentialLifecycle,
+    ManagementApplicationCredentialList, ManagementApplicationCredentialRotate,
+    ManagementCatalogQuery, ManagementCreatedApplicationClient,
+    ManagementCreatedApplicationCredential, ManagementDataDeleteRequest, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
     ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementFunctionEntry,
     ManagementFunctionPage, ManagementLogArchiveStatus, ManagementLogPage,
@@ -61,6 +71,7 @@ pub struct ProductAdapter {
     process_config: LocalProcessConfig,
     process: Mutex<Option<LocalProcess>>,
     data_store: Arc<dyn LogicalStore>,
+    identity: LocalIdentityManager,
 }
 
 /// Validated server-owned configuration for one Product adapter.
@@ -116,6 +127,9 @@ impl ProductAdapter {
                     .map_err(map_product_database)?,
             ),
         };
+        let identity = LocalIdentityManager::open(&root)
+            .await
+            .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
         let adapter = Self {
             root,
             scope: state.scope(),
@@ -133,6 +147,7 @@ impl ProductAdapter {
             },
             process: Mutex::new(None),
             data_store,
+            identity,
         };
         let releases = LocalReleaseManager::open(&adapter.root)
             .await
@@ -190,6 +205,64 @@ impl ProductAdapter {
             .map_err(map_release)?;
         let resolution = manager.resolve_code(&target).await.map_err(map_release)?;
         decode_effective_catalog(&target, resolution)
+    }
+
+    async fn created_application_credential(
+        &self,
+        created: LocalCreatedCredential,
+        creation: bool,
+    ) -> Result<ManagementCreatedApplicationCredential, ManagementProductError> {
+        let recoverable = created.credential.kind == CredentialKind::Publishable;
+        let secret_shown_once = creation && created.credential.kind == CredentialKind::Secret;
+        let key = created.key.expose().to_owned();
+        Ok(ManagementCreatedApplicationCredential {
+            configuration_revision: self
+                .identity
+                .configuration_revision()
+                .await
+                .map_err(map_identity)?,
+            credential: application_credential(&created.credential),
+            key,
+            recoverable,
+            secret_shown_once,
+        })
+    }
+
+    async fn require_credential_owner(
+        &self,
+        client_id: ApplicationClientId,
+        credential_id: CredentialId,
+    ) -> Result<(), ManagementProductError> {
+        if self
+            .identity
+            .list_credentials(client_id)
+            .await
+            .map_err(map_identity)?
+            .iter()
+            .any(|credential| credential.id == credential_id)
+        {
+            Ok(())
+        } else {
+            Err(ManagementProductError::NotFound)
+        }
+    }
+
+    async fn credential_lifecycle(
+        &self,
+        credential_id: CredentialId,
+        status: &'static str,
+        result: CredentialLifecycleResult,
+    ) -> Result<ManagementApplicationCredentialLifecycle, ManagementProductError> {
+        Ok(ManagementApplicationCredentialLifecycle {
+            configuration_revision: self
+                .identity
+                .configuration_revision()
+                .await
+                .map_err(map_identity)?,
+            credential_id: credential_id.to_string(),
+            status: status.to_owned(),
+            replayed: result == CredentialLifecycleResult::Replayed,
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -485,7 +558,226 @@ impl ManagementProduct for ProductAdapter {
     }
 
     async fn health(&self) -> Result<(), ManagementProductError> {
-        self.data_store.health().await.map_err(map_store_health)
+        self.data_store.health().await.map_err(map_store_health)?;
+        self.identity
+            .configuration_revision()
+            .await
+            .map(|_| ())
+            .map_err(map_identity)
+    }
+
+    async fn application_clients(
+        &self,
+    ) -> Result<ManagementApplicationClientList, ManagementProductError> {
+        let clients = self
+            .identity
+            .list_clients()
+            .await
+            .map_err(map_identity)?
+            .iter()
+            .map(application_client)
+            .collect();
+        Ok(ManagementApplicationClientList {
+            version: 1,
+            configuration_revision: self
+                .identity
+                .configuration_revision()
+                .await
+                .map_err(map_identity)?,
+            clients,
+        })
+    }
+
+    async fn application_client_create(
+        &self,
+        request: &ManagementApplicationClientCreate,
+    ) -> Result<ManagementCreatedApplicationClient, ManagementProductError> {
+        let id = request
+            .client_id
+            .parse::<ApplicationClientId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let name = request
+            .name
+            .parse::<ApplicationClientName>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let kind = parse_client_kind(&request.kind)?;
+        let scopes = parse_application_scopes(&request.scopes)?;
+        let created_at = parse_timestamp(&request.created_at_micros)?;
+        let (client, replayed) = self
+            .identity
+            .create_client_with_replay(id, name, kind, scopes, created_at)
+            .await
+            .map_err(map_identity)?;
+        Ok(ManagementCreatedApplicationClient {
+            version: 1,
+            configuration_revision: self
+                .identity
+                .configuration_revision()
+                .await
+                .map_err(map_identity)?,
+            client: application_client(&client),
+            replayed,
+        })
+    }
+
+    async fn application_credentials(
+        &self,
+        client_id: &str,
+    ) -> Result<ManagementApplicationCredentialList, ManagementProductError> {
+        let client_id = client_id
+            .parse::<ApplicationClientId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let credentials = self
+            .identity
+            .list_credentials(client_id)
+            .await
+            .map_err(map_identity)?
+            .iter()
+            .map(application_credential)
+            .collect();
+        Ok(ManagementApplicationCredentialList {
+            version: 1,
+            configuration_revision: self
+                .identity
+                .configuration_revision()
+                .await
+                .map_err(map_identity)?,
+            credentials,
+        })
+    }
+
+    async fn application_credential_create(
+        &self,
+        client_id: &str,
+        request: &ManagementApplicationCredentialCreate,
+    ) -> Result<ManagementCreatedApplicationCredential, ManagementProductError> {
+        let client_id = client_id
+            .parse::<ApplicationClientId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let credential_id = request
+            .credential_id
+            .parse::<CredentialId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let label = request
+            .label
+            .parse::<CredentialLabel>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let scopes = parse_application_scopes(&request.scopes)?;
+        let created_at = parse_timestamp(&request.created_at_micros)?;
+        let expires_at = request
+            .expires_at_micros
+            .as_deref()
+            .map(parse_timestamp)
+            .transpose()?;
+        let created = self
+            .identity
+            .create_credential(
+                credential_id,
+                client_id,
+                label,
+                scopes,
+                created_at,
+                expires_at,
+            )
+            .await
+            .map_err(map_identity)?;
+        self.created_application_credential(created, true).await
+    }
+
+    async fn application_credential_reveal(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+    ) -> Result<ManagementCreatedApplicationCredential, ManagementProductError> {
+        let client_id = client_id
+            .parse::<ApplicationClientId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let credential_id = credential_id
+            .parse::<CredentialId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let created = self
+            .identity
+            .reveal_publishable(client_id, credential_id)
+            .await
+            .map_err(map_identity)?;
+        self.created_application_credential(created, false).await
+    }
+
+    async fn application_credential_rotate(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+        request: &ManagementApplicationCredentialRotate,
+    ) -> Result<ManagementCreatedApplicationCredential, ManagementProductError> {
+        let client_id = client_id
+            .parse::<ApplicationClientId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let credential_id = credential_id
+            .parse::<CredentialId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let replacement_id = request
+            .replacement_credential_id
+            .parse::<CredentialId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let label = request
+            .label
+            .parse::<CredentialLabel>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let created_at = parse_timestamp(&request.created_at_micros)?;
+        let expires_at = request
+            .expires_at_micros
+            .as_deref()
+            .map(parse_timestamp)
+            .transpose()?;
+        let created = self
+            .identity
+            .rotate_credential(
+                client_id,
+                credential_id,
+                replacement_id,
+                label,
+                created_at,
+                expires_at,
+            )
+            .await
+            .map_err(map_identity)?;
+        self.created_application_credential(created, true).await
+    }
+
+    async fn application_credential_revoke(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+        revoked_at_micros: i64,
+    ) -> Result<ManagementApplicationCredentialLifecycle, ManagementProductError> {
+        let (client_id, credential_id) = parse_credential_path(client_id, credential_id)?;
+        self.require_credential_owner(client_id, credential_id)
+            .await?;
+        let result = self
+            .identity
+            .revoke_credential(credential_id, TimestampMicros::new(revoked_at_micros))
+            .await
+            .map_err(map_identity)?;
+        self.credential_lifecycle(credential_id, "revoked", result)
+            .await
+    }
+
+    async fn application_credential_delete(
+        &self,
+        client_id: &str,
+        credential_id: &str,
+        deleted_at_micros: i64,
+    ) -> Result<ManagementApplicationCredentialLifecycle, ManagementProductError> {
+        let (client_id, credential_id) = parse_credential_path(client_id, credential_id)?;
+        self.require_credential_owner(client_id, credential_id)
+            .await?;
+        let result = self
+            .identity
+            .delete_credential(credential_id, TimestampMicros::new(deleted_at_micros))
+            .await
+            .map_err(map_identity)?;
+        self.credential_lifecycle(credential_id, "deleted", result)
+            .await
     }
 
     async fn publish(
@@ -937,6 +1229,101 @@ impl ManagementProduct for ProductAdapter {
     }
 }
 
+fn application_client(client: &ApplicationClient) -> ManagementApplicationClient {
+    ManagementApplicationClient {
+        client_id: client.id.to_string(),
+        name: client.name.to_string(),
+        kind: match client.kind {
+            ClientKind::Public => "public",
+            ClientKind::Confidential => "confidential",
+        }
+        .to_owned(),
+        status: match client.status {
+            ApplicationClientStatus::Active => "active",
+            ApplicationClientStatus::Disabled => "disabled",
+        }
+        .to_owned(),
+        scopes: client
+            .scope_ceiling
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        created_at_micros: client.created_at.get().to_string(),
+    }
+}
+
+fn application_credential(credential: &LocalCredentialMetadata) -> ManagementApplicationCredential {
+    ManagementApplicationCredential {
+        credential_id: credential.id.to_string(),
+        client_id: credential.client_id.to_string(),
+        kind: match credential.kind {
+            CredentialKind::Publishable => "publishable",
+            CredentialKind::Secret => "secret",
+        }
+        .to_owned(),
+        label: credential.label.to_string(),
+        status: match credential.status {
+            CredentialStatus::Active => "active",
+            CredentialStatus::Revoked => "revoked",
+            CredentialStatus::Deleted => "deleted",
+        }
+        .to_owned(),
+        scopes: credential.scopes.iter().map(ToString::to_string).collect(),
+        created_at_micros: credential.created_at.get().to_string(),
+        expires_at_micros: credential.expires_at.map(|value| value.get().to_string()),
+        revoked_at_micros: credential.revoked_at.map(|value| value.get().to_string()),
+    }
+}
+
+fn parse_client_kind(value: &str) -> Result<ClientKind, ManagementProductError> {
+    match value {
+        "public" => Ok(ClientKind::Public),
+        "confidential" => Ok(ClientKind::Confidential),
+        _ => Err(ManagementProductError::Invalid),
+    }
+}
+
+fn parse_application_scopes(
+    values: &[String],
+) -> Result<BTreeSet<ApplicationScope>, ManagementProductError> {
+    let scopes = values
+        .iter()
+        .map(|value| {
+            value
+                .parse::<ApplicationScope>()
+                .map_err(|_| ManagementProductError::Invalid)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if scopes.len() != values.len() {
+        return Err(ManagementProductError::Invalid);
+    }
+    Ok(scopes)
+}
+
+fn parse_timestamp(value: &str) -> Result<TimestampMicros, ManagementProductError> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| ManagementProductError::Invalid)?;
+    if parsed < 0 || parsed.to_string() != value {
+        return Err(ManagementProductError::Invalid);
+    }
+    Ok(TimestampMicros::new(parsed))
+}
+
+fn parse_credential_path(
+    client_id: &str,
+    credential_id: &str,
+) -> Result<(ApplicationClientId, CredentialId), ManagementProductError> {
+    Ok((
+        client_id
+            .parse::<ApplicationClientId>()
+            .map_err(|_| ManagementProductError::Invalid)?,
+        credential_id
+            .parse::<CredentialId>()
+            .map_err(|_| ManagementProductError::Invalid)?,
+    ))
+}
+
 fn outcome(value: LocalReleaseOutcome) -> ManagementReleaseOutcome {
     ManagementReleaseOutcome {
         release_id: value.release_id.to_string(),
@@ -1280,6 +1667,21 @@ fn map_store_health(error: StoreError) -> ManagementProductError {
     }
 }
 
+const fn map_identity(error: LocalIdentityError) -> ManagementProductError {
+    match error {
+        LocalIdentityError::InvalidInput | LocalIdentityError::EntropyUnavailable => {
+            ManagementProductError::Invalid
+        }
+        LocalIdentityError::NotFound => ManagementProductError::NotFound,
+        LocalIdentityError::Conflict => ManagementProductError::Conflict,
+        LocalIdentityError::Unavailable => ManagementProductError::Unavailable,
+        LocalIdentityError::ResultUncertain => ManagementProductError::ResultUncertain,
+        LocalIdentityError::InvalidState | LocalIdentityError::Corruption => {
+            ManagementProductError::Corruption
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{net::SocketAddr, path::Path, time::Duration};
@@ -1425,6 +1827,128 @@ export const summary = query({
             .execute(&mut connection)
             .await?;
         connection.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_application_identity_preserves_one_time_secret_and_exact_ownership()
+    -> TestResult {
+        let directory = tempfile::tempdir()?;
+        adapter(directory.path()).await?;
+        let product = Box::pin(open_adapter(directory.path())).await?;
+        let public_client = ApplicationClientId::generate();
+        let public_request = ManagementApplicationClientCreate {
+            client_id: public_client.to_string(),
+            name: "browser".to_owned(),
+            kind: "public".to_owned(),
+            scopes: vec!["functions:invoke".to_owned()],
+            created_at_micros: "1800000000000010".to_owned(),
+        };
+        let first_client = product.application_client_create(&public_request).await?;
+        assert!(!first_client.replayed);
+        assert!(
+            product
+                .application_client_create(&public_request)
+                .await?
+                .replayed
+        );
+
+        let public_credential = CredentialId::generate();
+        let created = product
+            .application_credential_create(
+                &public_client.to_string(),
+                &ManagementApplicationCredentialCreate {
+                    credential_id: public_credential.to_string(),
+                    label: "web".to_owned(),
+                    scopes: vec!["functions:invoke".to_owned()],
+                    expires_at_micros: None,
+                    created_at_micros: "1800000000000020".to_owned(),
+                },
+            )
+            .await?;
+        assert!(created.key.starts_with("rk_pub_v1_"));
+        assert!(created.recoverable);
+        assert!(!created.secret_shown_once);
+        assert_eq!(
+            product
+                .application_credential_reveal(
+                    &public_client.to_string(),
+                    &public_credential.to_string(),
+                )
+                .await?
+                .key,
+            created.key
+        );
+
+        let confidential_client = ApplicationClientId::generate();
+        product
+            .application_client_create(&ManagementApplicationClientCreate {
+                client_id: confidential_client.to_string(),
+                name: "worker".to_owned(),
+                kind: "confidential".to_owned(),
+                scopes: vec!["functions:invoke".to_owned()],
+                created_at_micros: "1800000000000030".to_owned(),
+            })
+            .await?;
+        let secret_credential = CredentialId::generate();
+        let secret = product
+            .application_credential_create(
+                &confidential_client.to_string(),
+                &ManagementApplicationCredentialCreate {
+                    credential_id: secret_credential.to_string(),
+                    label: "production".to_owned(),
+                    scopes: vec!["functions:invoke".to_owned()],
+                    expires_at_micros: None,
+                    created_at_micros: "1800000000000040".to_owned(),
+                },
+            )
+            .await?;
+        assert!(secret.key.starts_with("rk_sec_v1_"));
+        assert!(!secret.recoverable);
+        assert!(secret.secret_shown_once);
+        assert_eq!(
+            product
+                .application_credential_reveal(
+                    &confidential_client.to_string(),
+                    &secret_credential.to_string(),
+                )
+                .await,
+            Err(ManagementProductError::Invalid)
+        );
+        assert_eq!(
+            product
+                .application_credential_revoke(
+                    &public_client.to_string(),
+                    &secret_credential.to_string(),
+                    1_800_000_000_000_050,
+                )
+                .await,
+            Err(ManagementProductError::NotFound)
+        );
+        let revoked = product
+            .application_credential_revoke(
+                &confidential_client.to_string(),
+                &secret_credential.to_string(),
+                1_800_000_000_000_050,
+            )
+            .await?;
+        assert_eq!(revoked.status, "revoked");
+        assert!(!revoked.replayed);
+        let deleted = product
+            .application_credential_delete(
+                &confidential_client.to_string(),
+                &secret_credential.to_string(),
+                1_800_000_000_000_060,
+            )
+            .await?;
+        assert_eq!(deleted.status, "deleted");
+        assert_eq!(
+            product
+                .application_credentials(&confidential_client.to_string())
+                .await?
+                .credentials,
+            Vec::new()
+        );
         Ok(())
     }
 

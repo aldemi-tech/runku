@@ -37,9 +37,11 @@ use tokio::{
 use zeroize::Zeroizing;
 
 use crate::{
-    ManagementCatalogQuery, ManagementDataDeleteRequest, ManagementDataInsertRequest,
-    ManagementDataQuery, ManagementDataReplaceRequest, ManagementLogPruneRequest,
-    ManagementLogQuery, ManagementProduct, ManagementProductError, OidcClientConfiguration,
+    ManagementApplicationClientCreate, ManagementApplicationCredentialCreate,
+    ManagementApplicationCredentialRotate, ManagementCatalogQuery, ManagementDataDeleteRequest,
+    ManagementDataInsertRequest, ManagementDataQuery, ManagementDataReplaceRequest,
+    ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
+    OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -226,6 +228,30 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/status",
             get(product_status),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/application-clients",
+            get(product_application_clients).post(product_application_client_create),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/application-clients/{client_id}/credentials",
+            get(product_application_credentials).post(product_application_credential_create),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/application-clients/{client_id}/credentials/{credential_id}/reveal",
+            post(product_application_credential_reveal),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/application-clients/{client_id}/credentials/{credential_id}/rotate",
+            post(product_application_credential_rotate),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/application-clients/{client_id}/credentials/{credential_id}/revoke",
+            post(product_application_credential_revoke),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/application-clients/{client_id}/credentials/{credential_id}",
+            delete(product_application_credential_delete),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/functions",
@@ -559,6 +585,248 @@ async fn product_status(
     };
     match product.status().await {
         Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_application_clients(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CredentialsRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.application_clients().await {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_application_client_create(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementApplicationClientCreate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CredentialsManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.application_client_create(&request).await {
+        Ok(result) => json(StatusCode::CREATED, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_application_credentials(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, client)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CredentialsRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.application_credentials(&client).await {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_application_credential_create(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, client)): Path<(String, String, String)>,
+    Json(request): Json<ManagementApplicationCredentialCreate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CredentialsManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .application_credential_create(&client, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::CREATED, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_application_credential_reveal(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, client, credential)): Path<(String, String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CredentialsRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .application_credential_reveal(&client, &credential)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_application_credential_rotate(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, client, credential)): Path<(String, String, String, String)>,
+    Json(request): Json<ManagementApplicationCredentialRotate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::CredentialsManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .application_credential_rotate(&client, &credential, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::CREATED, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_application_credential_revoke(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, client, credential)): Path<(String, String, String, String)>,
+) -> Response {
+    product_application_credential_lifecycle(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        &client,
+        &credential,
+        false,
+    )
+    .await
+}
+
+async fn product_application_credential_delete(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, client, credential)): Path<(String, String, String, String)>,
+) -> Response {
+    product_application_credential_lifecycle(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        &client,
+        &credential,
+        true,
+    )
+    .await
+}
+
+async fn product_application_credential_lifecycle(
+    state: &HttpState,
+    headers: &HeaderMap,
+    project: &str,
+    environment: &str,
+    client: &str,
+    credential: &str,
+    delete: bool,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        state,
+        headers,
+        project,
+        environment,
+        PlatformCapability::CredentialsManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let timestamp = now().get();
+    let result = if delete {
+        product
+            .application_credential_delete(client, credential, timestamp)
+            .await
+    } else {
+        product
+            .application_credential_revoke(client, credential, timestamp)
+            .await
+    };
+    match result {
+        Ok(result) => json(StatusCode::OK, &result, true),
         Err(error) => product_failure(error),
     }
 }
@@ -1006,6 +1274,9 @@ fn product_failure(error: ManagementProductError) -> Response {
         }
         ManagementProductError::Corruption => {
             (StatusCode::INTERNAL_SERVER_ERROR, "PRODUCT_CORRUPT")
+        }
+        ManagementProductError::ResultUncertain => {
+            (StatusCode::GATEWAY_TIMEOUT, "PRODUCT_RESULT_UNCERTAIN")
         }
     };
     let mut response = json(status, &serde_json::json!({"code": code}), false);

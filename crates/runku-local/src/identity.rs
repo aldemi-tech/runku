@@ -210,6 +210,24 @@ impl LocalIdentityManager {
         scope_ceiling: BTreeSet<ApplicationScope>,
         created_at: TimestampMicros,
     ) -> Result<ApplicationClient, LocalIdentityError> {
+        self.create_client_with_replay(id, name, kind, scope_ceiling, created_at)
+            .await
+            .map(|(client, _)| client)
+    }
+
+    /// Creates one logical caller and reports whether exact durable content was replayed.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid/duplicate data, repository failures, or conflicting content.
+    pub async fn create_client_with_replay(
+        &self,
+        id: ApplicationClientId,
+        name: ApplicationClientName,
+        kind: ClientKind,
+        scope_ceiling: BTreeSet<ApplicationScope>,
+        created_at: TimestampMicros,
+    ) -> Result<(ApplicationClient, bool), LocalIdentityError> {
         let client = ApplicationClient {
             scope: self.state.scope(),
             id,
@@ -219,15 +237,12 @@ impl LocalIdentityManager {
             scope_ceiling,
             created_at,
         };
-        if !self
+        let created = self
             .repository
             .create_client(&client)
             .await
-            .map_err(map_identity)?
-        {
-            return Ok(client);
-        }
-        Ok(client)
+            .map_err(map_identity)?;
+        Ok((client, !created))
     }
 
     /// Lists every logical caller in stable identifier order.
