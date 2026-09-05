@@ -515,6 +515,8 @@ plus Runku's stricter verifier rules above.
 | `PUT /v1/projects/{project}/environments/{environment}/channels/{channel}` | `channels:promote` | promotes through exact optional CAS |
 | `POST /v1/projects/{project}/environments/{environment}/channels/{channel}/rollback` | `channels:promote` | rolls back through required exact-current CAS |
 | `GET /v1/projects/{project}/environments/{environment}/status` | `releases:read` | reads a coherent Release/Channel snapshot |
+| `GET .../environments/{environment}` and `GET .../environment-operations/{opn_*}` | `environments:read` | reads portable desired/observed configuration or reconciles an uncertain lifecycle operation |
+| `POST` or `PUT .../environments/{environment}` | `environments:manage` + `Idempotency-Key: opn_*` | creates the exact configured scope or replaces its complete configuration using CAS |
 | `GET .../serving-policy` and `GET .../serving-policy-operations/{opn_*}` | `releases:read` | reads desired/observed rollout state or reconciles an uncertain operation |
 | `PUT .../serving-policy` | `channels:promote` + `Idempotency-Key: opn_*` | replaces the complete compatible desired policy using exact CAS; remains pending until serving-path materialization |
 | `GET .../application-clients` and credential lists/reveal | `credentials:read` | reads non-secret identity metadata or re-derives a verified publishable key |

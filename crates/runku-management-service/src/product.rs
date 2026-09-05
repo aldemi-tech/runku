@@ -299,6 +299,110 @@ pub struct ManagementServingOperation {
     pub completed_at_micros: String,
 }
 
+/// Complete portable Product Environment configuration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementEnvironmentConfiguration {
+    /// Human-readable display name.
+    pub name: String,
+    /// Project-unique DNS-label slug.
+    pub slug: String,
+    /// Logical region, never a provider placement identifier.
+    pub region: String,
+    /// `development`, `preview`, `staging`, or `production`.
+    pub purpose: String,
+    /// `open`, `protected`, or `production`.
+    pub protection: String,
+    /// `local`, `managed`, or `selfHosted`.
+    pub location: String,
+    /// Whether Workspace targets are allowed by Product policy.
+    pub workspace_targets_enabled: bool,
+}
+
+/// Initial Environment creation request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementEnvironmentCreate {
+    /// Complete initial configuration.
+    pub configuration: ManagementEnvironmentConfiguration,
+    /// Caller-pinned canonical decimal creation timestamp for exact replay.
+    pub created_at_micros: String,
+}
+
+/// Complete Environment configuration replacement.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementEnvironmentUpdate {
+    /// Required positive current configuration revision.
+    pub expected_revision: u64,
+    /// Complete replacement configuration.
+    pub configuration: ManagementEnvironmentConfiguration,
+    /// Caller-pinned canonical decimal update timestamp for exact replay.
+    pub updated_at_micros: String,
+}
+
+/// One exact portable Product Environment projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementEnvironment {
+    /// Wire version.
+    pub version: u8,
+    /// Exact Project ID.
+    pub project_id: String,
+    /// Exact Environment ID.
+    pub environment_id: String,
+    /// Complete desired configuration.
+    pub configuration: ManagementEnvironmentConfiguration,
+    /// Positive desired-configuration revision.
+    pub configuration_revision: u64,
+    /// `active` or `archived`.
+    pub desired_state: String,
+    /// `pending`, `ready`, or `failed`.
+    pub observed_state: String,
+    /// Exact observed configuration revision, when materialized.
+    pub observed_configuration_revision: Option<u64>,
+    /// Whether the exact desired revision is observed ready.
+    pub converged: bool,
+    /// Canonical decimal creation timestamp.
+    pub created_at_micros: String,
+    /// Canonical decimal desired-update timestamp.
+    pub updated_at_micros: String,
+    /// Canonical decimal materializer observation timestamp.
+    pub observed_at_micros: Option<String>,
+}
+
+/// Result of one idempotent Environment mutation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementEnvironmentResult {
+    /// Durable Environment after the command.
+    pub environment: ManagementEnvironment,
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// Whether exact durable operation content was replayed.
+    pub replayed: bool,
+}
+
+/// Non-secret Environment operation used to reconcile an uncertain result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementEnvironmentOperation {
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// `create`, `update`, or `materialize`.
+    pub kind: String,
+    /// Desired configuration revision produced or observed.
+    pub configuration_revision: u64,
+    /// `active` or `archived`.
+    pub desired_state: String,
+    /// `pending`, `ready`, or `failed`.
+    pub observed_state: String,
+    /// Exact observed configuration revision, when present.
+    pub observed_configuration_revision: Option<u64>,
+    /// Canonical decimal completion timestamp.
+    pub completed_at_micros: String,
+}
+
 /// One bounded logical bucket CORS rule.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -898,6 +1002,40 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
     /// dependency failure rather than only Platform Identity health.
     async fn health(&self) -> Result<(), ManagementProductError> {
         Ok(())
+    }
+
+    /// Gets the exact Product Environment owned by this adapter.
+    async fn environment(&self) -> Result<ManagementEnvironment, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Creates the exact Product Environment idempotently.
+    async fn environment_create(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentCreate,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let _ = (operation_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Replaces the exact Product Environment configuration using CAS.
+    async fn environment_update(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentUpdate,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let _ = (operation_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Looks up one exact-scope Environment operation after uncertainty.
+    async fn environment_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementEnvironmentOperation, ManagementProductError> {
+        let _ = operation_id;
+        Err(ManagementProductError::NotFound)
     }
 
     /// Lists non-secret Application Clients.

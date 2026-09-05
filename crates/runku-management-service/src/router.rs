@@ -41,8 +41,9 @@ use crate::{
     ManagementApplicationCredentialRotate, ManagementBucketArchive, ManagementBucketCreate,
     ManagementBucketUpdate, ManagementCatalogQuery, ManagementDataDeleteRequest,
     ManagementDataInsertRequest, ManagementDataQuery, ManagementDataReplaceRequest,
-    ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    ManagementServingPolicySet, ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
+    ManagementEnvironmentCreate, ManagementEnvironmentUpdate, ManagementLogPruneRequest,
+    ManagementLogQuery, ManagementProduct, ManagementProductError, ManagementServingPolicySet,
+    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
     ManagementStorageAccessKeyRotate, OidcClientConfiguration,
 };
 
@@ -212,6 +213,16 @@ pub fn build_management_router_with_product(
             get(invitation_operation),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{environment_id}",
+            get(product_environment)
+                .post(product_environment_create)
+                .put(product_environment_update),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/environment-operations/{operation_id}",
+            get(product_environment_operation),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{environment_id}/workspace/publish",
             post(product_publish).layer(DefaultBodyLimit::max(DEVELOPMENT_PUBLISH_MAX_BYTES)),
         )
@@ -333,6 +344,123 @@ pub fn build_management_router_with_product(
         .fallback(fallback)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state))
+}
+
+async fn product_environment(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::EnvironmentsRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.environment().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_environment_create(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementEnvironmentCreate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::EnvironmentsManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.environment_create(operation_id, &request).await {
+        Ok(result) => json(StatusCode::CREATED, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_environment_update(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementEnvironmentUpdate>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::EnvironmentsManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.environment_update(operation_id, &request).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_environment_operation(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, operation)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let Ok(operation_id) = operation.parse::<OperationId>() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::EnvironmentsRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.environment_operation(operation_id).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
 }
 
 #[derive(Serialize)]

@@ -20,6 +20,11 @@ use runku_data::{
 use runku_data_postgres::{PostgresStore, PostgresStoreConfig};
 use runku_data_sqlite::{SqliteStore, SqliteStoreConfig};
 use runku_development::DevelopmentActor;
+use runku_environment_repository::{EnvironmentRepositoryConfig, SqlEnvironmentRepository};
+use runku_environments::{
+    Environment, EnvironmentConfiguration, EnvironmentError, EnvironmentOperation,
+    EnvironmentOperationKind, EnvironmentService,
+};
 use runku_execution::{document_write_set_payload, plan_document_index_mutations};
 use runku_file_storage::{FileObjectStore, FileStorageLimits, FileUsageSink};
 use runku_gateway::CorsOrigin;
@@ -45,7 +50,9 @@ use runku_management_service::{
     ManagementCreatedApplicationClient, ManagementCreatedApplicationCredential,
     ManagementDataDeleteRequest, ManagementDataDocument, ManagementDataInsertRequest,
     ManagementDataPage, ManagementDataQuery, ManagementDataReplaceRequest,
-    ManagementDataWriteResult, ManagementFunctionEntry, ManagementFunctionPage,
+    ManagementDataWriteResult, ManagementEnvironment, ManagementEnvironmentConfiguration,
+    ManagementEnvironmentCreate, ManagementEnvironmentOperation, ManagementEnvironmentResult,
+    ManagementEnvironmentUpdate, ManagementFunctionEntry, ManagementFunctionPage,
     ManagementIssuedStorageAccessKey, ManagementLogArchiveStatus, ManagementLogPage,
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
     ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
@@ -92,6 +99,7 @@ pub struct ProductAdapter {
     process: Mutex<Option<LocalProcess>>,
     data_store: Arc<dyn LogicalStore>,
     identity: LocalIdentityManager,
+    environments: EnvironmentService,
     serving: ServingPolicyService,
     storage: ObjectStorageService,
 }
@@ -158,6 +166,12 @@ impl ProductAdapter {
         )
         .await
         .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let environment_repository = SqlEnvironmentRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", paths.identity_database.display()),
+            EnvironmentRepositoryConfig::LOCAL,
+        )
+        .await
+        .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
         let storage_repository = SqlObjectStorageRepository::connect_sqlite(
             &format!("sqlite://{}?mode=rwc", paths.identity_database.display()),
             ObjectStorageRepositoryConfig::LOCAL,
@@ -185,6 +199,7 @@ impl ProductAdapter {
             process: Mutex::new(None),
             data_store,
             identity,
+            environments: EnvironmentService::new(Arc::new(environment_repository)),
             serving: ServingPolicyService::new(Arc::new(serving_repository)),
             storage: ObjectStorageService::new(
                 Arc::new(storage_repository),
@@ -624,8 +639,89 @@ impl ManagementProduct for ProductAdapter {
             .configuration_revision()
             .await
             .map_err(map_identity)?;
+        self.environments.health().await.map_err(map_environment)?;
         self.serving.health().await.map_err(map_serving)?;
         self.storage.health().await.map_err(map_storage)
+    }
+
+    async fn environment(&self) -> Result<ManagementEnvironment, ManagementProductError> {
+        self.environments
+            .get(self.scope)
+            .await
+            .map_err(map_environment)?
+            .as_ref()
+            .map(management_environment)
+            .ok_or(ManagementProductError::NotFound)
+    }
+
+    async fn environment_create(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentCreate,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let result = self
+            .environments
+            .create(
+                self.scope,
+                operation_id,
+                environment_configuration(&request.configuration)?,
+                parse_timestamp(&request.created_at_micros)?,
+            )
+            .await
+            .map_err(map_environment)?;
+        let environment = self
+            .environments
+            .get(self.scope)
+            .await
+            .map_err(map_environment)?
+            .ok_or(ManagementProductError::Corruption)?;
+        Ok(ManagementEnvironmentResult {
+            environment: management_environment(&environment),
+            operation_id: result.operation.operation_id.to_string(),
+            replayed: result.replayed,
+        })
+    }
+
+    async fn environment_update(
+        &self,
+        operation_id: OperationId,
+        request: &ManagementEnvironmentUpdate,
+    ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let result = self
+            .environments
+            .update(
+                self.scope,
+                operation_id,
+                request.expected_revision,
+                environment_configuration(&request.configuration)?,
+                parse_timestamp(&request.updated_at_micros)?,
+            )
+            .await
+            .map_err(map_environment)?;
+        let environment = self
+            .environments
+            .get(self.scope)
+            .await
+            .map_err(map_environment)?
+            .ok_or(ManagementProductError::Corruption)?;
+        Ok(ManagementEnvironmentResult {
+            environment: management_environment(&environment),
+            operation_id: result.operation.operation_id.to_string(),
+            replayed: result.replayed,
+        })
+    }
+
+    async fn environment_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementEnvironmentOperation, ManagementProductError> {
+        self.environments
+            .operation(self.scope, operation_id)
+            .await
+            .map_err(map_environment)?
+            .as_ref()
+            .map(management_environment_operation)
+            .ok_or(ManagementProductError::NotFound)
     }
 
     async fn serving_policy(&self) -> Result<ManagementServingPolicy, ManagementProductError> {
@@ -1693,6 +1789,106 @@ fn parse_credential_path(
     ))
 }
 
+fn management_environment(environment: &Environment) -> ManagementEnvironment {
+    ManagementEnvironment {
+        version: 1,
+        project_id: environment.scope.project_id().to_string(),
+        environment_id: environment.scope.environment_id().to_string(),
+        configuration: ManagementEnvironmentConfiguration {
+            name: environment.configuration.name.to_string(),
+            slug: environment.configuration.slug.to_string(),
+            region: environment.configuration.region.to_string(),
+            purpose: match environment.configuration.purpose {
+                runku_core::EnvironmentPurpose::Development => "development",
+                runku_core::EnvironmentPurpose::Preview => "preview",
+                runku_core::EnvironmentPurpose::Staging => "staging",
+                runku_core::EnvironmentPurpose::Production => "production",
+            }
+            .to_owned(),
+            protection: match environment.configuration.protection {
+                runku_core::EnvironmentProtection::Open => "open",
+                runku_core::EnvironmentProtection::Protected => "protected",
+                runku_core::EnvironmentProtection::Production => "production",
+            }
+            .to_owned(),
+            location: match environment.configuration.location {
+                runku_core::EnvironmentLocation::Local => "local",
+                runku_core::EnvironmentLocation::Managed => "managed",
+                runku_core::EnvironmentLocation::SelfHosted => "selfHosted",
+            }
+            .to_owned(),
+            workspace_targets_enabled: environment.configuration.workspace_targets_enabled,
+        },
+        configuration_revision: environment.configuration_revision,
+        desired_state: environment.desired_state.as_str().to_owned(),
+        observed_state: environment.observed_state.as_str().to_owned(),
+        observed_configuration_revision: environment.observed_configuration_revision,
+        converged: environment.is_converged(),
+        created_at_micros: environment.created_at.get().to_string(),
+        updated_at_micros: environment.updated_at.get().to_string(),
+        observed_at_micros: environment.observed_at.map(|value| value.get().to_string()),
+    }
+}
+
+fn environment_configuration(
+    value: &ManagementEnvironmentConfiguration,
+) -> Result<EnvironmentConfiguration, ManagementProductError> {
+    let configuration = EnvironmentConfiguration {
+        name: value
+            .name
+            .parse()
+            .map_err(|_| ManagementProductError::Invalid)?,
+        slug: value
+            .slug
+            .parse()
+            .map_err(|_| ManagementProductError::Invalid)?,
+        region: value
+            .region
+            .parse()
+            .map_err(|_| ManagementProductError::Invalid)?,
+        purpose: match value.purpose.as_str() {
+            "development" => runku_core::EnvironmentPurpose::Development,
+            "preview" => runku_core::EnvironmentPurpose::Preview,
+            "staging" => runku_core::EnvironmentPurpose::Staging,
+            "production" => runku_core::EnvironmentPurpose::Production,
+            _ => return Err(ManagementProductError::Invalid),
+        },
+        protection: match value.protection.as_str() {
+            "open" => runku_core::EnvironmentProtection::Open,
+            "protected" => runku_core::EnvironmentProtection::Protected,
+            "production" => runku_core::EnvironmentProtection::Production,
+            _ => return Err(ManagementProductError::Invalid),
+        },
+        location: match value.location.as_str() {
+            "local" => runku_core::EnvironmentLocation::Local,
+            "managed" => runku_core::EnvironmentLocation::Managed,
+            "selfHosted" => runku_core::EnvironmentLocation::SelfHosted,
+            _ => return Err(ManagementProductError::Invalid),
+        },
+        workspace_targets_enabled: value.workspace_targets_enabled,
+    };
+    Ok(configuration)
+}
+
+fn management_environment_operation(
+    operation: &EnvironmentOperation,
+) -> ManagementEnvironmentOperation {
+    ManagementEnvironmentOperation {
+        operation_id: operation.operation_id.to_string(),
+        kind: match operation.kind {
+            EnvironmentOperationKind::Create => "create",
+            EnvironmentOperationKind::Update => "update",
+            EnvironmentOperationKind::Materialize => "materialize",
+        }
+        .to_owned(),
+        configuration_revision: operation.configuration_revision,
+        desired_state: operation.desired_state.as_str().to_owned(),
+        observed_state: operation.observed_state.as_str().to_owned(),
+        observed_configuration_revision: operation.observed_configuration_revision,
+        completed_at_micros: operation.completed_at.get().to_string(),
+    }
+}
+
 fn management_serving_policy(record: &ServingPolicyRecord) -> ManagementServingPolicy {
     ManagementServingPolicy {
         version: 1,
@@ -2303,6 +2499,25 @@ const fn map_serving(error: ServingPolicyError) -> ManagementProductError {
     }
 }
 
+const fn map_environment(error: EnvironmentError) -> ManagementProductError {
+    match error {
+        EnvironmentError::InvalidInput | EnvironmentError::LimitExceeded => {
+            ManagementProductError::Invalid
+        }
+        EnvironmentError::NotFound => ManagementProductError::NotFound,
+        EnvironmentError::Conflict => ManagementProductError::Conflict,
+        EnvironmentError::OperationIdReused => ManagementProductError::OperationIdReused,
+        EnvironmentError::Busy | EnvironmentError::Unavailable => {
+            ManagementProductError::Unavailable
+        }
+        EnvironmentError::ResultUncertain => ManagementProductError::ResultUncertain,
+        EnvironmentError::Corruption
+        | EnvironmentError::Unsupported
+        | EnvironmentError::ProductionBackendUnsupported
+        | EnvironmentError::Internal => ManagementProductError::Corruption,
+    }
+}
+
 const fn map_storage(error: ObjectStorageError) -> ManagementProductError {
     match error {
         ObjectStorageError::InvalidInput | ObjectStorageError::LimitExceeded => {
@@ -2467,6 +2682,100 @@ export const summary = query({
             .execute(&mut connection)
             .await?;
         connection.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_environment_lifecycle_is_exact_scope_cas_and_replay_safe() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        adapter(directory.path()).await?;
+        let product = Box::pin(open_adapter(directory.path())).await?;
+        let create_operation = OperationId::generate();
+        let configuration = ManagementEnvironmentConfiguration {
+            name: "Development".to_owned(),
+            slug: "development".to_owned(),
+            region: "local".to_owned(),
+            purpose: "development".to_owned(),
+            protection: "open".to_owned(),
+            location: "local".to_owned(),
+            workspace_targets_enabled: true,
+        };
+        let request = ManagementEnvironmentCreate {
+            configuration: configuration.clone(),
+            created_at_micros: "1800000000000010".to_owned(),
+        };
+        let created = product
+            .environment_create(create_operation, &request)
+            .await?;
+        assert!(!created.replayed);
+        assert_eq!(created.environment.configuration_revision, 1);
+        assert_eq!(created.environment.observed_state, "pending");
+        assert_eq!(
+            created.environment.project_id,
+            product.scope.project_id().to_string()
+        );
+        assert_eq!(
+            created.environment.environment_id,
+            product.scope.environment_id().to_string()
+        );
+        assert!(
+            product
+                .environment_create(create_operation, &request)
+                .await?
+                .replayed
+        );
+
+        let reused = ManagementEnvironmentCreate {
+            configuration: ManagementEnvironmentConfiguration {
+                name: "Changed".to_owned(),
+                ..configuration.clone()
+            },
+            ..request.clone()
+        };
+        assert_eq!(
+            product.environment_create(create_operation, &reused).await,
+            Err(ManagementProductError::OperationIdReused)
+        );
+
+        let update_operation = OperationId::generate();
+        let updated = product
+            .environment_update(
+                update_operation,
+                &ManagementEnvironmentUpdate {
+                    expected_revision: 1,
+                    configuration: ManagementEnvironmentConfiguration {
+                        name: "Development East".to_owned(),
+                        slug: "development-east".to_owned(),
+                        region: "us-east-1".to_owned(),
+                        ..configuration
+                    },
+                    updated_at_micros: "1800000000000020".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(updated.environment.configuration_revision, 2);
+        assert_eq!(updated.operation_id, update_operation.to_string());
+        assert_eq!(
+            product
+                .environment_operation(update_operation)
+                .await?
+                .configuration_revision,
+            2
+        );
+        assert_eq!(
+            product
+                .environment_update(
+                    OperationId::generate(),
+                    &ManagementEnvironmentUpdate {
+                        expected_revision: 1,
+                        configuration: updated.environment.configuration,
+                        updated_at_micros: "1800000000000030".to_owned(),
+                    },
+                )
+                .await,
+            Err(ManagementProductError::Conflict)
+        );
+        product.shutdown().await;
         Ok(())
     }
 

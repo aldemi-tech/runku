@@ -29,8 +29,8 @@ Read in this order:
    Action, typed client, Realtime subscription, and scheduled operation.
 3. [Platform model](concepts/platform-model.md): Project, Environment, Release, Channel, Workspace,
    identity, and code pinning.
-   [Environment lifecycle](concepts/environment-lifecycle.md) documents the standalone registry
-   library and its current integration limit.
+   [Environment lifecycle](concepts/environment-lifecycle.md) documents the exact-scope Management
+   authority and its remaining archive/restore/materialization limits.
    [Serving policy](concepts/serving-policy.md) documents revisioned atomic/gradual Release weights
    and the compatibility gate; request routing remains a separate integration slice.
    [Logical Object Storage](concepts/object-storage.md) documents the provider-independent bucket
@@ -97,7 +97,8 @@ reading order because it records the product invariants and definition of done.
 - [System architecture](internals/architecture.md): component and trust boundaries, serving/data/
   runtime/management paths, consistency, scaling, and failure containment.
 - [Environment lifecycle](concepts/environment-lifecycle.md): revisioned desired/observed state,
-  idempotency, repository conformance, recovery, and current composition limit.
+  authenticated Management API/server composition, idempotency, repository conformance, and
+  recovery.
 - [Serving policy](concepts/serving-policy.md): weighted Release intent, canonical compatibility
   evidence, desired/observed state, audit, recovery, and deferred runtime selection.
 - [Logical Object Storage](concepts/object-storage.md): revisioned buckets, scoped Product access

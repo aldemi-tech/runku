@@ -4050,6 +4050,8 @@ dependencies = [
  "runku-data-postgres",
  "runku-data-sqlite",
  "runku-development",
+ "runku-environment-repository",
+ "runku-environments",
  "runku-execution",
  "runku-file-storage",
  "runku-gateway",

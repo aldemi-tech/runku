@@ -23,6 +23,8 @@ runku-data = { path = "../runku-data" }
 runku-data-postgres = { path = "../runku-data-postgres" }
 runku-data-sqlite = { path = "../runku-data-sqlite" }
 runku-development = { path = "../runku-development" }
+runku-environment-repository = { path = "../runku-environment-repository" }
+runku-environments = { path = "../runku-environments" }
 runku-gateway = { path = "../runku-gateway" }
 runku-file-storage = { path = "../runku-file-storage" }
 runku-execution = { path = "../runku-execution" }

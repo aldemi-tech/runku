@@ -125,6 +125,8 @@ pub enum PlatformCapability {
     ProjectsManage,
     /// Create, update, or retire environments.
     EnvironmentsManage,
+    /// Read portable Product Environment configuration and lifecycle state.
+    EnvironmentsRead,
     /// Invite operators, change grants, and revoke sessions.
     OperatorsManage,
     /// Read releases and channels.
@@ -165,6 +167,7 @@ impl PlatformCapability {
             Self::InstallationManage => "installation:manage",
             Self::ProjectsManage => "projects:manage",
             Self::EnvironmentsManage => "environments:manage",
+            Self::EnvironmentsRead => "environments:read",
             Self::OperatorsManage => "operators:manage",
             Self::ReleasesRead => "releases:read",
             Self::ReleasesPublish => "releases:publish",
@@ -193,6 +196,7 @@ impl PlatformCapability {
             "installation:manage" => Ok(Self::InstallationManage),
             "projects:manage" => Ok(Self::ProjectsManage),
             "environments:manage" => Ok(Self::EnvironmentsManage),
+            "environments:read" => Ok(Self::EnvironmentsRead),
             "operators:manage" => Ok(Self::OperatorsManage),
             "releases:read" => Ok(Self::ReleasesRead),
             "releases:publish" => Ok(Self::ReleasesPublish),
@@ -219,6 +223,7 @@ impl PlatformCapability {
             Self::InstallationManage,
             Self::ProjectsManage,
             Self::EnvironmentsManage,
+            Self::EnvironmentsRead,
             Self::OperatorsManage,
             Self::ReleasesRead,
             Self::ReleasesPublish,
@@ -313,6 +318,7 @@ impl OperatorRole {
             Self::Owner => C::owner_set(),
             Self::Operator => [
                 C::EnvironmentsManage,
+                C::EnvironmentsRead,
                 C::ReleasesRead,
                 C::ReleasesPublish,
                 C::ChannelsPromote,
@@ -331,6 +337,7 @@ impl OperatorRole {
             .into_iter()
             .collect(),
             Self::Developer => [
+                C::EnvironmentsRead,
                 C::ReleasesRead,
                 C::ReleasesPublish,
                 C::ChannelsPromote,
@@ -344,6 +351,7 @@ impl OperatorRole {
             .into_iter()
             .collect(),
             Self::Observer => [
+                C::EnvironmentsRead,
                 C::ReleasesRead,
                 C::CredentialsRead,
                 C::StorageRead,

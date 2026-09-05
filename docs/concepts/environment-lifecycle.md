@@ -7,7 +7,7 @@ embedding provider placement, DNS, billing, or HTTP behavior.
 
 ## Current status and boundary
 
-The following library behavior is implemented and test-covered:
+The following behavior is implemented and test-covered:
 
 - `runku-environments` owns validated names, Project-unique slugs, logical regions, protection and
   purpose policy, desired/observed state, compare-and-set revisions, idempotent commands, operation
@@ -15,12 +15,34 @@ The following library behavior is implemented and test-covered:
 - `runku-environment-repository` implements the same contract over SQLite and PostgreSQL 16+ with
   bounded pools and checksum-protected append-only migrations;
 - create, get, bounded list, full-configuration update, and trusted materializer observation are
-  available through Rust APIs.
+  available through Rust APIs;
+- the compact server composes the registry in the protected Product state database and reports its
+  health through readiness;
+- authenticated exact-scope Management routes create, get, update, and reconcile operations using
+  independent `environments:read` and `environments:manage` capabilities.
 
-The compact `runku-server`, Management HTTP API, CLI, Platform Identity grants, and existing local
-root are **not connected to this registry yet**. There is no public network endpoint or operator
-command for this capability in the current source line. Archive, restore, provider provisioning,
-and migration of pre-existing local roots are deliberately outside this slice.
+Project-wide list, CLI commands, archive/restore, provider provisioning, and automatic population
+of a registry record for pre-existing local roots remain outside this slice. A Product adapter owns
+one configured exact Environment: creation therefore uses the exact Environment URL and cannot
+allocate or infer an ID.
+
+## Authenticated Management API
+
+All routes use the exact configured `(ProjectId, EnvironmentId)` and reject another scope before
+touching the registry:
+
+- `GET /v1/projects/{project}/environments/{environment}` requires `environments:read`;
+- `POST .../environments/{environment}` requires `environments:manage` and
+  `Idempotency-Key: opn_*` to create the caller-selected canonical Environment;
+- `PUT .../environments/{environment}` requires `environments:manage`, the same idempotency header,
+  and an exact positive `expectedRevision` for complete configuration replacement;
+- `GET .../environment-operations/{opn_*}` requires `environments:read` and reconciles an uncertain
+  result without making a new write.
+
+Timestamps are canonical decimal microseconds and are pinned by the caller because they participate
+in the operation digest. The response never contains provider, host, database, DNS, or placement
+details. Creation produces observed `pending`; only a trusted materializer may record `ready` or
+`failed` through the internal Rust service.
 
 ## Model
 
@@ -137,8 +159,9 @@ use the composition's documented forward recovery or verified coordinated restor
 - Pool, lock, statement, and idle-transaction timeouts are bounded.
 - Telemetry contains aggregate counts and pool gauges only; it does not label names, slugs, regions,
   operation IDs, Projects, or Environments.
-- The library performs no authorization. A future Management adapter must enforce current operator
-  grants before every call and must not accept Application or Development credentials.
+- The library performs no authorization. The Management adapter enforces current
+  `environments:read`/`environments:manage` grants before every call and does not accept Application
+  or Development credentials.
 
 ## Evidence
 

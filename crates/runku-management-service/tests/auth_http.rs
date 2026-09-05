@@ -18,11 +18,12 @@ use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementApplicationClientList,
     ManagementBucketPage, ManagementDataDocument, ManagementDataInsertRequest,
-    ManagementDataWriteResult, ManagementHttpConfig, ManagementHttpExposure,
-    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
-    ManagementLogPruneResult, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementWorkspacePublish,
-    OidcClientConfiguration, build_management_router, build_management_router_with_product,
+    ManagementDataWriteResult, ManagementEnvironment, ManagementEnvironmentConfiguration,
+    ManagementHttpConfig, ManagementHttpExposure, ManagementLogArchiveStatus, ManagementLogPage,
+    ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
+    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
+    ManagementWorkspacePublish, OidcClientConfiguration, build_management_router,
+    build_management_router_with_product,
 };
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, ManagedSourceAuthority,
@@ -54,6 +55,7 @@ struct DataProbeProduct {
     writes: AtomicUsize,
     credential_reads: AtomicUsize,
     storage_reads: AtomicUsize,
+    environment_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -64,6 +66,32 @@ impl ManagementProduct for DataProbeProduct {
 
     async fn health(&self) -> Result<(), ManagementProductError> {
         Ok(())
+    }
+
+    async fn environment(&self) -> Result<ManagementEnvironment, ManagementProductError> {
+        self.environment_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementEnvironment {
+            version: 1,
+            project_id: self.scope.project_id().to_string(),
+            environment_id: self.scope.environment_id().to_string(),
+            configuration: ManagementEnvironmentConfiguration {
+                name: "Development".to_owned(),
+                slug: "development".to_owned(),
+                region: "local".to_owned(),
+                purpose: "development".to_owned(),
+                protection: "open".to_owned(),
+                location: "local".to_owned(),
+                workspace_targets_enabled: true,
+            },
+            configuration_revision: 1,
+            desired_state: "active".to_owned(),
+            observed_state: "pending".to_owned(),
+            observed_configuration_revision: None,
+            converged: false,
+            created_at_micros: "1".to_owned(),
+            updated_at_micros: "1".to_owned(),
+            observed_at_micros: None,
+        })
     }
 
     async fn application_clients(
@@ -606,6 +634,23 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_001),
         )
         .await?;
+    let environment_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "environment-reader".to_owned(),
+            },
+            OperatorName::from_str("Environment reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::EnvironmentsRead]),
+            }],
+            DeviceName::from_str("environment reader device")?,
+            TimestampMicros::new(1_900_000_000_000_004),
+        )
+        .await?;
     let credential_reader = identity
         .login_with_managed_external_identity(
             ExternalOperatorIdentity {
@@ -646,6 +691,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         writes: AtomicUsize::new(0),
         credential_reads: AtomicUsize::new(0),
         storage_reads: AtomicUsize::new(0),
+        environment_reads: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -677,6 +723,11 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     );
     let storage_path = format!(
         "/v1/projects/{}/environments/{}/buckets?limit=10",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let environment_path = format!(
+        "/v1/projects/{}/environments/{}",
         scope.project_id(),
         scope.environment_id()
     );
@@ -724,6 +775,16 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(product.storage_reads.load(Ordering::SeqCst), 0);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&environment_path)
+                .header(header::AUTHORIZATION, format!("Bearer {manager_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.environment_reads.load(Ordering::SeqCst), 0);
 
     let reader_access = data_reader.login.access_token.expose();
     let response = router
@@ -754,6 +815,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
 
     let storage_access = storage_reader.login.access_token.expose();
     let response = router
+        .clone()
         .oneshot(
             Request::get(&storage_path)
                 .header(header::AUTHORIZATION, format!("Bearer {storage_access}"))
@@ -762,6 +824,20 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.storage_reads.load(Ordering::SeqCst), 1);
+
+    let environment_access = environment_reader.login.access_token.expose();
+    let response = router
+        .oneshot(
+            Request::get(&environment_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {environment_access}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.environment_reads.load(Ordering::SeqCst), 1);
 
     repository.close().await;
     Ok(())
