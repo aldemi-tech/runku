@@ -17,10 +17,16 @@ The following provider-independent library behavior is implemented and test-cove
 - exact policy reads, trusted materializer observations, uncertain-operation lookup, and bounded
   audit pagination are available through Rust APIs.
 
-The compact server, Gateway, Management API, CLI, Channel router, and Platform Identity grants are
-**not connected to this registry**. Writing `desired` state does not change live traffic. Runtime
-Release selection, `EnvironmentDefault`, and the effective write contract are explicitly deferred
-to the next serving integration slice.
+The compact server now opens this registry from the Product root and the authenticated Management
+API exposes exact-scope read, idempotent CAS replacement, and operation lookup. Replacement derives
+all compatibility evidence by loading each requested servable Release through the Environment's
+Release authority; clients cannot submit hashes. `releases:read` authorizes policy and operation
+reads, while `channels:promote` authorizes replacement and the verified operator is the audit actor.
+
+The Gateway, CLI, and Channel router do not yet select traffic from this registry. Writing `desired`
+state therefore remains `pending` and does not change live traffic. Runtime Release selection,
+`EnvironmentDefault`, materializer observation, and the effective write contract are explicitly
+deferred to the serving-path integration slice.
 
 ## Policy contract
 
@@ -102,8 +108,9 @@ Header and weighted entries are read in one database snapshot and changed atomic
 changes append a migration; applied migration text or checksums are never rewritten. Unknown future
 migration versions fail closed. SQLite is Local/test-only and PostgreSQL is Production-role-only.
 
-No released process composes this authority yet, so the current compact backup does not include it.
-A future adopting composition must quiesce policy and Release writers and coordinate policy,
+The compact process stores the registry tables in its coordinated identity database, but the
+current backup manifest does not yet declare or verify them as a recovery component. Backup work
+must quiesce policy and Release writers and coordinate policy,
 operation/audit, Release metadata/artifacts, Environment records, Cron activation state, and
 subordinate Product data at a verified recovery point. An older binary that does not understand an
 adopted serving authority must not resume writes after rollback.

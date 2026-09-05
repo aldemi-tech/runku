@@ -4062,6 +4062,8 @@ dependencies = [
  "runku-protocol",
  "runku-releases",
  "runku-schema",
+ "runku-serving",
+ "runku-serving-repository",
  "runku-value",
  "serde",
  "serde_json",

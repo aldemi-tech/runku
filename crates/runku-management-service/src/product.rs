@@ -1,7 +1,7 @@
 //! Framework-independent authenticated product-management boundary.
 
 use async_trait::async_trait;
-use runku_core::{EnvironmentScope, OperationId};
+use runku_core::{EnvironmentScope, OperationId, OperatorId};
 use runku_protocol::WireValueV1;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,8 @@ pub enum ManagementProductError {
     OperationIdReused,
     /// A logical document does not satisfy the effective schema.
     Validation,
+    /// Multiple Releases cannot safely coexist under the requested policy.
+    Incompatible,
     /// Durable product storage is unavailable.
     Unavailable,
     /// Durable state failed an integrity check.
@@ -53,6 +55,7 @@ impl std::fmt::Display for ManagementProductError {
             Self::Conflict => "product operation conflicted",
             Self::OperationIdReused => "product operation ID was reused",
             Self::Validation => "product data validation failed",
+            Self::Incompatible => "product release contracts are incompatible",
             Self::Unavailable => "product dependency is unavailable",
             Self::Corruption => "product state is corrupt",
             Self::ResultUncertain => "product operation result is uncertain",
@@ -214,6 +217,86 @@ pub struct ManagementApplicationCredentialLifecycle {
     pub status: String,
     /// True when the target state was already durable.
     pub replayed: bool,
+}
+
+/// One immutable Release weight in an Environment serving policy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementServingRelease {
+    /// Canonical Release ID.
+    pub release_id: String,
+    /// Positive integer percentage.
+    pub weight_percent: u8,
+}
+
+/// Complete desired serving-policy replacement.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementServingPolicySet {
+    /// `null` requires absence; a positive value performs compare-and-set.
+    pub expected_revision: Option<u64>,
+    /// `atomic` or `gradual`.
+    pub mode: String,
+    /// Complete weighted Release set.
+    pub releases: Vec<ManagementServingRelease>,
+    /// Caller-pinned canonical decimal timestamp for exact operation replay.
+    pub changed_at_micros: String,
+}
+
+/// Desired/observed serving policy projected without provider details.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementServingPolicy {
+    /// Wire version.
+    pub version: u8,
+    /// Positive desired-policy revision.
+    pub policy_revision: u64,
+    /// `atomic` or `gradual`.
+    pub mode: String,
+    /// Canonically Release-ID-ordered weighted set.
+    pub releases: Vec<ManagementServingRelease>,
+    /// `pending`, `ready`, or `failed`.
+    pub observed_state: String,
+    /// Exact observed revision, when one exists.
+    pub observed_policy_revision: Option<u64>,
+    /// Whether the exact desired policy is serving-path ready.
+    pub converged: bool,
+    /// Canonical decimal creation timestamp.
+    pub created_at_micros: String,
+    /// Canonical decimal desired-update timestamp.
+    pub updated_at_micros: String,
+    /// Canonical decimal observation timestamp.
+    pub observed_at_micros: Option<String>,
+}
+
+/// Result of one idempotent serving-policy replacement.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementServingPolicyResult {
+    /// Durable policy after the command.
+    pub policy: ManagementServingPolicy,
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// Whether exact durable operation content was replayed.
+    pub replayed: bool,
+}
+
+/// Durable serving operation projection used after an uncertain response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementServingOperation {
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// `setDesired` or `materialize`.
+    pub kind: String,
+    /// Policy revision produced or observed.
+    pub policy_revision: u64,
+    /// `pending`, `ready`, or `failed`.
+    pub observed_state: String,
+    /// Exact observed revision, when one exists.
+    pub observed_policy_revision: Option<u64>,
+    /// Canonical decimal completion timestamp.
+    pub completed_at_micros: String,
 }
 
 impl std::error::Error for ManagementProductError {}
@@ -650,6 +733,31 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         deleted_at_micros: i64,
     ) -> Result<ManagementApplicationCredentialLifecycle, ManagementProductError> {
         let _ = (client_id, credential_id, deleted_at_micros);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Reads the exact Environment desired/observed serving policy.
+    async fn serving_policy(&self) -> Result<ManagementServingPolicy, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Creates or replaces the complete serving policy using CAS and idempotency.
+    async fn serving_policy_set(
+        &self,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementServingPolicySet,
+    ) -> Result<ManagementServingPolicyResult, ManagementProductError> {
+        let _ = (operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Looks up an exact-scope serving operation after an uncertain result.
+    async fn serving_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementServingOperation, ManagementProductError> {
+        let _ = operation_id;
         Err(ManagementProductError::NotFound)
     }
 

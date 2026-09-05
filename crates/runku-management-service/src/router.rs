@@ -41,7 +41,7 @@ use crate::{
     ManagementApplicationCredentialRotate, ManagementCatalogQuery, ManagementDataDeleteRequest,
     ManagementDataInsertRequest, ManagementDataQuery, ManagementDataReplaceRequest,
     ManagementLogPruneRequest, ManagementLogQuery, ManagementProduct, ManagementProductError,
-    OidcClientConfiguration,
+    ManagementServingPolicySet, OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -228,6 +228,14 @@ pub fn build_management_router_with_product(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/status",
             get(product_status),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/serving-policy",
+            get(product_serving_policy).put(product_serving_policy_set),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/serving-policy-operations/{operation_id}",
+            get(product_serving_operation),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/application-clients",
@@ -584,6 +592,95 @@ async fn product_status(
         Err(response) => return *response,
     };
     match product.status().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_serving_policy(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.serving_policy().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_serving_policy_set(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementServingPolicySet>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ChannelsPromote,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .serving_policy_set(operation_id, context.operator.id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_serving_operation(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, operation)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let Ok(operation_id) = operation.parse::<OperationId>() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.serving_operation(operation_id).await {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }
@@ -1268,6 +1365,10 @@ fn product_failure(error: ManagementProductError) -> Response {
         ManagementProductError::Validation => (
             StatusCode::UNPROCESSABLE_ENTITY,
             "PRODUCT_DATA_VALIDATION_FAILED",
+        ),
+        ManagementProductError::Incompatible => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PRODUCT_SERVING_INCOMPATIBLE_CONTRACTS",
         ),
         ManagementProductError::Unavailable => {
             (StatusCode::SERVICE_UNAVAILABLE, "PRODUCT_UNAVAILABLE")

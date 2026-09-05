@@ -21,7 +21,9 @@ pub use product::{
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
     ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
     ManagementResolvedTarget, ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
-    ManagementWorkspacePublish, OidcClientConfiguration,
+    ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
+    ManagementServingPolicySet, ManagementServingRelease, ManagementWorkspacePublish,
+    OidcClientConfiguration,
 };
 pub use router::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementHttpConfig,

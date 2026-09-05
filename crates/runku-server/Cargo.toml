@@ -34,6 +34,8 @@ runku-observability = { path = "../runku-observability" }
 runku-protocol = { path = "../runku-protocol" }
 runku-releases = { path = "../runku-releases" }
 runku-schema = { path = "../runku-schema" }
+runku-serving = { path = "../runku-serving" }
+runku-serving-repository = { path = "../runku-serving-repository" }
 runku-value = { path = "../runku-value" }
 reqwest.workspace = true
 serde.workspace = true

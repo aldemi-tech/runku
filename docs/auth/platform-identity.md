@@ -515,6 +515,10 @@ plus Runku's stricter verifier rules above.
 | `PUT /v1/projects/{project}/environments/{environment}/channels/{channel}` | `channels:promote` | promotes through exact optional CAS |
 | `POST /v1/projects/{project}/environments/{environment}/channels/{channel}/rollback` | `channels:promote` | rolls back through required exact-current CAS |
 | `GET /v1/projects/{project}/environments/{environment}/status` | `releases:read` | reads a coherent Release/Channel snapshot |
+| `GET .../serving-policy` and `GET .../serving-policy-operations/{opn_*}` | `releases:read` | reads desired/observed rollout state or reconciles an uncertain operation |
+| `PUT .../serving-policy` | `channels:promote` + `Idempotency-Key: opn_*` | replaces the complete compatible desired policy using exact CAS; remains pending until serving-path materialization |
+| `GET .../application-clients` and credential lists/reveal | `credentials:read` | reads non-secret identity metadata or re-derives a verified publishable key |
+| Application Client/credential create, rotate, revoke, and delete routes | `credentials:manage` | manages exact-scope Product credentials; confidential material is returned once |
 | `GET .../functions` and `GET .../schema/tables` | `releases:read` | reads a bounded catalog from one verified effective artifact |
 | `POST .../data/query` and `GET .../data/documents/{table}/{document}` | `data:read` | reads logical documents through the canonical store and schema |
 | `POST .../data/documents/{table}` | `data:write` + `Idempotency-Key: opn_*` | inserts a schema-valid document with deterministic identity |

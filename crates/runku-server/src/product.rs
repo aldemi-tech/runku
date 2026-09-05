@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_document_schema};
 use runku_core::{
     ApplicationClientId, ChannelName, CodeTarget, CredentialId, DocumentId, EnvironmentScope,
-    FunctionName, OperationId, OutboxEventId, ReleaseId, TableId,
+    FunctionName, OperationId, OperatorId, OutboxEventId, ReleaseId, TableId,
 };
 use runku_data::{
     CommitBatch, DocumentMutation, ExpectedRevision, IndexRange, LogicalStore, OutboxAppend,
@@ -46,7 +46,8 @@ use runku_management_service::{
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementProduct,
     ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
     ManagementResolvedTarget, ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
-    ManagementWorkspacePublish,
+    ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
+    ManagementServingPolicySet, ManagementServingRelease, ManagementWorkspacePublish,
 };
 use runku_observability::{
     LogArchive, LogLevel, LogQuery, LogStream, NatsLogJournal, SequencedOperationalEvent,
@@ -57,6 +58,11 @@ use runku_releases::{
     Sha256Digest, decode_node_esm_bundle, decode_safe_esm_bundle,
 };
 use runku_schema::{SchemaCatalog, decode_schema_catalog};
+use runku_serving::{
+    ServingCommandKind, ServingMode, ServingOperation, ServingPolicy, ServingPolicyError,
+    ServingPolicyRecord, ServingPolicyService,
+};
+use runku_serving_repository::{ServingRepositoryConfig, SqlServingPolicyRepository};
 use runku_value::{CanonicalValue, IndexKey, IndexValue, TimestampMicros};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -72,6 +78,7 @@ pub struct ProductAdapter {
     process: Mutex<Option<LocalProcess>>,
     data_store: Arc<dyn LogicalStore>,
     identity: LocalIdentityManager,
+    serving: ServingPolicyService,
 }
 
 /// Validated server-owned configuration for one Product adapter.
@@ -130,6 +137,12 @@ impl ProductAdapter {
         let identity = LocalIdentityManager::open(&root)
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let serving_repository = SqlServingPolicyRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", paths.identity_database.display()),
+            ServingRepositoryConfig::LOCAL,
+        )
+        .await
+        .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
         let adapter = Self {
             root,
             scope: state.scope(),
@@ -148,6 +161,7 @@ impl ProductAdapter {
             process: Mutex::new(None),
             data_store,
             identity,
+            serving: ServingPolicyService::new(Arc::new(serving_repository)),
         };
         let releases = LocalReleaseManager::open(&adapter.root)
             .await
@@ -562,8 +576,97 @@ impl ManagementProduct for ProductAdapter {
         self.identity
             .configuration_revision()
             .await
-            .map(|_| ())
-            .map_err(map_identity)
+            .map_err(map_identity)?;
+        self.serving.health().await.map_err(map_serving)
+    }
+
+    async fn serving_policy(&self) -> Result<ManagementServingPolicy, ManagementProductError> {
+        self.serving
+            .get(self.scope)
+            .await
+            .map_err(map_serving)?
+            .as_ref()
+            .map(management_serving_policy)
+            .ok_or(ManagementProductError::NotFound)
+    }
+
+    async fn serving_policy_set(
+        &self,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementServingPolicySet,
+    ) -> Result<ManagementServingPolicyResult, ManagementProductError> {
+        if request.expected_revision == Some(0) {
+            return Err(ManagementProductError::Invalid);
+        }
+        let mode = match request.mode.as_str() {
+            "atomic" => ServingMode::Atomic,
+            "gradual" => ServingMode::Gradual,
+            _ => return Err(ManagementProductError::Invalid),
+        };
+        let manager = LocalReleaseManager::open(&self.root)
+            .await
+            .map_err(map_release)?;
+        let mut manifests = Vec::with_capacity(request.releases.len());
+        for entry in &request.releases {
+            let release_id = entry
+                .release_id
+                .parse::<ReleaseId>()
+                .map_err(|_| ManagementProductError::Invalid)?;
+            let resolved = manager
+                .resolve_code(&CodeTarget::Release(release_id))
+                .await
+                .map_err(map_release)?;
+            manifests.push((resolved.manifest, entry.weight_percent));
+        }
+        let policy = ServingPolicy::from_manifests(
+            self.scope,
+            mode,
+            manifests
+                .iter()
+                .map(|(manifest, weight)| (manifest, *weight)),
+        )
+        .map_err(map_serving)?;
+        let changed_at = parse_timestamp(&request.changed_at_micros)?;
+        let result = self
+            .serving
+            .set_desired(
+                self.scope,
+                operation_id,
+                actor,
+                request.expected_revision,
+                policy,
+                changed_at,
+            )
+            .await
+            .map_err(map_serving)?;
+        let record = self
+            .serving
+            .get(self.scope)
+            .await
+            .map_err(map_serving)?
+            .ok_or(ManagementProductError::Corruption)?;
+        if record.policy_revision != result.operation.policy_revision {
+            return Err(ManagementProductError::Corruption);
+        }
+        Ok(ManagementServingPolicyResult {
+            policy: management_serving_policy(&record),
+            operation_id: result.operation.operation_id.to_string(),
+            replayed: result.replayed,
+        })
+    }
+
+    async fn serving_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementServingOperation, ManagementProductError> {
+        self.serving
+            .operation(self.scope, operation_id)
+            .await
+            .map_err(map_serving)?
+            .as_ref()
+            .map(management_serving_operation)
+            .ok_or(ManagementProductError::NotFound)
     }
 
     async fn application_clients(
@@ -1324,6 +1427,44 @@ fn parse_credential_path(
     ))
 }
 
+fn management_serving_policy(record: &ServingPolicyRecord) -> ManagementServingPolicy {
+    ManagementServingPolicy {
+        version: 1,
+        policy_revision: record.policy_revision,
+        mode: record.desired_policy.mode().as_str().to_owned(),
+        releases: record
+            .desired_policy
+            .releases()
+            .iter()
+            .map(|release| ManagementServingRelease {
+                release_id: release.release_id().to_string(),
+                weight_percent: release.weight_percent(),
+            })
+            .collect(),
+        observed_state: record.observed_state.as_str().to_owned(),
+        observed_policy_revision: record.observed_policy_revision,
+        converged: record.is_converged(),
+        created_at_micros: record.created_at.get().to_string(),
+        updated_at_micros: record.updated_at.get().to_string(),
+        observed_at_micros: record.observed_at.map(|value| value.get().to_string()),
+    }
+}
+
+fn management_serving_operation(operation: &ServingOperation) -> ManagementServingOperation {
+    ManagementServingOperation {
+        operation_id: operation.operation_id.to_string(),
+        kind: match operation.kind {
+            ServingCommandKind::SetDesired => "setDesired",
+            ServingCommandKind::Materialize => "materialize",
+        }
+        .to_owned(),
+        policy_revision: operation.policy_revision,
+        observed_state: operation.observed_state.as_str().to_owned(),
+        observed_policy_revision: operation.observed_policy_revision,
+        completed_at_micros: operation.completed_at.get().to_string(),
+    }
+}
+
 fn outcome(value: LocalReleaseOutcome) -> ManagementReleaseOutcome {
     ManagementReleaseOutcome {
         release_id: value.release_id.to_string(),
@@ -1682,6 +1823,26 @@ const fn map_identity(error: LocalIdentityError) -> ManagementProductError {
     }
 }
 
+const fn map_serving(error: ServingPolicyError) -> ManagementProductError {
+    match error {
+        ServingPolicyError::InvalidInput | ServingPolicyError::LimitExceeded => {
+            ManagementProductError::Invalid
+        }
+        ServingPolicyError::IncompatibleContracts => ManagementProductError::Incompatible,
+        ServingPolicyError::NotFound => ManagementProductError::NotFound,
+        ServingPolicyError::Conflict => ManagementProductError::Conflict,
+        ServingPolicyError::OperationIdReused => ManagementProductError::OperationIdReused,
+        ServingPolicyError::Busy | ServingPolicyError::Unavailable => {
+            ManagementProductError::Unavailable
+        }
+        ServingPolicyError::ResultUncertain => ManagementProductError::ResultUncertain,
+        ServingPolicyError::Corruption
+        | ServingPolicyError::Unsupported
+        | ServingPolicyError::ProductionBackendUnsupported
+        | ServingPolicyError::Internal => ManagementProductError::Corruption,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{net::SocketAddr, path::Path, time::Duration};
@@ -1831,6 +1992,7 @@ export const summary = query({
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn console_application_identity_preserves_one_time_secret_and_exact_ownership()
     -> TestResult {
         let directory = tempfile::tempdir()?;
@@ -1948,6 +2110,61 @@ export const summary = query({
                 .await?
                 .credentials,
             Vec::new()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn console_serving_policy_uses_manifest_evidence_cas_and_operation_replay() -> TestResult
+    {
+        let directory = tempfile::tempdir()?;
+        adapter(directory.path()).await?;
+        let product = Box::pin(open_adapter(directory.path())).await?;
+        let release_id = product
+            .status()
+            .await?
+            .releases
+            .first()
+            .ok_or("missing release")?
+            .get("releaseId")
+            .and_then(Value::as_str)
+            .ok_or("missing release ID")?
+            .to_owned();
+        let released = product.release(&release_id, None).await?;
+        assert_eq!(released.status, "servable");
+        let request = ManagementServingPolicySet {
+            expected_revision: None,
+            mode: "atomic".to_owned(),
+            releases: vec![ManagementServingRelease {
+                release_id,
+                weight_percent: 100,
+            }],
+            changed_at_micros: "1800000000000100".to_owned(),
+        };
+        let operation_id = OperationId::generate();
+        let actor = OperatorId::generate();
+        let first = product
+            .serving_policy_set(operation_id, actor, &request)
+            .await?;
+        assert_eq!(first.policy.policy_revision, 1);
+        assert_eq!(first.policy.observed_state, "pending");
+        assert!(!first.policy.converged);
+        assert!(!first.replayed);
+        let replay = product
+            .serving_policy_set(operation_id, actor, &request)
+            .await?;
+        assert!(replay.replayed);
+        assert_eq!(replay.policy, first.policy);
+        assert_eq!(product.serving_policy().await?, first.policy);
+        let operation = product.serving_operation(operation_id).await?;
+        assert_eq!(operation.kind, "setDesired");
+        assert_eq!(operation.policy_revision, 1);
+        assert_eq!(operation.observed_state, "pending");
+        assert_eq!(
+            product
+                .serving_policy_set(OperationId::generate(), actor, &request)
+                .await,
+            Err(ManagementProductError::Conflict)
         );
         Ok(())
     }
