@@ -71,6 +71,10 @@ Project/Environment from `--root`. It rejects a malformed/symlinked session file
 the rotating refresh token after a `401`, safely replaces the file, and never falls back to an
 Application or Development key.
 
+Interactive `runku link` discovers `/v1/auth/resources` at the stored authentication origin, not at
+the separately advertised Management origin. The v1 catalog accepts at most 1,024 entries and 1
+MiB; selection is strictly one-based, so `0` and values beyond the displayed list fail closed.
+
 When the local source directory does not itself contain the server's provisioned Product state,
 bind it only after login has proved access to the intended remote scope:
 

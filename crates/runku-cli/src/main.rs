@@ -68,6 +68,8 @@ const EXIT_UNCERTAIN: u8 = 9;
 const DEFAULT_AUTHENTICATION_SERVER: &str = "https://api.runku.app";
 const MANAGEMENT_LINK_FILE: &str = "management-link-v1.json";
 const MANAGEMENT_LINK_MAX_BYTES: u64 = 8 * 1024;
+const MAX_LINK_RESOURCE_CATALOG_BYTES: usize = 1024 * 1024;
+const MAX_LINK_RESOURCES: usize = 1_024;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -3198,13 +3200,19 @@ impl ManagementClient {
     }
 
     fn url(&self, path: &str) -> Result<reqwest::Url, CliFailure> {
-        reqwest::Url::parse(&format!("{}{}", self.endpoint.as_str(), path)).map_err(|_| {
-            CliFailure {
-                code: "PLATFORM_REQUEST_INVALID",
-                exit: EXIT_INTERNAL,
-            }
-        })
+        endpoint_url(&self.endpoint, path)
     }
+
+    fn authentication_url(&self, path: &str) -> Result<reqwest::Url, CliFailure> {
+        endpoint_url(&self.authentication_endpoint, path)
+    }
+}
+
+fn endpoint_url(endpoint: &DevelopmentEndpoint, path: &str) -> Result<reqwest::Url, CliFailure> {
+    reqwest::Url::parse(&format!("{}{}", endpoint.as_str(), path)).map_err(|_| CliFailure {
+        code: "PLATFORM_REQUEST_INVALID",
+        exit: EXIT_INTERNAL,
+    })
 }
 
 #[allow(clippy::option_option)]
@@ -3394,7 +3402,7 @@ async fn select_link_scope(client: &mut ManagementClient) -> Result<EnvironmentS
             exit: EXIT_USAGE,
         });
     }
-    let url = client.url("/v1/auth/resources")?;
+    let url = client.authentication_url("/v1/auth/resources")?;
     let response = client
         .request(reqwest::Method::GET, url, None, None)
         .await
@@ -3406,12 +3414,12 @@ async fn select_link_scope(client: &mut ManagementClient) -> Result<EnvironmentS
             },
             exit: failure.exit,
         })?;
-    let bytes = bounded_response(response, 256 * 1024).await?;
+    let bytes = bounded_response(response, MAX_LINK_RESOURCE_CATALOG_BYTES).await?;
     let catalog: LinkResourcesWire = serde_json::from_slice(&bytes).map_err(|_| CliFailure {
         code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
         exit: EXIT_CORRUPT,
     })?;
-    if catalog.version != 1 || catalog.resources.len() > 1_024 {
+    if catalog.version != 1 || catalog.resources.len() > MAX_LINK_RESOURCES {
         return Err(CliFailure {
             code: "PLATFORM_LINK_RESOURCE_CATALOG_INVALID",
             exit: EXIT_CORRUPT,
@@ -3472,9 +3480,17 @@ async fn select_link_scope(client: &mut ManagementClient) -> Result<EnvironmentS
             exit: EXIT_USAGE,
         })?
     };
-    options
-        .get(selected.saturating_sub(1))
-        .copied()
+    let index = link_selection_index(selected, options.len())?;
+    options.get(index).copied().ok_or(CliFailure {
+        code: "PLATFORM_LINK_SELECTION_INVALID",
+        exit: EXIT_USAGE,
+    })
+}
+
+fn link_selection_index(selected: usize, options: usize) -> Result<usize, CliFailure> {
+    selected
+        .checked_sub(1)
+        .filter(|index| *index < options)
         .ok_or(CliFailure {
             code: "PLATFORM_LINK_SELECTION_INVALID",
             exit: EXIT_USAGE,
@@ -5088,9 +5104,11 @@ fn map_release(error: LocalReleaseError) -> CliFailure {
 mod tests {
     use super::{
         AuthenticationConfigurationWire, CliFailure, EXIT_CONFLICT, EXIT_INVALID,
-        InteractiveLoginMethod, OidcClientConfigurationWire, explain_failure,
-        parse_oidc_callback_request, select_login_method, validate_oidc_client_configuration,
+        InteractiveLoginMethod, MAX_LINK_RESOURCES, OidcClientConfigurationWire, endpoint_url,
+        explain_failure, link_selection_index, parse_oidc_callback_request, select_login_method,
+        validate_oidc_client_configuration,
     };
+    use runku_development_client::DevelopmentEndpoint;
 
     #[test]
     fn known_failures_have_specific_actionable_explanations() {
@@ -5121,6 +5139,33 @@ mod tests {
         assert!(!explanation.message.contains("FUTURE_CONFLICT_CODE"));
         assert!(!explanation.message.contains('\n'));
         assert!(!explanation.hint.contains('\n'));
+    }
+
+    #[test]
+    fn link_discovery_uses_the_authentication_origin_and_rejects_selection_zero()
+    -> Result<(), &'static str> {
+        let authentication: DevelopmentEndpoint = "https://auth.example.com"
+            .parse()
+            .map_err(|_| "invalid authentication fixture")?;
+        let management: DevelopmentEndpoint = "https://management.example.com"
+            .parse()
+            .map_err(|_| "invalid management fixture")?;
+        assert_eq!(
+            endpoint_url(&authentication, "/v1/auth/resources")
+                .map_err(|_| "invalid authentication URL")?
+                .as_str(),
+            "https://auth.example.com/v1/auth/resources"
+        );
+        assert_ne!(
+            endpoint_url(&authentication, "/v1/auth/resources")
+                .map_err(|_| "invalid authentication URL")?,
+            endpoint_url(&management, "/v1/auth/resources")
+                .map_err(|_| "invalid management URL")?
+        );
+        assert!(link_selection_index(0, MAX_LINK_RESOURCES).is_err());
+        assert_eq!(link_selection_index(1, MAX_LINK_RESOURCES).ok(), Some(0));
+        assert!(link_selection_index(MAX_LINK_RESOURCES + 1, MAX_LINK_RESOURCES).is_err());
+        Ok(())
     }
 
     #[test]

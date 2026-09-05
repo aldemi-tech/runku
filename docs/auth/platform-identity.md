@@ -489,7 +489,7 @@ plus Runku's stricter verifier rules above.
 | `GET /v1/auth/oidc/config` | none | returns exact issuer and public native-client endpoints/ID/scopes/optional RFC 8707 resource; never returns secrets |
 | `POST /v1/auth/refresh` | current `rk_rt_v1_*` in JSON body | atomically rotates both tokens; reconcile an uncertain response before retry |
 | `GET /v1/auth/me` | `rk_at_v1_*` bearer | reloads current operator and grants; safe to retry |
-| `GET /v1/auth/resources` | `rk_at_v1_*` bearer | returns a bounded versioned catalog of linkable Product Environments; safe to retry |
+| `GET /v1/auth/resources` | `rk_at_v1_*` bearer at the stored authentication origin | returns at most 1,024 linkable Product Environments in a versioned response bounded to 1 MiB; safe to retry |
 | `GET /v1/auth/sessions` | `rk_at_v1_*` bearer | lists non-secret sessions owned by the operator; safe to retry |
 | `DELETE /v1/auth/sessions/{ops_*}` | `rk_at_v1_*` bearer | revokes own session; another operator requires installation `operators:manage` |
 | `POST /v1/access/invitations` | `rk_at_v1_*` + delegated authority | with `Idempotency-Key: opn_*`, atomically creates or replays one issuance; code appears only on create |
