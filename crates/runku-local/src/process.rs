@@ -621,7 +621,6 @@ impl LocalProcess {
             files.clone(),
         )
         .map_err(|_| LocalProcessError::Composition)?;
-
         let ready = Arc::new(AtomicBool::new(true));
         let router = health_routes(gateway, &ready);
         let telemetry = Arc::new(LocalProcessTelemetry::default());

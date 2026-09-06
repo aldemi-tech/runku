@@ -80,6 +80,83 @@ async fn postgres_conformance() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[tokio::test]
+async fn delimiter_pagination_never_repeats_a_folded_prefix() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("pagination.sqlite3").display()
+    );
+    let repository =
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::LOCAL)
+            .await?;
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let service =
+        ObjectStorageService::new(Arc::new(repository.clone()), SecretDigestKey::new([19; 32]));
+    let actor: ObjectStorageActor = "operator:pagination".parse()?;
+    let bucket = service
+        .create_bucket(
+            scope,
+            OperationId::generate(),
+            configuration("paging", BucketPolicy::Private)?,
+            actor.clone(),
+            TimestampMicros::new(1),
+        )
+        .await?
+        .operation
+        .bucket_id;
+    for (index, key) in ["folder/a", "folder/b", "z"].into_iter().enumerate() {
+        service
+            .put_object(
+                scope,
+                bucket,
+                OperationId::generate(),
+                &PutObjectCommand {
+                    version_id: ObjectVersionId::generate(),
+                    key: key.to_owned(),
+                    size: 1,
+                    sha256: [index as u8; 32],
+                    content_type: "text/plain".to_owned(),
+                    metadata: BTreeMap::new(),
+                    actor: actor.clone(),
+                    at: TimestampMicros::new(2 + index as i64),
+                },
+            )
+            .await?;
+    }
+    let first = service
+        .list_objects(
+            scope,
+            bucket,
+            &ObjectPageRequest {
+                prefix: String::new(),
+                delimiter: Some('/'),
+                after: None,
+                limit: 1,
+            },
+        )
+        .await?;
+    assert_eq!(first.common_prefixes, ["folder/"]);
+    assert!(first.objects.is_empty());
+    let second = service
+        .list_objects(
+            scope,
+            bucket,
+            &ObjectPageRequest {
+                prefix: String::new(),
+                delimiter: Some('/'),
+                after: first.next,
+                limit: 1,
+            },
+        )
+        .await?;
+    assert!(second.common_prefixes.is_empty());
+    assert_eq!(second.objects[0].key, "z");
+    assert!(second.next.is_none());
+    repository.close().await;
+    Ok(())
+}
+
 async fn assert_concurrent_cas(
     repository: &SqlObjectStorageRepository,
 ) -> Result<(), Box<dyn Error>> {
@@ -172,6 +249,20 @@ async fn run_conformance(
         .await?;
     assert!(!created.replayed);
     let bucket_id = created.operation.bucket_id;
+    assert_eq!(
+        service
+            .get_bucket_by_name(scope, &"media".parse()?)
+            .await?
+            .ok_or("named bucket missing")?
+            .id,
+        bucket_id
+    );
+    assert!(
+        service
+            .get_bucket_by_name(other_scope, &"media".parse()?)
+            .await?
+            .is_none()
+    );
     let replay = service
         .create_bucket(
             scope,

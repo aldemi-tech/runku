@@ -182,9 +182,16 @@ async fn run() -> Result<(), &'static str> {
                 resource: native.resource.clone(),
             })
     });
-    let router =
+    let mut router =
         build_management_router_with_product(http, identity, external, product, oidc_client)
             .map_err(|_| "SERVER_MANAGEMENT_CONFIGURATION_INVALID")?;
+    if let Some(adapter) = product_adapter.as_ref() {
+        router = router.merge(
+            adapter
+                .s3_router()
+                .map_err(|_| "SERVER_PRODUCT_CONFIGURATION_INVALID")?,
+        );
+    }
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|_| "SERVER_MANAGEMENT_LISTENER_UNAVAILABLE")?;

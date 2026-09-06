@@ -5,9 +5,9 @@ use runku_core::{EnvironmentScope, OperationId};
 
 use crate::{
     AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest, AuditPage,
-    AuditPageRequest, Bucket, BucketId, BucketPage, BucketPageRequest, DeleteObjectCommand,
-    EncryptedAccessKeyGeneration, ObjectMetadata, ObjectOperation, ObjectOperationResult,
-    ObjectPage, ObjectPageRequest, ObjectStorageCommand, ObjectStorageError,
+    AuditPageRequest, Bucket, BucketId, BucketName, BucketPage, BucketPageRequest,
+    DeleteObjectCommand, EncryptedAccessKeyGeneration, ObjectMetadata, ObjectOperation,
+    ObjectOperationResult, ObjectPage, ObjectPageRequest, ObjectStorageCommand, ObjectStorageError,
     ObjectStorageOperation, ObjectStorageOperationResult, PutObjectCommand,
 };
 
@@ -58,6 +58,13 @@ pub trait ObjectStorageRepository: Send + Sync {
         &self,
         scope: EnvironmentScope,
         bucket_id: BucketId,
+    ) -> Result<Option<Bucket>, ObjectStorageError>;
+
+    /// Gets one bucket by its exact Environment-unique logical name.
+    async fn get_bucket_by_name(
+        &self,
+        scope: EnvironmentScope,
+        name: &BucketName,
     ) -> Result<Option<Bucket>, ObjectStorageError>;
 
     /// Lists one stable bucket page for an exact Environment.

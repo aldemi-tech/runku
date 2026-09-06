@@ -5,8 +5,10 @@ conformance runs in the ordinary crate test; PostgreSQL 16+ runs when
 `RUNKU_TEST_POSTGRES_URL` is set. The compact server and authenticated Management API now compose
 bucket, object-browser/upload/download/delete, and Product access-key administration over this
 authority. Object bytes use the same filesystem/S3 provider boundary as Application Files under a
-physically disjoint content-addressed namespace. An S3-compatible public HTTP surface, native SDK
-object operations, multipart, signed/public URLs, lifecycle execution, and CLI commands remain
+physically disjoint content-addressed namespace. The attached Product listener also implements a
+path-style AWS Signature Version 4 surface for bounded single-object operations, ListObjectsV2,
+COPY, public reads, presigned URLs, and bucket CORS over the same authority. Native SDK object
+operations, multipart, lifecycle execution, coordinated backup, and CLI commands remain
 unimplemented.
 
 This capability is distinct from [Application file storage](../functions/file-storage.md).
@@ -65,8 +67,9 @@ migration checksum drift fail closed.
 ## Product access keys
 
 An access key belongs to exactly one bucket and carries an immutable label, object-key prefix, and
-non-empty subset of `list`, `read`, `write`, and `delete`. It is a Product credential, not a Cloud,
-Management API, provider, MinIO, S3, or filesystem credential.
+non-empty subset of `list`, `read`, `write`, and `delete`. It is a Product credential accepted by
+the Product bearer and S3-compatible transports; it is never a Cloud, Management API, physical
+provider, MinIO, or filesystem credential.
 
 The service generates 256 random bits and returns a secret shaped as
 `rk_st_v1_sak_<ULID>.<base64url>` exactly once. For bearer verification, SQL stores a
@@ -111,7 +114,44 @@ The implemented routes are:
 Raw PUT requires `Idempotency-Key`, `X-Runku-At-Micros`, a bounded `Content-Type`, and may include
 up to 32 bounded `X-Runku-Meta-*` headers. DELETE requires the same operation/timestamp headers plus
 `X-Runku-Object-Version`. GET returns verified bytes with ETag, SHA-256, and version headers. These
-routes are an operator-authenticated administrative surface, not the future S3 protocol.
+routes are an operator-authenticated administrative surface, separate from the Product S3 route.
+
+## S3-compatible Product route
+
+The attached Product application listener exposes path-style buckets at
+`{product-origin}/s3/{bucket}/{key}`. Configure an AWS-compatible client with endpoint
+`{product-origin}/s3`, logical region `runku`, `forcePathStyle=true`, access key ID `sak_*`, and the
+base64url suffix after the dot in the one-time `rk_st_v1_sak_*.{secret}` response as its secret
+access key. The combined `rk_st_*` bearer remains accepted only by the Product bearer verifier.
+
+Header and query-presigned AWS Signature Version 4 validate the canonical method, URI, query,
+signed headers, payload hash, `runku/s3/aws4_request` scope, bounded clock skew, key generation,
+bucket, prefix, and operation. Current and overlap generations are accepted only through their
+configured cutoff; revocation is checked on every request. Semantic content, copy, checksum, and
+`x-amz-meta-*` headers must be signed. Verification material and signing keys are redacted and
+zeroized after use.
+
+The implemented subset is `ListObjectsV2`, `HEAD`, `GET`, bounded single-request `PUT`, same-bucket
+`CopyObject`, and current-object `DELETE`. Reads from a `public_read` bucket may be anonymous;
+listing and every mutation always require Product credentials. Bucket CORS is evaluated for actual
+and preflight requests. Product ETag/version/checksum metadata and sanitized Product request IDs are
+returned without exposing the physical adapter. An exact signed retry maps to one deterministic
+Product operation ID, so the metadata journal resolves a lost acknowledgement instead of inventing
+a second logical intent.
+
+The non-multipart body bound is 64 MiB in server composition. Multipart upload/list/abort,
+version-addressed reads/deletes, byte ranges, conditional requests, lifecycle execution, and
+cross-bucket copy are not yet part of this subset and must not be advertised as implemented S3
+operations. Public and presigned URLs are Product routes; a Cloud deployment must wrap this origin
+with its exact, revocable opaque Environment route rather than reveal a cell.
+
+The ordinary Rust test uses the in-process router and durable SQLite/filesystem adapters. The
+separate external-client gate starts a loopback listener and proves PUT, HEAD, ListObjectsV2, COPY,
+GET, and DELETE with the installed official AWS CLI:
+
+```sh
+make object-storage-s3-client-check
+```
 
 ## Persistence and recovery
 
@@ -134,5 +174,6 @@ Audit rows are append-only and ordered independently within each Environment. Op
 
 The current backup/restore contract still does not coordinate these bytes, so an operator must not
 claim complete Object Storage recovery yet. Filesystem byte round trips run in ordinary tests and
-the shared S3 adapter retains its opt-in MinIO conformance, but the coordinated recovery point,
-lifecycle/garbage-collection worker, and S3-facing protocol each require their own later campaign.
+the shared physical S3 adapter retains its opt-in MinIO conformance. The coordinated recovery
+point, lifecycle/garbage-collection worker, multipart protocol, and real AWS-compatible client
+campaign each require their own later gate.

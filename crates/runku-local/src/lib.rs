@@ -12,6 +12,7 @@ mod logs;
 mod otel;
 mod process;
 mod publish;
+mod s3;
 mod state;
 
 pub use auth::{LocalAuthConfigError, load_local_auth_config};
@@ -35,6 +36,7 @@ pub use process::{
     LocalProcessTelemetrySnapshot, acquire_local_process_lease,
 };
 pub use publish::{LocalPublishError, LocalPublishResult, publish_local, publish_local_if_head};
+pub use s3::{S3ProductConfig, build_s3_router};
 pub use state::{
     LOCAL_STATE_DIRECTORY, LocalPaths, LocalProjectState, LocalStateError,
     derive_local_object_storage_digest_key, initialize_local, initialize_local_with_scope,

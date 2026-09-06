@@ -3,7 +3,6 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::{
-    collections::BTreeSet,
     fmt::Write as _,
     str::FromStr,
     sync::{
@@ -17,8 +16,8 @@ use async_trait::async_trait;
 use runku_core::{EnvironmentScope, OperationId};
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest,
-    AccessKeyState, AuditEvent, AuditPage, AuditPageRequest, Bucket, BucketId, BucketPage,
-    BucketPageRequest, BucketState, DeleteObjectCommand, EncryptedAccessKeyGeneration,
+    AccessKeyState, AuditEvent, AuditPage, AuditPageRequest, Bucket, BucketId, BucketName,
+    BucketPage, BucketPageRequest, BucketState, DeleteObjectCommand, EncryptedAccessKeyGeneration,
     EncryptedAccessKeySecret, ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage,
     ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand, ObjectStorageError,
     ObjectStorageOperation, ObjectStorageOperationResult, ObjectStorageRepository,
@@ -240,6 +239,14 @@ impl ObjectStorageRepository for SqlObjectStorageRepository {
     ) -> Result<Option<Bucket>, ObjectStorageError> {
         self.counters.reads.fetch_add(1, Ordering::Relaxed);
         load_bucket(&self.pool, scope, bucket_id).await
+    }
+    async fn get_bucket_by_name(
+        &self,
+        scope: EnvironmentScope,
+        name: &BucketName,
+    ) -> Result<Option<Bucket>, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        load_bucket_by_name(&self.pool, scope, name).await
     }
     async fn list_buckets(
         &self,
@@ -841,6 +848,25 @@ async fn load_bucket(
     row.map(|row| decode_bucket(scope, id, &row)).transpose()
 }
 
+async fn load_bucket_by_name(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    name: &BucketName,
+) -> Result<Option<Bucket>, ObjectStorageError> {
+    let row = sqlx::query("SELECT bucket_id,configuration_json,revision,state,created_at_micros,updated_at_micros FROM runku_storage_buckets WHERE project_id=$1 AND environment_id=$2 AND name=$3")
+        .bind(scope.project_id().to_string())
+        .bind(scope.environment_id().to_string())
+        .bind(name.as_str())
+        .fetch_optional(pool)
+        .await
+        .map_err(map_sqlx_error)?;
+    row.map(|row| {
+        let id: BucketId = parse_domain(&row, "bucket_id")?;
+        decode_bucket(scope, id, &row)
+    })
+    .transpose()
+}
+
 async fn load_bucket_tx(
     tx: &mut Transaction<'_, Any>,
     backend: ObjectStorageRepositoryBackend,
@@ -1416,47 +1442,61 @@ async fn list_objects(
         return Err(ObjectStorageError::NotFound);
     }
     let pattern = format!("{}%", escape_like(&request.prefix));
-    let limit = i64::from(request.limit) + 1;
-    let rows = if let Some(after) = &request.after {
-        sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' AND object_key>$5 ORDER BY object_key LIMIT $6")
-            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
-            .bind(&pattern).bind(after).bind(limit).fetch_all(pool).await.map_err(map_sqlx_error)?
-    } else {
-        sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' ORDER BY object_key LIMIT $5")
-            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
-            .bind(&pattern).bind(limit).fetch_all(pool).await.map_err(map_sqlx_error)?
-    };
-    let more = rows.len() > usize::from(request.limit);
-    let visible = &rows[..rows.len().min(usize::from(request.limit))];
-    let next = more
-        .then(|| {
-            visible
-                .last()
-                .and_then(|row| row.try_get::<String, _>("object_key").ok())
-        })
-        .flatten();
-    let mut objects = Vec::new();
-    let mut prefixes = BTreeSet::new();
-    for row in visible {
-        let object = decode_object(scope, bucket_id, row)?;
+    let mut cursor = request.after.clone();
+    let mut visible = Vec::with_capacity(usize::from(request.limit) + 1);
+    while visible.len() <= usize::from(request.limit) {
+        let row = if let Some(after) = &cursor {
+            sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' AND object_key>$5 ORDER BY object_key LIMIT 1")
+                .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+                .bind(&pattern).bind(after).fetch_optional(pool).await.map_err(map_sqlx_error)?
+        } else {
+            sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' ORDER BY object_key LIMIT 1")
+                .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+                .bind(&pattern).fetch_optional(pool).await.map_err(map_sqlx_error)?
+        };
+        let Some(row) = row else { break };
+        let object = decode_object(scope, bucket_id, &row)?;
         let suffix = object
             .key
             .strip_prefix(&request.prefix)
             .ok_or(ObjectStorageError::Corruption)?;
         if request.delimiter == Some('/') {
             if let Some(position) = suffix.find('/') {
-                prefixes.insert(format!("{}{}/", request.prefix, &suffix[..position]));
+                let prefix = format!("{}{}/", request.prefix, &suffix[..position]);
+                let folded_pattern = format!("{}%", escape_like(&prefix));
+                cursor = sqlx::query_scalar::<_, Option<String>>("SELECT MAX(object_key) FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\'")
+                    .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+                    .bind(folded_pattern).fetch_one(pool).await.map_err(map_sqlx_error)?;
+                let cursor_after = cursor.clone().ok_or(ObjectStorageError::Corruption)?;
+                visible.push((None, Some(prefix), cursor_after));
                 continue;
             }
         }
-        objects.push(object);
+        cursor = Some(object.key.clone());
+        visible.push((
+            Some(object),
+            None,
+            cursor.clone().ok_or(ObjectStorageError::Corruption)?,
+        ));
     }
+    let more = visible.len() > usize::from(request.limit);
+    if more {
+        let _ = visible.pop();
+    }
+    let next = more
+        .then(|| visible.last().map(|value| value.2.clone()))
+        .flatten();
+    let objects = visible
+        .iter_mut()
+        .filter_map(|value| value.0.take())
+        .collect();
+    let common_prefixes = visible.into_iter().filter_map(|value| value.1).collect();
     Ok(ObjectPage {
         scope,
         bucket_id,
         prefix: request.prefix.clone(),
         objects,
-        common_prefixes: prefixes.into_iter().collect(),
+        common_prefixes,
         next,
     })
 }

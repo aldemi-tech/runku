@@ -24,6 +24,14 @@ Service and development keys are one-time reveal credentials. Logs, build output
 browser bundles, traces, and error envelopes must redact them. An IdP private key and any secret
 configuration remain server-side.
 
+Logical Object Storage access keys additionally support AWS Signature Version 4, where the request
+does not carry the secret itself. Their SQL generation stores both the normal domain-separated HMAC
+verifier and a fixed-size AES-256-GCM envelope bound to Project, Environment, bucket, key, and
+generation. The deployment key is absent from SQL and backups of SQL alone are unusable for
+signing. The envelope is an internal verifier, not a secret-recovery API; decrypted candidates and
+derived SigV4 keys are redacted and zeroized, and pre-envelope generations require rotation before
+S3 use.
+
 Platform invitation (`rk_inv_v1_*`), access (`rk_at_v1_*`), and refresh (`rk_rt_v1_*`) credentials
 are also bearer secrets. Only domain-separated HMAC digests are persisted. Bootstrap/session
 peppers and the independent OIDC subject pepper belong in the secret provider and coordinated

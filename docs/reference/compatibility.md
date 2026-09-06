@@ -116,6 +116,13 @@ Product can verify AWS Signature Version 4 without storing plaintext. Existing b
 continue to authenticate by digest, but generations created before v3 must be rotated before S3
 use. Once v3 is applied, older binaries must not serve the same registry.
 
+The corresponding post-0.4.5 Product listener adds `/s3/{bucket}/{key}` with logical signing region
+`runku`. The currently implemented compatibility subset is ListObjectsV2, HEAD/GET, bounded PUT,
+same-bucket COPY, current DELETE, public read, bucket CORS, and query-presigned SigV4. It does not
+yet claim multipart, ranges, conditional/version-addressed operations, lifecycle execution, or a
+full AWS SDK/MinIO client matrix. Cloud must preserve the original signed host through its opaque
+Product route; proxying this protocol through the global Control API is not compatible.
+
 The post-0.4.5 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on
 both success and sanitized failure responses. The header is additive and CORS-exposed; the v1 JSON
 success/error envelopes remain byte-contract compatible with 0.4.5 SDK decoders. A failure before

@@ -19,11 +19,11 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest,
     AccessKeySecret, AuditPage, AuditPageRequest, Bucket, BucketConfiguration, BucketId,
-    BucketPage, BucketPageRequest, DeleteObjectCommand, EncryptedAccessKeySecret, IssuedAccessKey,
-    ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest,
-    ObjectStorageActor, ObjectStorageCommand, ObjectStorageError, ObjectStorageOperation,
-    ObjectStorageOperationResult, ObjectStorageRepository, ObjectStorageRepositoryBackend,
-    ObjectStorageTelemetrySnapshot, PutObjectCommand, SecretDigest,
+    BucketName, BucketPage, BucketPageRequest, DeleteObjectCommand, EncryptedAccessKeySecret,
+    IssuedAccessKey, ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage,
+    ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand, ObjectStorageError,
+    ObjectStorageOperation, ObjectStorageOperationResult, ObjectStorageRepository,
+    ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot, PutObjectCommand, SecretDigest,
 };
 
 /// Deployment-owned HMAC key used only to digest Product access-key secrets.
@@ -206,6 +206,15 @@ impl ObjectStorageService {
         bucket_id: BucketId,
     ) -> Result<Option<Bucket>, ObjectStorageError> {
         self.repository.get_bucket(scope, bucket_id).await
+    }
+
+    /// Gets one exact bucket by its Environment-unique logical name.
+    pub async fn get_bucket_by_name(
+        &self,
+        scope: EnvironmentScope,
+        name: &BucketName,
+    ) -> Result<Option<Bucket>, ObjectStorageError> {
+        self.repository.get_bucket_by_name(scope, name).await
     }
 
     /// Lists a bounded stable bucket page.

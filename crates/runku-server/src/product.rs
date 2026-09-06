@@ -41,8 +41,8 @@ use runku_local::{
     LocalChannelExpectation, LocalCodeResolution, LocalCreatedCredential, LocalCredentialMetadata,
     LocalIdentityError, LocalIdentityManager, LocalLogError, LocalLogManager, LocalProcess,
     LocalProcessConfig, LocalPublishError, LocalReleaseError, LocalReleaseManager,
-    LocalReleaseOutcome, LocalReleaseStatusReport, derive_local_object_storage_digest_key,
-    load_local, publish_local_if_head,
+    LocalReleaseOutcome, LocalReleaseStatusReport, S3ProductConfig, build_s3_router,
+    derive_local_object_storage_digest_key, load_local, publish_local_if_head,
 };
 use runku_management_service::{
     ManagementApplicationClient, ManagementApplicationClientCreate,
@@ -101,6 +101,8 @@ use runku_value::{CanonicalValue, IndexKey, IndexValue, TimestampMicros};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
+
+const CONSOLE_OBJECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One configured Product Environment and its lazily started serving process.
 pub struct ProductAdapter {
@@ -252,6 +254,10 @@ impl ProductAdapter {
                 scope: state.scope(),
                 service: serving.clone(),
             });
+        let storage = ObjectStorageService::new(
+            Arc::new(storage_repository),
+            SecretDigestKey::new(storage_digest_key),
+        );
         let adapter = Self {
             root,
             scope: state.scope(),
@@ -275,10 +281,7 @@ impl ProductAdapter {
             cron: Arc::new(cron_repository),
             cron_context,
             serving,
-            storage: ObjectStorageService::new(
-                Arc::new(storage_repository),
-                SecretDigestKey::new(storage_digest_key),
-            ),
+            storage,
             object_bytes,
         };
         let releases = LocalReleaseManager::open(&adapter.root)
@@ -310,6 +313,17 @@ impl ProductAdapter {
         if let Some(process) = self.process.lock().await.take() {
             process.shutdown().await;
         }
+    }
+
+    /// Builds the always-available Product S3 route over the same storage authority as Management.
+    pub(crate) fn s3_router(&self) -> Result<axum::Router, ObjectStorageError> {
+        build_s3_router(S3ProductConfig {
+            scope: self.scope,
+            service: self.storage.clone(),
+            bytes: self.object_bytes.clone(),
+            logical_region: "runku".to_owned(),
+            max_object_bytes: CONSOLE_OBJECT_MAX_BYTES,
+        })
     }
 
     async fn ensure_serving(&self) -> Result<(), ManagementProductError> {
@@ -1652,7 +1666,6 @@ impl ManagementProduct for ProductAdapter {
         bucket_id: &str,
         key: &str,
     ) -> Result<ManagementObjectDownload, ManagementProductError> {
-        const CONSOLE_OBJECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
         let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
         let object = self
             .storage
@@ -1687,7 +1700,6 @@ impl ManagementProduct for ProductAdapter {
         request: &ManagementObjectPut,
         bytes: Vec<u8>,
     ) -> Result<ManagementObjectResult, ManagementProductError> {
-        const CONSOLE_OBJECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
         let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
         runku_object_storage::validate_object_key(key).map_err(map_storage)?;
         let bucket = self

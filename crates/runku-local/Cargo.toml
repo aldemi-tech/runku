@@ -11,7 +11,10 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
 getrandom.workspace = true
+hmac.workspace = true
 runku-core = { path = "../runku-core" }
 runku-compatibility = { path = "../runku-compatibility" }
 runku-cron = { path = "../runku-cron" }
@@ -26,6 +29,7 @@ runku-identity = { path = "../runku-identity" }
 runku-identity-provider = { path = "../runku-identity-provider" }
 runku-identity-repository = { path = "../runku-identity-repository" }
 runku-observability = { path = "../runku-observability" }
+runku-object-storage = { path = "../runku-object-storage" }
 runku-node-runtime = { path = "../runku-node-runtime" }
 runku-otel = { path = "../runku-otel" }
 runku-realtime = { path = "../runku-realtime" }
@@ -37,8 +41,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "sync", "time"] }
 ulid.workspace = true
+url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
@@ -46,9 +52,11 @@ reqwest.workspace = true
 runku-build = { path = "../runku-build" }
 runku-data-postgres = { path = "../runku-data-postgres" }
 runku-protocol = { path = "../runku-protocol" }
+runku-object-storage-repository = { path = "../runku-object-storage-repository" }
 sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower.workspace = true
 url.workspace = true
 
 [lints]
