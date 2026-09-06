@@ -3,9 +3,10 @@
 Environment-scoped application-file metadata, quota reservation, signed transfer grants, and
 filesystem/S3-compatible object adapters.
 
-SQLite schema version 1 is additive state introduced with runtime contract version 2. It stores
-upload lifecycle, immutable metadata with the committed backend ETag/version, and an authoritative
-usage outbox, never raw bytes or plaintext transfer tokens. Generated object keys use:
+SQLite schema version 1 is additive state introduced when application files joined the cumulative
+runtime contract. It stores upload lifecycle, immutable metadata with the committed backend
+ETag/version, and an authoritative usage outbox, never raw bytes or plaintext transfer tokens.
+Generated object keys use:
 
 ```text
 {configured-prefix}/v1/projects/{projectId}/environments/{environmentId}/files/{fileId}

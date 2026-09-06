@@ -96,9 +96,10 @@ All fields are required and statically extractable. `auth` is `none|optional|gue
 Every context also exposes `ctx.invocation`, cooperative yield, and bounded structured `ctx.log`.
 
 Environment configuration names are exact uppercase identifiers. Declaring one or more named
-capabilities selects runtime contract version 3. Variables are visible through the authorized
-Management projection; secret values are write-only there and resolved only inside an authorized
-Action. See [Environment variables and secrets](../../docs/concepts/environment-configuration.md).
+capabilities uses the same cumulative current runtime as every new build. Variables are visible
+through the authorized Management projection; secret values are write-only there and resolved only
+inside an authorized Action. See
+[Environment variables and secrets](../../docs/concepts/environment-configuration.md).
 
 ## Data operations
 
@@ -162,9 +163,11 @@ const download = await ctx.storage.createDownload(fileId, {
 })
 ```
 
-`storage:read` and `storage:write` produce runtime contract version 2. Safe V8 and local Full Node
-implement it; the current distributed Full Node Agent path rejects it. File IDs do not authorize
-access: verify principal/application ownership before returning a grant. See
+`storage:read` and `storage:write` are part of the cumulative current runtime contract. Safe V8 and
+local Full Node implement them. The unpublished distributed Full Node profiles fail closed until
+their agent-side Platform Ops bridge is composed; this is a deployment-profile limitation, not a
+separate or older runtime edition. File IDs do not authorize access: verify principal/application
+ownership before returning a grant. See
 [Application file storage](../../docs/functions/file-storage.md) for exact APIs, HTTP flow, quotas,
 security, S3/filesystem configuration, and recovery responsibility.
 
