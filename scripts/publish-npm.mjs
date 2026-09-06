@@ -36,11 +36,7 @@ tarballs.sort(
 
 for (const tarball of tarballs) {
   const spec = `${tarball.name}@${tarball.version}`
-  const registryEnv = environmentForPackage(tarball.name)
-  const existing = run("npm", ["view", spec, "dist.integrity", "--json"], {
-    allowFailure: true,
-    env: registryEnv,
-  })
+  const existing = run("npm", ["view", spec, "dist.integrity", "--json"], { allowFailure: true })
   if (existing.status === 0) {
     const publishedIntegrity = JSON.parse(existing.stdout.trim())
     if (publishedIntegrity !== tarball.integrity) {
@@ -56,15 +52,13 @@ for (const tarball of tarballs) {
     process.stdout.write(`would publish ${spec}\n`)
     continue
   }
-  if (hasPublishedDistTag(tarball.name, tarball.version, registryEnv)) {
+  if (hasPublishedDistTag(tarball.name, tarball.version)) {
     process.stdout.write(`verified existing ${spec} while registry metadata propagates\n`)
     continue
   }
 
-  run("npm", ["publish", tarball.path, "--access", "public", "--provenance"], {
-    env: registryEnv,
-  })
-  const published = await waitForPublishedState(tarball, registryEnv)
+  run("npm", ["publish", tarball.path, "--access", "public", "--provenance"])
+  const published = await waitForPublishedState(tarball)
   if (published && published !== tarball.integrity) {
     throw new Error(`${spec} registry integrity does not match the tarball`)
   }
@@ -97,26 +91,20 @@ function isMissingPackage(result) {
   return `${result.stdout}\n${result.stderr}`.includes("E404")
 }
 
-async function waitForPublishedState(tarball, registryEnv) {
+async function waitForPublishedState(tarball) {
   const spec = `${tarball.name}@${tarball.version}`
   for (let attempt = 1; attempt <= 10; attempt += 1) {
-    const result = run("npm", ["view", spec, "dist.integrity", "--json"], {
-      allowFailure: true,
-      env: registryEnv,
-    })
+    const result = run("npm", ["view", spec, "dist.integrity", "--json"], { allowFailure: true })
     if (result.status === 0) return JSON.parse(result.stdout.trim())
     if (!isMissingPackage(result)) throw new Error(`registry verification failed for ${spec}`)
-    if (hasPublishedDistTag(tarball.name, tarball.version, registryEnv)) return null
+    if (hasPublishedDistTag(tarball.name, tarball.version)) return null
     if (attempt < 10) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000))
   }
   throw new Error(`${spec} was not acknowledged by the registry after publication`)
 }
 
-function hasPublishedDistTag(name, version, registryEnv) {
-  const result = run("npm", ["dist-tag", "ls", name], {
-    allowFailure: true,
-    env: registryEnv,
-  })
+function hasPublishedDistTag(name, version) {
+  const result = run("npm", ["dist-tag", "ls", name], { allowFailure: true })
   if (result.status !== 0) {
     if (isMissingPackage(result)) return false
     throw new Error(`could not inspect dist-tags for ${name}: ${result.stderr.trim()}`)
@@ -125,15 +113,6 @@ function hasPublishedDistTag(name, version, registryEnv) {
     .split("\n")
     .map((line) => line.slice(line.indexOf(":") + 1).trim())
     .includes(version)
-}
-
-function environmentForPackage(name) {
-  const bootstrapToken = sdkOnly && name === "@runku/react"
-    ? process.env.NPM_REACT_BOOTSTRAP_TOKEN
-    : undefined
-  return bootstrapToken
-    ? { ...process.env, NODE_AUTH_TOKEN: bootstrapToken }
-    : process.env
 }
 
 function run(command, argumentsValue, options = {}) {

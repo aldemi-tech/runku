@@ -448,8 +448,6 @@ jobs:
           name: release-npm-independent
           path: out
       - name: Publish or verify the frontend SDK pair
-        env:
-          NPM_REACT_BOOTSTRAP_TOKEN: ${{ secrets.NPM_REACT_BOOTSTRAP_TOKEN }}
         run: node scripts/publish-npm.mjs out --sdk
 
   github-release:

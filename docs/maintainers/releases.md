@@ -66,14 +66,14 @@ The release owner needs:
 5. repository immutable releases enabled after validating the first release process;
 6. protected release tags so an unreviewed commit cannot trigger publication.
 
-The React package name must be bootstrapped once before it can use trusted publishing; all existing
-package names already use it. Use the short-lived `NPM_REACT_BOOTSTRAP_TOKEN` repository secret in
-the reviewed SDK workflow for only the first React publication, then configure `release.yml` as a
-trusted publisher, remove the secret and its workflow wiring, and revoke the token immediately.
-After bootstrap, the normal workflow contains no npm token or repository secret. Never leave
-`NPM_REACT_BOOTSTRAP_TOKEN`, `NPM_TOKEN`, or `NODE_AUTH_TOKEN` in the normal release path.
+Every current package, including `@runku/react` since its 0.4.8 bootstrap, uses trusted publishing.
+The normal workflow contains no npm token or repository secret. Never add
+`NPM_REACT_BOOTSTRAP_TOKEN`, `NPM_TOKEN`, or `NODE_AUTH_TOKEN` to the release path. If a future new
+package name must be created, bootstrap it with a short-lived granular token, establish trusted
+publishing immediately, remove all token wiring, and revoke the token before considering setup
+complete.
 
-After the first successful publication, configure every package in npm with:
+Configure every package in npm with:
 
 | Setting | Value |
 |---|---|
@@ -83,9 +83,8 @@ After the first successful publication, configure every package in npm with:
 | Workflow | `release.yml` |
 | Allowed action | `npm publish` |
 
-Then require two-factor authentication, disallow traditional write tokens for each package, delete
-the `NPM_REACT_BOOTSTRAP_TOKEN` GitHub secret, and revoke the bootstrap token in npm. Do not copy a
-personal npm session file into the repository or print it in Actions logs.
+Require two-factor authentication and disallow traditional write tokens for each package. Do not
+copy a personal npm session file into the repository or print credentials in Actions logs.
 
 ## Distribution version preparation
 
