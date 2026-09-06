@@ -64,8 +64,25 @@ domain names consistently. Avoid ambiguous “it”, “production ready”, “
 
 ## Validation
 
-For documentation-only changes, run at least link validation, `git diff --check`, searches for
-stale paths/names, and the narrow SDK/CLI check relevant to examples. Code/API changes require the
-full affected gates described in `AGENTS.md` and `CONTRIBUTING.md`.
+The public portal lives in `website/`, reads the repository Markdown directly, and uses a manually
+curated sidebar so unsupported/conformance assets remain visibly separated from supported paths.
+Its visual language follows Runku's public Product mockups—paper surfaces, near-black operational
+panels, violet structure, and acid action accents—without copying Cloud-only claims into Self-Hosted
+documentation.
+
+Use:
+
+```sh
+pnpm docs:dev
+pnpm docs:typecheck
+pnpm docs:build
+```
+
+The production build fails on broken internal links. `RUNKU_DOCS_URL` and
+`RUNKU_DOCS_BASE_URL` configure the canonical deployment URL/base path; local defaults are for
+preview only. For documentation-only changes, run at least type/link/build validation,
+`git diff --check`, searches for stale paths/names, and the narrow SDK/CLI check relevant to
+examples. Code/API changes require the full affected gates described in `AGENTS.md` and
+`CONTRIBUTING.md`.
 
 Record what was not tested. Never state “all tests pass” when only a documentation check ran.

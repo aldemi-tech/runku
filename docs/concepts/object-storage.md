@@ -1,4 +1,4 @@
-# Logical Object Storage registry
+# Runku Object Storage
 
 Status: the provider-independent bucket, object metadata and Product access-key registry is implemented. SQLite
 conformance runs in the ordinary crate test; PostgreSQL 16+ runs when
@@ -14,24 +14,43 @@ registry plus filesystem object bytes and verifies their archive digest before a
 The exact supported profile has conformance with the official AWS CLI; it is not a claim to every
 AWS S3 service API.
 
-This capability is distinct from [Application file storage](../functions/file-storage.md).
-Application Files are an Action-oriented upload/download facility. Logical Object Storage is a
-Product resource model intended to become the common authority behind future native SDK,
-administrative, and S3-compatible surfaces.
+Runku Object Storage is the bucket-and-object surface of Runku Storage. It gives one Project and
+Environment logical buckets, object keys, versioning, CORS, quotas, and narrowly scoped Product
+access keys. Its data plane is compatible with a supported subset of the Amazon S3 protocol, so
+existing S3-compatible clients can connect to Runku; operators administer buckets and credentials
+through the Runku Management API.
 
-## Authority and scope
+> **Product naming:** the service applications use is Runku Object Storage. “S3-compatible” in
+> this guide describes client/protocol interoperability only. It does not rename the Runku product
+> or imply that an application connects to the operator's physical storage provider.
 
-Every bucket, current object, immutable object version, access key, operation, and audit event carries an exact `ProjectId` plus
-`EnvironmentId`. The registry never derives either value from a bucket name, credential, hostname,
-or request body. Bucket names are a conservative DNS-label subset and are unique within the exact
-Environment; an archived bucket continues to reserve its name.
+Object Storage is appropriate for static media, imports/exports, build inputs, or integrations that
+use an S3-compatible client. For end-user transfers authorized by an Action, use
+[Application file storage](../functions/file-storage.md) instead.
 
-`runku-object-storage` is a pure domain/service crate. `runku-object-storage-repository` is the only
-crate in this capability that knows about SQL. Neither crate contains provider endpoints,
-credentials, regions, physical bucket names, or object bytes. `FileObjectStore` supplies only the
-physical content-addressed byte boundary; provider enumeration never becomes Product authority.
+## What is supported now
 
-## Bucket lifecycle
+| Operation | Supported | Notes |
+|---|---:|---|
+| ListObjectsV2 | yes | prefix, delimiter, bounded page |
+| HEAD object | yes | current object or immutable version |
+| GET object | yes | range and conditional reads supported |
+| PUT object | yes | one bounded request; multipart is available separately |
+| CopyObject | yes | same logical bucket only |
+| DELETE current object | yes | requires Product credential |
+| public anonymous GET/HEAD | yes | only for a `publicRead` bucket |
+| presigned GET/PUT/etc. | yes | only for operations in this supported subset and key scope |
+| version-addressed GET/HEAD | yes | when versioning is enabled |
+| multipart upload | yes | create, upload/list parts, complete, and abort within the bounded profile |
+| list/delete object versions | yes | immutable version listing and exact-version deletion; no delete-marker resources |
+| cross-bucket copy | no | copy within the same bucket |
+| lifecycle execution | yes | rules execute in bounded batches |
+
+The endpoint is path-style and uses logical signing region `runku`:
+
+```text
+https://<product-origin>/s3/<bucket>/<object-key>
+```
 
 A create command supplies the complete initial configuration: private or public-read policy,
 bounded CORS rules, versioning, lifecycle periods, and logical quotas. Updates replace that complete
@@ -177,7 +196,9 @@ AWS CLI:
 make object-storage-s3-client-check
 ```
 
-## Persistence and recovery
+The signing region is always `runku`. Runku Product access keys are Runku credentials, not
+AWS/provider credentials. They never expose whether the Self-Hosted operator chose a filesystem or
+an external S3-compatible object store as the physical byte backend.
 
 SQLite uses one connection, WAL, full synchronous writes, foreign keys, and a busy timeout.
 Production composition accepts PostgreSQL 16+ only, with bounded pools, statement/lock/idle
@@ -187,16 +208,16 @@ inventing secrets; every newly issued or rotated generation writes both verifier
 Schema v4 adds durable multipart upload/part state and completion-claim digests. All are forward-
 only migrations; an older binary must not write the registry after a newer schema is adopted.
 
-Successful state mutation, operation journal entry, and audit event commit in one transaction.
-Audit rows are append-only and ordered independently within each Environment. Operators should:
+## Required operator permissions
 
-1. Retry `BUSY` or `UNAVAILABLE` with bounded backoff.
-2. On `RESULT_UNCERTAIN`, query the exact `OperationId` and scope.
-3. If a key operation committed but its one-time secret response was lost, rotate or revoke it;
-   never inspect SQL or backups for plaintext because none is persisted and the internal envelope
-   is not a recovery API.
-4. Treat migration checksum mismatch, malformed persisted configuration, or impossible key state
-   as corruption and stop writes until the authoritative database is restored or repaired.
+Bucket and Product-key administration uses a Platform operator session:
+
+| Task | Capability |
+|---|---|
+| list/get buckets, objects, keys, operation results | `storage:read` |
+| create/update/archive buckets | `storage:manage` |
+| issue/rotate/revoke Product access keys | `storage:manage` |
+| Management upload/delete | `storage:manage` |
 
 Compact filesystem backup format v2 archives `product`, `platform`, and `files` together, verifies
 the PostgreSQL dump and state archive digests, requires the Object Storage byte root, and restores
@@ -205,3 +226,362 @@ adds an actual object byte before backup and verifies it after restore. An exter
 still fails the compact backup closed because provider recovery must be coordinated separately.
 External-provider backup/restore, physical orphan garbage collection, and a broader SDK/client
 matrix retain their own later gates; they are not inferred from the official CLI campaign.
+
+The operator bearer is an `rk_at_v1_*` token. It is valid at the Management origin, not the Runku
+Storage data plane. Product access keys are valid at the Product origin, not the Management API.
+
+Set placeholders for the examples:
+
+```sh
+export RUNKU_MANAGEMENT_URL="https://management.example.com"
+export RUNKU_PRODUCT_URL="https://api.example.com"
+export RUNKU_PROJECT_ID="prj_..."
+export RUNKU_ENVIRONMENT_ID="env_..."
+export RUNKU_ACCESS_TOKEN="rk_at_v1_..."
+```
+
+## Create a bucket
+
+Bucket creation is an idempotent Management mutation. Generate one canonical `opn_*` operation ID
+and one current non-negative Unix-microsecond timestamp:
+
+```sh
+curl --fail-with-body \
+  -X POST \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FAY" \
+  -H "content-type: application/json" \
+  --data-binary @- \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/buckets" <<'JSON'
+{
+  "configuration": {
+    "name": "media-assets",
+    "policy": "private",
+    "cors": [],
+    "versioning": "enabled",
+    "lifecycle": {
+      "expireCurrentAfterDays": null,
+      "expireNoncurrentAfterDays": null,
+      "abortIncompleteAfterDays": null
+    },
+    "quota": {
+      "maxObjectBytes": "67108864",
+      "maxTotalBytes": "10737418240",
+      "maxObjects": "100000"
+    }
+  },
+  "atMicros": "1800000000000000"
+}
+JSON
+```
+
+The response is HTTP 201 and contains `bucket.bucketId`, complete configuration, revision `1`,
+state, timestamps, `operationId`, and `replayed`. Persist the `bkt_*` ID. The human bucket name is
+used on the Runku Storage route; the ID is used on Management routes.
+
+### Bucket name rules
+
+A name is unique within the exact Environment and:
+
+- has 3–63 ASCII characters;
+- starts with a lowercase letter;
+- ends with a lowercase letter or digit;
+- contains only lowercase letters, digits, and single hyphens;
+- cannot contain `--`.
+
+An archived bucket continues to reserve its name.
+
+## Bucket policy
+
+| Management value | Runku Storage behavior |
+|---|---|
+| `private` | every list/read/write/delete requires an authorized Product key/signature |
+| `publicRead` | anonymous GET/HEAD is allowed; list and every mutation still require a key |
+
+Public read is not a substitute for CORS. CORS controls which browsers may expose a response to
+JavaScript; it does not make a private object public.
+
+## Configure CORS
+
+Example browser rule:
+
+```json
+{
+  "origins": ["https://app.example.com"],
+  "methods": ["GET", "HEAD", "PUT"],
+  "allowedHeaders": ["content-type", "x-amz-content-sha256", "x-amz-date"],
+  "exposedHeaders": ["etag", "x-runku-object-version"],
+  "maxAgeSeconds": 3600
+}
+```
+
+Limits/rules:
+
+- at most 16 rules per bucket;
+- each origins/headers list has at most 32 values;
+- origin is an exact HTTPS origin with no trailing slash, or the only entry is `*`;
+- methods are from `GET`, `HEAD`, `PUT`, `POST`, `DELETE`;
+- header names are lowercase ASCII letters/digits/hyphens, at most 128 bytes;
+- `*`, when allowed, must be the only value in its list;
+- lists are sorted and contain no duplicates;
+- `maxAgeSeconds` is `0..86400`.
+
+Update replaces the **complete** bucket configuration, including CORS, policy, versioning,
+lifecycle, and quota. Read the current bucket first and pass its positive `expectedRevision`; do not
+send a partial patch.
+
+## Versioning and lifecycle
+
+`versioning` is `disabled` or `enabled`. With versioning enabled, a PUT creates an immutable
+`ovr_*` version and changes the current object. GET/HEAD can address a returned version ID.
+
+Lifecycle fields accept `null` or an integer from 1 through 36,500 days. Non-current expiry is
+invalid when versioning is disabled.
+
+**Current limitation:** Runku stores and validates lifecycle configuration but does not execute it.
+Do not rely on these fields to delete objects, old versions, or incomplete multipart uploads. The
+Runku Storage data plane does not support multipart in this release.
+
+## Quotas and effective limits
+
+Quota values are unsigned decimal strings to avoid JavaScript precision loss:
+
+| Field | Rule |
+|---|---|
+| `maxObjectBytes` | positive and ≤ `maxTotalBytes` |
+| `maxTotalBytes` | positive and ≤ 2^60 bytes |
+| `maxObjects` | positive and ≤ 1,000,000,000 current objects |
+
+The Product server accepts at most 64 MiB in one Runku Storage PUT. The effective per-object limit
+is therefore the smaller of `maxObjectBytes` and 64 MiB. Multipart is unavailable, so objects over
+that effective limit cannot be uploaded through the current Product route.
+
+Quotas count the logical current namespace. Retained versions still have physical capacity and
+recovery consequences even where they no longer count as current objects. Operators must monitor
+the physical backend independently.
+
+## Issue a scoped Product access key
+
+Use the `bkt_*` ID from bucket creation:
+
+```sh
+export RUNKU_BUCKET_ID="bkt_..."
+
+curl --fail-with-body \
+  -X POST \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FAZ" \
+  -H "content-type: application/json" \
+  --data-binary @- \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/buckets/${RUNKU_BUCKET_ID}/access-keys" <<'JSON'
+{
+  "configuration": {
+    "label": "media-uploader",
+    "prefix": "public/",
+    "operations": ["list", "read", "write", "delete"]
+  },
+  "atMicros": "1800000000000001"
+}
+JSON
+```
+
+The successful one-time response contains:
+
+- `key.accessKeyId`: public `sak_*` identifier;
+- non-secret configuration/revision/state;
+- `secret`: `rk_st_v1_sak_<ULID>.<base64url-secret>`;
+- operation ID and replay flag.
+
+Capture the secret exactly once into an appropriate secret manager. Replaying the operation or
+querying its operation result returns metadata without the secret. If the response is lost, rotate
+or revoke the key; do not inspect storage/database contents to recover it.
+
+### Key parameters
+
+| Field | Contract |
+|---|---|
+| `label` | trimmed non-empty human label, at most 128 bytes, no controls |
+| `prefix` | empty for whole bucket, otherwise at most 1,024 bytes, no leading `/`, controls, or `..` |
+| `operations` | non-empty subset of `list`, `read`, `write`, `delete` |
+
+The prefix is immutable for that key. Issue separate keys for separate applications or jobs; do
+not share one broad read/write/delete key across unrelated workloads.
+
+## Configure an S3-compatible client
+
+Suppose the Management response was:
+
+```text
+rk_st_v1_sak_01ARZ3NDEKTSV4RRFFQ69G5FAV.YOUR_BASE64URL_SECRET
+```
+
+Configure:
+
+```sh
+export AWS_ACCESS_KEY_ID="sak_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+export AWS_SECRET_ACCESS_KEY="YOUR_BASE64URL_SECRET"
+export AWS_DEFAULT_REGION="runku"
+export AWS_EC2_METADATA_DISABLED="true"
+```
+
+The AWS access-key ID is the `sak_*` portion. The AWS secret-access key is only the suffix after
+the dot. Do not use the complete `rk_st_*` value as either AWS field.
+
+## AWS CLI example
+
+Upload within the key prefix:
+
+```sh
+aws --endpoint-url "${RUNKU_PRODUCT_URL}/s3" \
+  s3api put-object \
+  --bucket media-assets \
+  --key public/logo.png \
+  --body ./logo.png \
+  --content-type image/png
+```
+
+Inspect and download:
+
+```sh
+aws --endpoint-url "${RUNKU_PRODUCT_URL}/s3" \
+  s3api head-object \
+  --bucket media-assets \
+  --key public/logo.png
+
+aws --endpoint-url "${RUNKU_PRODUCT_URL}/s3" \
+  s3api get-object \
+  --bucket media-assets \
+  --key public/logo.png \
+  ./downloaded-logo.png
+```
+
+List the authorized prefix:
+
+```sh
+aws --endpoint-url "${RUNKU_PRODUCT_URL}/s3" \
+  s3api list-objects-v2 \
+  --bucket media-assets \
+  --prefix public/
+```
+
+Copy within the same bucket and delete current object:
+
+```sh
+aws --endpoint-url "${RUNKU_PRODUCT_URL}/s3" \
+  s3api copy-object \
+  --bucket media-assets \
+  --key public/logo-copy.png \
+  --copy-source media-assets/public/logo.png
+
+aws --endpoint-url "${RUNKU_PRODUCT_URL}/s3" \
+  s3api delete-object \
+  --bucket media-assets \
+  --key public/logo-copy.png
+```
+
+An operation outside the key's bucket/prefix/operation set is unauthorized. Runku rechecks key
+state and generation on every request.
+
+## Object key and metadata rules
+
+An object key:
+
+- is 1–1,024 UTF-8 bytes;
+- does not start with `/`;
+- contains no control character;
+- contains no path segment exactly equal to `..`.
+
+`/` creates a logical prefix presentation only. It is not a filesystem traversal or provider path.
+
+Content type is non-empty, at most 255 bytes, with no control characters. A write accepts at most
+32 user metadata entries. Metadata names are lowercase ASCII letters/digits/hyphens and at most 128
+bytes; values are at most 1,024 bytes and contain no controls. Sign semantic content, copy,
+checksum, and `x-amz-meta-*` headers in SigV4 requests.
+
+## List and pagination
+
+ListObjectsV2 supports an exact prefix, optional `/` delimiter, and bounded pages. The Management
+object browser similarly returns current objects and `commonPrefixes`; its page limit is `1..100`
+and its continuation is the exclusive full object key.
+
+Do not infer authorization from a returned prefix. The access key's immutable prefix is enforced
+independently.
+
+## Range, conditional, version, and public reads
+
+GET/HEAD support one byte range, ETag/date preconditions, and `If-Range`. The Product ETag is a
+quoted SHA-256 digest. When versioning is enabled, pass `versionId=<ovr_*>` to read that immutable
+version.
+
+For `publicRead`, an unsigned GET/HEAD may read an object. Listing and all writes/deletes still need
+a Product key. Treat a public URL as permanently discoverable even if you later make the bucket
+private; rotate/remove content when secrecy matters.
+
+## Rotate a key
+
+Rotation requires current key revision and can keep the previous generation valid briefly. The
+cutoff must be strictly after `atMicros` and no more than 24 hours later. A new one-time secret is
+returned only on the original successful response.
+
+Recommended procedure:
+
+1. read the key and record its current revision;
+2. rotate with a short overlap and a new operation ID;
+3. capture/install the new secret in consumers;
+4. verify a signed read/write with the new generation;
+5. verify the old generation stops at the cutoff;
+6. revoke immediately if compromise is suspected.
+
+Revocation invalidates all generations and has no grace period. Listing keys never returns secret
+material.
+
+## Update and archive a bucket
+
+`PUT .../buckets/{bucketId}` is complete replacement under `expectedRevision`; it is not patch.
+Preserve fields you do not intend to change. Use a new operation ID for new intent.
+
+`DELETE .../buckets/{bucketId}` archives a bucket under current revision. Archive is irreversible
+in v1, requires the current-object namespace to be empty, and revokes all active Product keys.
+Delete application objects and verify the list is empty before archival.
+
+## Management object transfer
+
+Operators can list, GET, PUT, and delete objects below:
+
+```text
+/v1/projects/{project}/environments/{environment}/buckets/{bucketId}/objects/{key}
+```
+
+This is an administrative bearer-authenticated path, not the Runku Storage Product path. PUT/DELETE require
+an idempotency key and `X-Runku-At-Micros`; DELETE also requires exact current
+`X-Runku-Object-Version`. Use it for bounded console/repair workflows, not as an application data
+plane.
+
+## Failures and recovery
+
+| Failure | Response |
+|---|---|
+| stale bucket/key revision | re-read and reconcile; never overwrite blindly |
+| operation response uncertain | query the exact operation endpoint before retrying |
+| one-time key response lost | rotate/revoke; secret is intentionally unrecoverable |
+| quota/body limit exceeded | reduce object or change reviewed quota; multipart is unavailable |
+| signature rejected | verify region `runku`, endpoint path, clock, key split, signed headers, scope |
+| object hash/size mismatch | treat as storage corruption and stop serving affected object |
+| unsupported protocol operation | redesign around the explicit subset; do not assume complete Amazon S3 parity |
+
+## Self-Hosted backup boundary
+
+With the supported compact **filesystem** profile, the offline `runku-selfhost` backup includes the
+dedicated `files/` tree that contains both Application Files and Runku Object Storage bytes,
+together with Product metadata. Restore and post-restore Runku Storage canaries remain required.
+
+With the external object-store profile (`s3-files`), the helper fails closed instead of calling a
+metadata-only archive complete. The operator must coordinate and test a provider-native
+bucket/prefix recovery point with the matching Runku metadata snapshot. Replication, versioning,
+encryption, and lifecycle of that external S3-compatible backend remain operator responsibilities.
+See [Storage configuration](../self-hosting/storage-configuration.md)
+and the [production-readiness contract](../self-hosting/production-readiness.md).
+
+Runku SaaS can validate Runku Object Storage application behavior where the capability is enabled, but it
+does not validate the recovery, encryption, capacity, or credential storage of your Self-Hosted
+installation.

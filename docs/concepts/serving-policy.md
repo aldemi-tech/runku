@@ -1,114 +1,90 @@
-# Weighted serving policy
+# Route traffic with a serving policy
 
-An Environment may need an atomic Release cutover or a controlled gradual rollout without making
-provider placement part of Product semantics. The serving-policy registry records desired intent,
-its serving-path observation, idempotent operation results, and an immutable audit trail. The
-Product gateway consumes a converged policy through the explicit `environment:default` code target.
+The Environment serving policy controls which immutable Release serves
+`target: "environment:default"`. Use an atomic policy for a complete cutover or a gradual policy
+for a bounded percentage rollout. The policy changes traffic; it never modifies Release code or
+Environment data.
 
-## Current status and boundary
+Applications may also target an explicit `channel:`, `release:`, or authorized `workspace:`. Those
+targets do not consult the default serving policy.
 
-The following provider-independent library behavior is implemented and test-covered:
+## Permissions and routes
 
-- `runku-serving` owns validated atomic/gradual policies, Release weights, canonical compatibility
-  evidence, compare-and-set revisions, desired/observed transitions, stable errors, operation
-  results, and audit values;
-- `runku-serving-repository` implements the same exact-Environment contract over SQLite and
-  PostgreSQL 16+ with bounded pools and checksum-protected append-only migrations;
-- exact policy reads, trusted materializer observations, uncertain-operation lookup, and bounded
-  audit pagination are available through Rust APIs.
+Base path:
 
-The compact server opens this registry from the Product root and the authenticated Management
-API exposes exact-scope read, idempotent CAS replacement, and operation lookup. Replacement derives
-all compatibility evidence by loading each requested servable Release through the Environment's
-Release authority; clients cannot submit hashes. `releases:read` authorizes policy and operation
-reads, while `channels:promote` authorizes replacement and the verified operator is the audit actor.
+```text
+/v1/projects/{projectId}/environments/{environmentId}
+```
 
-After persistence, the compact server records a trusted ready observation only after every Release
-was resolved and verified through the same authority used by the runtime. Queries and Actions map
-their request identity to a deterministic percentile; Realtime uses its subscription identity and
-then pins the selected Release for all reruns. Mutations use `OperationId`, so transport retries and
-uncertain-result reconciliation select the same Release. Explicit Release, Channel, and Workspace
-targets preserve their existing semantics and never consult this policy.
+| Task | Route | Capability |
+|---|---|---|
+| read current policy | `GET <base>/serving-policy` | `releases:read` |
+| replace policy | `PUT <base>/serving-policy` | `channels:promote` |
+| reconcile uncertain operation | `GET <base>/serving-policy-operations/{opn_*}` | `releases:read` |
+| inspect compatibility | `GET <base>/schemas/compatibility` | `releases:read` |
 
-## Policy contract
+All calls use an operator `rk_at_v1_*` bearer. PUT also requires one canonical
+`Idempotency-Key: opn_*` and current compare-and-set revision.
 
-Every record and operation uses the exact `(ProjectId, EnvironmentId)` scope. A policy contains a
-canonical Release-ID-ordered set with positive integer percentage weights:
+## Policy shapes
 
-| Mode | Required shape |
+| Mode | Required Release set |
 |---|---|
-| `atomic` | exactly one Release with weight 100 |
-| `gradual` | 2–16 distinct Releases; every weight is 1–100 and the sum is exactly 100 |
+| `atomic` | exactly one Release with `weightPercent: 100` |
+| `gradual` | 2–16 distinct Releases; each weight `1..100`; total exactly 100 |
 
-Zero-weight placeholders, duplicate Releases, empty policies, fractional weights, totals other
-than 100, and an atomic multi-Release set fail before persistence. The desired revision starts at 1
-and every complete replacement uses compare-and-set and increments it once.
+The server rejects zero-weight entries, duplicates, fractions, totals other than 100, and an atomic
+policy with multiple Releases. Returned Releases are ordered canonically by Release ID; do not rely
+on request order.
 
-`pending`, `ready`, and `failed` describe observation of the desired revision. A policy update
-returns to `pending` while retaining an older observed revision, if one exists. Only a trusted
-serving reconciler may mark the exact current revision `ready` or `failed`; materialization cannot
-create an absent policy.
+## Read the current policy
 
-## Conservative Release compatibility gate
+```sh
+curl --fail-with-body \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/serving-policy"
+```
 
-`ServingPolicy::from_manifests` consumes validated `ReleaseManifestV1` values. A caller must load
-each manifest from the authoritative Release repository under the same exact Environment scope;
-the manifest contains Project identity but does not itself prove Environment association or
-servability status.
+Important fields:
 
-For a policy containing multiple Releases, all entries must have byte-identical:
-
-1. `schema_contract_hash` from the canonical Release Manifest;
-2. `index_contract_hash` from the canonical Release Manifest;
-3. the serving-policy Cron-declaration hash.
-
-The Cron hash is domain-separated as `RUNKU_CRON_DECLARATIONS_V1`, covers the complete ordered
-declaration set, and length-prefixes every canonical name, normalized UTC schedule, destination
-Function, and existing Stored Value v1 argument encoding. Release identity, implementation bytes,
-and unrelated Function contracts do not affect it.
-
-This is the first fail-closed coexistence rule, not a general schema compatibility engine. A single
-Release atomic policy has no peer to compare. A gradual policy with any schema, index, or Cron
-difference returns `SERVING_POLICY_INCOMPATIBLE_CONTRACTS` before a repository transaction begins,
-so desired state and audit remain unchanged.
-
-## Idempotency, observation, and audit
-
-Every mutation carries a caller-generated `opn_*` identity. Its digest binds the exact Project,
-Environment, command, CAS precondition, complete canonical desired-policy digest, outcome, and
-trusted timestamp.
-
-| Result | Meaning and safe action |
+| Field | Meaning |
 |---|---|
-| exact replay | same operation ID and identical command returns the immutable prior result without adding audit rows |
-| `SERVING_POLICY_OPERATION_ID_REUSED` | operation ID has different intent; stop and investigate or use a new ID only for new intent |
-| `SERVING_POLICY_CONFLICT` | policy revision or state changed; reload and decide again |
-| `SERVING_POLICY_NOT_FOUND` | exact policy is absent; materialization never creates it |
-| `SERVING_POLICY_RESULT_UNCERTAIN` | commit acknowledgement was lost; look up the same operation in the same exact scope before retrying |
-| busy/unavailable | retry with bounded backoff and the identical operation ID and body |
-| corrupt/unsupported | stop writes and preserve database/migration evidence for recovery |
+| `policyRevision` | positive desired-policy CAS revision |
+| `mode`, `releases` | complete desired routing policy |
+| `observedState` | `pending`, `ready`, or `failed` |
+| `observedPolicyRevision` | exact revision observed by serving path, or null |
+| `converged` | true only when desired revision is observed ready |
+| timestamps | canonical decimal Unix microseconds |
 
-Every newly committed command writes its policy mutation, immutable operation result, and immutable
-audit event in one transaction. Desired-policy events carry the authenticated `OperatorId` supplied
-by the trusted adapter; materializer observations are explicitly system-attributed without an
-operator. Audit pages are bounded to 100 and ordered by trusted timestamp plus operation identity.
-Audit attribution and operation lookup are not authorization: a future Management adapter must
-check current exact-scope operator authority before every read or write and may only pass the
-verified session operator as the actor.
+Do not send production traffic to `environment:default` until the desired policy is converged and
+Product readiness/application canaries pass.
 
-## Persistence and recovery
+## Set an initial atomic policy
 
-Schema v1 creates five namespaced tables:
+Use `expectedRevision: null` only when no policy exists:
 
-- `runku_serving_policies` for one desired/observed record per exact Environment;
-- `runku_serving_releases` for the current canonical weighted set and three compatibility hashes;
-- `runku_serving_operations` for replay and uncertain-result reconciliation;
-- `runku_serving_audit` for immutable successful-operation evidence;
-- `runku_serving_schema_migrations` for ordered version/checksum evidence.
+```sh
+curl --fail-with-body \
+  -X PUT \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FAY" \
+  -H "content-type: application/json" \
+  --data-binary @- \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/serving-policy" <<'JSON'
+{
+  "expectedRevision": null,
+  "mode": "atomic",
+  "releases": [
+    {"releaseId": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV", "weightPercent": 100}
+  ],
+  "changedAtMicros": "1800000000000000"
+}
+JSON
+```
 
-Header and weighted entries are read in one database snapshot and changed atomically. Future schema
-changes append a migration; applied migration text or checksums are never rewritten. Unknown future
-migration versions fail closed. SQLite is Local/test-only and PostgreSQL is Production-role-only.
+The Release must belong to the exact Environment, be servable, have a verified artifact, and be
+compatible with every other Release in the requested set. Clients cannot submit compatibility
+hashes; Runku derives them from the Release authority.
 
 The compact process stores the registry under the coordinated Product state. Backup format v2
 quiesces the writer and archives the complete `product`, `platform`, and `files` roots with the
@@ -117,27 +93,169 @@ records, Cron activation, and subordinate Product data share one verified recove
 storage profiles still require their provider recovery contract. An older binary that does not
 understand an adopted serving authority must not resume writes after rollback.
 
-## Security and serving semantics
+## Start a gradual rollout
 
-- Scope is included in every key, command digest, lookup, audit query, and SQL predicate.
-- Hash equality is compatibility evidence, not Release ownership, lifecycle, artifact integrity,
-  runtime support, or authorization. Those checks remain mandatory at the Release/Management
-  boundary.
-- Telemetry contains only aggregate counters and pool gauges; it never labels Projects,
-  Environments, Releases, operations, or policy digests.
-- `environment:default` requires a configured, exactly converged policy. Missing, pending, failed,
-  unknown, or incompatible state fails closed; it never falls back to a Channel, Release, or
-  `latest` target.
-- Selection is an integral percentile over canonical Release-ID order. Every root invocation pins
-  one exact Release before auth/execution; nested calls and Scheduled work inherit that pin.
-- Mutation selection derives from the idempotent operation identity rather than transport request
-  identity, preventing a retry from crossing Release weights.
+Read the current `policyRevision`, then completely replace the policy:
 
-## Evidence
+```sh
+curl --fail-with-body \
+  -X PUT \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FAZ" \
+  -H "content-type: application/json" \
+  --data-binary @- \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/serving-policy" <<'JSON'
+{
+  "expectedRevision": 1,
+  "mode": "gradual",
+  "releases": [
+    {"releaseId": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV", "weightPercent": 90},
+    {"releaseId": "rel_01ARZ3NDEKTSV4RRFFQ69G5FB0", "weightPercent": 10}
+  ],
+  "changedAtMicros": "1800000000000001"
+}
+JSON
+```
 
-`cargo test -p runku-serving -p runku-serving-repository` covers atomic/gradual shape, canonical
-ordering, every compatibility hash, Cron hashing, CAS and no-op rejection, replay/reuse, exact-scope
-isolation, absent-scope materialization, desired/observed transitions, audit pagination/replay,
-reopen, checksum tampering, and concurrent writers. SQLite runs by default. The identical
-repository conformance and concurrency campaign runs against PostgreSQL 16+ when
-`RUNKU_TEST_POSTGRES_URL` names an explicitly managed test database.
+Success persists desired intent and increments the policy revision. Wait for `converged: true` at
+that new revision before evaluating rollout metrics.
+
+## Compatibility gate
+
+A multi-Release policy requires every Release to have identical:
+
+1. schema contract hash;
+2. logical index contract hash;
+3. complete ordered Cron declaration hash.
+
+If any differs, PUT fails with `SERVING_POLICY_INCOMPATIBLE_CONTRACTS` and does not change desired
+state. This is deliberately conservative: adding even a compatible optional schema field/index/
+Cron declaration prevents those Releases from sharing one gradual policy in the current contract.
+
+Use:
+
+```sh
+curl --fail-with-body \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/schemas/compatibility"
+```
+
+to inspect shared hashes, Releases, diagnostics, and convergence for the persisted policy. Hash
+equality does not replace Release ownership, lifecycle, artifact-integrity, runtime, or
+authorization checks.
+
+## How a Release is selected
+
+Selection is deterministic for one logical root operation:
+
+- ordinary Query/Action: derived from request identity;
+- Realtime: derived from subscription identity and pinned for reruns;
+- Mutation: derived from operation ID so transport retry cannot cross weights;
+- nested calls: inherit the already selected exact Release;
+- scheduled work: stores/inherits an exact code pin.
+
+One request never switches Releases mid-execution. A Channel or policy change does not retarget an
+already active invocation/subscription/scheduled item.
+
+Because selection is deterministic and not a globally random counter, a small validation sample
+may not exactly match the configured percentage. Evaluate a sufficiently representative request/
+operation population and record returned `releaseId`.
+
+## Observe a rollout
+
+Before increasing weight, compare candidate and current Release for:
+
+- public status/error/latency and Function outcome codes;
+- runtime queue, deadlines, heap/limit failures, and nested-call pressure;
+- Mutation conflicts, attempts, commits, replay, and uncertain results;
+- Realtime reconnect/resync and outbox/dispatcher lag;
+- schedules/Cron outcomes and external effect reconciliation;
+- storage/backend errors and quota/capacity;
+- functional/application authorization denial changes;
+- returned exact Release distribution.
+
+Use bounded stable dimensions; do not turn user IDs, document IDs, arguments, object keys, or error
+messages into metric labels. A policy response alone is not rollout success.
+
+## Increase or finish rollout
+
+Every change is another complete replacement using the current positive revision and a new
+operation ID. Example finish:
+
+```json
+{
+  "expectedRevision": 4,
+  "mode": "atomic",
+  "releases": [
+    {"releaseId": "rel_01ARZ3NDEKTSV4RRFFQ69G5FB0", "weightPercent": 100}
+  ],
+  "changedAtMicros": "1800000000000004"
+}
+```
+
+Retain the prior Release and data compatibility through the rollback window. Removing it from the
+policy does not retire/delete it automatically.
+
+## Roll back traffic
+
+Rollback is another reviewed policy/Channel decision. For the serving-policy API, replace the
+current policy with an atomic/gradual set containing the eligible known-good Release under the
+current revision.
+
+Rollback does not:
+
+- undo documents or indexes written by candidate code;
+- reverse configuration, file/Object Storage, or external-service effects;
+- cancel already pinned schedules/Cron activations;
+- downgrade `runku-server` or its databases.
+
+Verify old code can read current data before shifting weight back.
+
+## Desired versus observed policy
+
+| State | Meaning |
+|---|---|
+| `pending` | desired policy committed but serving path has not confirmed it |
+| `ready` at desired revision | exact policy resolved/verified and serves `environment:default` |
+| `failed` at desired revision | serving path could not apply desired policy |
+| observed older revision | the new desired revision remains unconverged |
+
+Missing, pending, failed, unknown, or incompatible default policy fails closed. Runku does not fall
+back to a Channel, arbitrary Release, or `latest`.
+
+## Idempotency and conflicts
+
+| Result | Safe operator action |
+|---|---|
+| exact replay | accept immutable result; no second policy revision is created |
+| operation ID reused | stop; ID/body/path/precondition do not match |
+| CAS conflict | GET current policy and decide again |
+| result uncertain/timeout | query exact operation before repeating |
+| Release not servable/not found | verify Release lifecycle/artifact/scope |
+| incompatible contracts | use atomic cutover or redesign staged contract rollout |
+| failed/unavailable observation | keep traffic on known path, inspect readiness/logs, correct cause |
+
+Operation reconciliation:
+
+```sh
+curl --fail-with-body \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/serving-policy-operations/opn_..."
+```
+
+Use the same operation ID/body only for an exact retry. A new operation ID means new routing
+intent.
+
+## Backup and upgrade consequences
+
+A valid recovery point coordinates serving policy/operations with Releases/artifacts, Channel
+history, schema/index/Cron state, Environment lifecycle, and Product data. Restoring only routing
+metadata can select missing or incompatible code.
+
+Before upgrading the server, confirm the target version understands the persisted policy format.
+After restore/upgrade, verify policy revision, convergence, compatibility hashes, Release artifact
+integrity, deterministic Mutation replay, and representative traffic before reopening.
+
+See [Releases and Workspaces](../development/releases-and-workspaces.md),
+[remote lifecycle](../operations/remote-lifecycle.md), and
+[operator handbook](../operations/operator-handbook.md).

@@ -104,20 +104,20 @@ package-level backup contract. Supplying an external Function platform database 
 package makes the operator responsible for the coordinated database backup and restore described
 here.
 
-## Evidence
+## Deployment acceptance
 
-The explicit source campaign starts the pinned PostgreSQL 16 fixture, races two different scopes
-against one empty migrated database, proves that exactly one binding wins, executes a real
-authenticated Mutation through `LocalProcess`, reads the committed document from PostgreSQL,
-reopens the winning scope, and rejects the losing scope. The focused console-core test additionally
-opens the Product adapter on an isolated PostgreSQL database and proves Data Admin insert/get/index
-query through the same logical contract:
+Before using the optional database for live data:
 
-```sh
-make product-postgres-check
-RUNKU_TEST_POSTGRES_URL='postgres://runku:runku_local_test_only@127.0.0.1:55432/runku_test' \
-  cargo test -p runku-server console_data_admin_uses_the_same_postgres_logical_store_contract --locked
-```
+1. bind an empty PostgreSQL 16+ database to the intended exact Project/Environment;
+2. prove a second scope cannot attach to it;
+3. run one authenticated Query and Mutation, then repeat the Mutation with the same operation ID;
+4. verify document/index Data Admin reads observe the same logical state;
+5. restart Runku and repeat the reads plus a Realtime reconnect and pending schedule;
+6. create a coordinated Product-root + PostgreSQL recovery point;
+7. restore both into an empty isolated installation and verify exact IDs/data/replay/schedules;
+8. measure pool wait, lock/statement timeout, transaction conflicts, storage latency, backup time,
+   and restore time under the expected workload.
 
-This is component and composition conformance. It does not establish a database vendor SLA,
-multi-node serving window, backup RPO/RTO, or general distributed deployment support.
+Passing functional canaries does not establish a database-vendor SLA, multi-node serving window,
+RPO/RTO, or general distributed deployment support. Record measured objectives for the actual
+installation.

@@ -1,17 +1,14 @@
-# Compatibility
+# Compatibility and upgrade boundaries
 
-Runku versions contracts at every boundary that can outlive one process:
+Runku is pre-release and does not promise a general long-term compatibility window yet. Operate a
+tagged distribution as one coordinated set: CLI, `@runku/server`, `@runku/client`,
+`@runku/react`, compact server, Docker package, protocol, runtime contract, and persisted schema
+versions.
 
-- public HTTP and WebSocket protocols;
-- canonical values, document IDs, and index keys;
-- Release manifests and artifacts;
-- runtime and Platform Ops versions;
-- Workspace and development administration protocols;
-- Platform Identity Management API, operator credential formats, and schema checksum;
-- generated TypeScript API contracts.
+Unknown wire, manifest, runtime, configuration, or persisted versions fail closed. Runku never
+silently falls back to `latest`, another Release, a weaker runtime, or a different credential role.
 
-Unknown versions fail closed. A client-selected Release is served only while its contract and
-runtime remain supported. Channel routing cannot silently replace an explicit incompatible Release.
+## Current distribution matrix
 
 This release reports version `0.4.7` and has not established a general stable compatibility
 window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.7 supports a
@@ -68,7 +65,7 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.7` alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
-| TypeScript packages | `@runku/client`, `@runku/server`, and `@runku/cli` update together |
+| TypeScript packages | `@runku/client`, `@runku/react`, `@runku/server`, and `@runku/cli` update together |
 | HTTP/WebSocket | v1 envelopes; unknown versions rejected |
 | Values/index keys | v1 canonical encodings; existing vectors immutable |
 | Release/artifact | Version/digest/size/runtime descriptors verified |
@@ -78,23 +75,26 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
 | Platform Identity | Management HTTP v1, native OIDC configuration, source-owned managed reconciliation, authenticated Product lifecycle/catalog/Data Admin/log stream, schema v3; no mixed-version or downgrade window |
 
-The source line adds optional `runku init --project-id/--environment-id` flags as a compatible CLI
-extension. Existing invocations keep generated IDs. Provisioners that use the extension must require
-both IDs and must require a 0.4.0-or-newer binary.
+### Consumer summary
 
-Version 0.4.2 introduced `runku link` as a compatible CLI extension. It writes a separate
-`management-link-v1.json` descriptor after an authenticated exact-scope status check; existing
-local Product state and protocol formats are unchanged. New CLIs enforce the descriptor's pinned
-Management origin on remote commands. A CLI rollback to 0.4.0 can still read the Product root but
-does not enforce that additional local origin pin, so operators should not downgrade linked
-workstations during an origin-substitution incident.
+| Boundary | Current contract |
+|---|---|
+| CLI | tagged macOS/Linux GNU/Windows binaries for ARM64/x86-64 plus exact-version npm launcher |
+| Application authoring | matching `@runku/server` declaration/validator contract |
+| TypeScript application client | matching `@runku/client` HTTP/Realtime/file contract |
+| React and Next.js bindings | matching `@runku/react` and exact peer `@runku/client` version |
+| Public API | strict HTTP/WebSocket v1 envelopes and canonical values |
+| Compact server | Linux GNU ARM64/x86-64 binary and multi-platform non-root image |
+| Compact deployment | Docker Compose v2, one attached Product Environment, PostgreSQL 16 Platform Identity, Safe runtime |
+| Function data | Product-root SQLite by default; optional exact-scope PostgreSQL 16 profile |
+| Distributed roles/Kubernetes | no published general-purpose Agent, active-active, or Helm support window |
 
-Version 0.4.3 adds an opt-in PostgreSQL backend to the attached server Environment's logical
-document/index/Mutation/outbox/schedule store. SQLite remains the default. The PostgreSQL schema v3
-singleton binding is additive and prevents one database from being attached to a different scope;
-it does not change public Product protocols. The remaining Product repositories stay under the
-Product root, so backup/restore must coordinate both authorities. Older binaries must not serve an
-Environment after this profile is adopted.
+Node.js 20.18.1 or newer is required for the current npm/application tooling. The native CLI does
+not require Node after direct archive installation.
+
+## Coordinate versions
+
+For production and CI, pin:
 
 The 0.4.6 Management API additions for application credentials, weighted serving policy, and
 logical Object Storage are additive HTTP contracts. Operators that grant the new `storage:read`
@@ -108,11 +108,17 @@ Management binaries that recognize the same catalog. Version 0.4.6 implements
 durable disabled-definition intent. After that migration, an older binary must not serve the same
 Cron repository. Declaration editing and Scheduled retry/cancel remain outside this contract.
 
-The additive `functions:invoke` Platform capability is intended for an operator-facing Runner BFF.
-It authorizes only the human control-plane step and never authenticates Product code by itself: the
-canonical invocation still requires a separately scoped Application credential and any declared
-functional principal. Existing grants are not backfilled; operator/developer role expansion affects
-only newly issued or source-reconciled grants, while custom grants remain exact.
+- exact Runku release tag/version;
+- exact CLI/SDK package versions;
+- server OCI image by version and digest;
+- Docker package from the same release;
+- deployment configuration and secret-file layout;
+- current persisted schema/migration status;
+- application Release manifest/runtime versions.
+
+Do not combine a newly built SDK, CLI, or server with an older package merely because its method or
+JSON fields appear similar. Additive fields are safe only where the consuming version explicitly
+documents that it ignores/accepts them.
 
 The 0.4.6 Object Storage extension adds current/version metadata schema v2 and bounded
 administrative object routes. After schema v2 is applied, an older binary must not serve the same
@@ -120,10 +126,9 @@ registry. PUT writes a SHA-256 content address before the metadata transaction, 
 response is reconciled by `object-operations`; DELETE is exact-version CAS. Compact filesystem
 composition includes the registry and object bytes in its coordinated backup.
 
-Object Storage schema v3 adds nullable AES-256-GCM envelopes for access-key generations so the
-Product can verify AWS Signature Version 4 without storing plaintext. Existing bearer credentials
-continue to authenticate by digest, but generations created before v3 must be rotated before S3
-use. Once v3 is applied, older binaries must not serve the same registry.
+## Public API compatibility
+
+Public Function calls use v1 strict envelopes. A request:
 
 Object Storage schema v4 adds durable multipart upload/part state, a completion claim digest, and
 terminal completed/aborted state without rewriting earlier rows. Once v4 is applied, older binaries
@@ -151,11 +156,19 @@ locally and older gateways reject it during decoding; explicit `release:`, `chan
 weighted policy. Mutation routing is derived from `OperationId`, so the same logical retry cannot
 select a different Release.
 
-`GET .../schemas/compatibility` is an additive authenticated projection of the evidence already
-enforced by the serving registry. It requires `releases:read` and returns the desired policy
-revision, convergence, Release weights, and the common schema/index/Cron hashes. Persisted v1 sets
-are always compatible because an incompatible mutation is rejected atomically; clients must still
-check `converged` before treating the set as active traffic.
+- must include exact `version: 1`, target, Function, and canonical arguments;
+- must include a canonical operation ID for Mutation;
+- rejects unknown fields and non-canonical alternate value encodings;
+- returns exact Release identity and kind-specific metadata;
+- returns sanitized stable error code/retryability.
+
+Canonical values preserve int64, float bits, bytes, timestamps, and typed IDs across languages.
+Existing encodings cannot be reinterpreted in place; a future incompatible protocol requires a new
+version and migration/client strategy.
+
+See [HTTP without an SDK](public-api.md) and [TypeScript client](typescript-client.md).
+
+## Application declaration compatibility
 
 The 0.4.6 Management API also adds exact-Environment `metrics` and `instances/healthz` reads.
 They reuse the existing `usage:read` and `environments:read` capabilities respectively, so no grant
@@ -164,15 +177,10 @@ both responses reject unknown fields. Metrics are process-local diagnostic aggre
 become usage or billing authority; instance health deliberately uses an opaque Product identifier
 and sanitized fixed component statuses.
 
-Version 0.4.4 gives the two PostgreSQL roles unambiguous canonical configuration names:
-`RUNKU_IDENTITY_DATABASE_URL` for Platform Identity and `RUNKU_PLATFORM_DATABASE_URL` for Function
-platform data. Their `_FILE` forms contain a path to the same secret, not another connection.
-The 0.4.3 names remain deprecated aliases for the 0.4 line; canonical and legacy sources cannot be
-mixed. The same release adds optional `opn_*` idempotency to delegated-invitation creation,
-non-secret operation reconciliation, and idempotent pending-invitation revocation. Platform
-Identity schema v2 appends the operation mapping, revocation time, and audit correlation without
-reinterpreting v1 rows. Product Function/storage protocols remain unchanged; after migration,
-server rollback is unsupported.
+`runku build` binds schema, logical indexes, Function auth/visibility/capabilities/args/returns,
+runtime selection, and Cron declarations into immutable Release contracts.
+
+Classify an application change:
 
 Application files are a compatible additive SDK/HTTP surface. The historical generation-2 wire
 identifiers introduced `storage:read`/`storage:write`, but new builds no longer select a reduced
@@ -192,13 +200,19 @@ idempotent result snapshots plus value-free audit. Older binaries must not write
 it is adopted. The authenticated Management routes and `configuration:read`/
 `configuration:manage` capabilities must be upgraded together.
 
-The source line also contains an Environment lifecycle domain and repository. Its schema
-v1 creates only new `runku_environments`, `runku_environment_operations`, and
-`runku_environment_schema_migrations` tables; it does not reinterpret existing Product rows or
-change existing Product rows. Migrations are ordered and checksum-protected. The compact server and
-Management API now compose it as an additive exact-scope authority. Operators must upgrade
-Platform Identity and Management together before granting the new `environments:read` capability;
-adopting the registry still requires a coordinated backup and rollback decision.
+| Class | Examples | Deployment consequence |
+|---|---|---|
+| additive | new Function, optional field, new table/index | old callers can continue, but serving-policy hash rules may still block mixed Releases |
+| behavioral | changed auth, permission, limit, retry/effect/timing | coordinate callers/operations even when TypeScript shape is unchanged |
+| breaking | removed Function, required field, incompatible return, renamed table/index | staged migration or atomic cutover; rollback may be limited |
+| security fix | newly rejects formerly accepted behavior | prioritize safety; communicate intentional incompatibility |
+
+The current gradual serving policy requires byte-identical schema, index, and Cron contract hashes
+for every Release in the weighted set. “Logically compatible” optional additions still produce a
+different hash and therefore require an atomic cutover in that policy version.
+
+For durable schema, use expand → backfill → contract and preserve backward reads through the entire
+rollout/rollback window. Channel rollback never rewrites stored documents.
 
 The 0.4.6 Environment schema v2 extends only the operation-kind constraint with `archive` and
 `restore`; it transactionally copies all v1 journal rows and does not reinterpret Environment
@@ -217,15 +231,105 @@ while Mutation selection derives from `OperationId`. Explicit Release, Channel, 
 targets retain their existing semantics. Safe coexistence beyond the current exact-hash rule and
 distributed-runtime qualification remain separate compatibility gates.
 
-## Change rules
+## Target compatibility
 
-Additive fields require old/new reader tests and safe defaults. Auth, retry, ordering, limits,
-pinning, and failure-outcome changes are compatibility changes even without shape changes. Breaking
-wire/persisted behavior requires a new version and migration; existing vectors are never rewritten.
+| Target | Compatibility responsibility |
+|---|---|
+| `release:rel_*` | caller explicitly chooses immutable code that server/runtime must still support |
+| `channel:<name>` | operator moves policy only to an eligible compatible Release/set |
+| `environment:default` | requires a configured converged serving policy; no fallback |
+| `workspace:<name>` | development only where Environment policy permits |
 
-Release compatibility includes Function kind/visibility/contracts, schema/index prerequisites,
-runtime/Platform Ops, artifacts, Cron, and pending code pins. Channel promotion fails if a candidate
-cannot safely share data. Rollback cannot undo migrations; use expand/migrate/contract.
+An individual request, subscription, nested call tree, Cron activation, or scheduled invocation
+pins exact code for its lifetime. Upgrades must retain the runtime/artifact versions needed by
+still-live pinned work or deliberately drain/migrate that work first.
 
-A stable release matrix must publish CLI↔server↔agent↔SDK versions, protocol/persisted readers,
-dependency/OS/architecture profiles, upgrade paths, deprecation/security window, and provenance.
+## CLI/server behavior
+
+The CLI and server exchange strict Management contracts. Use the CLI version shipped for the
+server release whenever possible. New CLI features can require Management endpoints unavailable on
+older servers even when basic login/status still works.
+
+`runku link` pins the Management origin and exact Project/Environment in the application root. Do
+not downgrade to a CLI that ignores this trust binding during an origin-substitution incident.
+
+Automation must honor command-specific exit codes, compare-and-set fields, operation identity, and
+one-time secret handling. A parser accepting a flag does not prove the remote server implements the
+corresponding capability.
+
+## Persisted-state and downgrade rules
+
+Runku applies append-only/checksum-protected migrations and rejects unknown future versions. Before
+upgrade, create/verify a complete compatible backup and determine the last point at which the old
+binary can still open every authority.
+
+Known current forward-only boundaries include:
+
+| State boundary | Downgrade consequence after adoption |
+|---|---|
+| optional Function PostgreSQL singleton/scope binding schema | older binary must not serve that database |
+| Platform Identity managed-grant ownership schema | older server does not understand revision/ownership ordering |
+| Cron durable disabled-declaration schema | older server must not resume the same Cron authority |
+| Object Storage current/version and encrypted SigV4 key schemas | older server cannot safely interpret full registry/key state |
+
+Do not infer downgrade safety from an unchanged public API. If a migration crosses one of these
+boundaries, application traffic rollback may remain possible through a Channel while server-binary
+rollback is not.
+
+## Compact-server upgrade floor
+
+The current documented compact path supports a deliberate forward upgrade from the 0.3.0 compact
+installation floor to 0.4.7. It is not a promise that every arbitrary intermediate/newer pre-release
+combination can skip directly.
+
+Use [Upgrades and rollback](../operations/upgrades.md) for preflight, backup, migration, canaries,
+and rollback-decision procedure. Follow the release notes for the exact from/to pair.
+
+## Database/backend compatibility
+
+| Dependency | Supported use |
+|---|---|
+| PostgreSQL | version 16+ for Platform Identity and optional exact-scope Function logical store |
+| SQLite | local/Product-root authorities in the compact profile; files are internal state |
+| filesystem Application/Object bytes | supported compact recovery layout when using dedicated mounted `files/` root |
+| external S3-compatible backend for Runku Storage bytes | supported adapter/profile with provider-operated recovery; not copied by compact backup |
+| Operational Log external S3/NATS | optional separate HA log profile; does not make Product data HA |
+
+Changing SQLite/PostgreSQL or the Runku Storage physical backend is not a transparent configuration toggle for existing
+state. Use the documented migration/cutover boundary or remain on the current backend.
+
+## Credential compatibility
+
+Credential formats are role-specific and never interchangeable:
+
+- Application publishable/secret keys call public Functions;
+- development credentials publish authorized Workspaces;
+- operator access/refresh tokens call Authentication/Management;
+- file transfer grants authorize one bounded transfer;
+- Runku Storage Product keys sign the Runku route through its S3-compatible protocol;
+- physical external-object-store/PostgreSQL credentials are held by server/deployment configuration.
+
+An upgrade must preserve the pepper/encryption material required to verify or decrypt current
+credential state. Restoring database rows without matching peppers/keys can make credentials
+unusable; restoring old identity state can resurrect later-revoked authority and requires explicit
+reconciliation/revocation before traffic.
+
+## Upgrade acceptance
+
+For the exact selected version/profile:
+
+1. read its release notes and verify checksums/provenance/image digest;
+2. inventory server/CLI/SDK/application manifests and persisted schema versions;
+3. identify forward-only migrations and binary rollback cutoff;
+4. create and verify a complete recovery point, including external dependencies/secrets by reference;
+5. test restore into an empty isolated installation before the production window;
+6. run server configuration/migration checks;
+7. upgrade one controlled boundary following the packaged procedure;
+8. verify identity, Management scope, Release/Channel, Query/Mutation replay, Action uncertainty,
+   Realtime, schedules/Cron, Application Files/Object Storage, logs, and metrics;
+9. keep rollback traffic/data/backend consequences explicit;
+10. record the observed outcome and remaining rollback window.
+
+Runku SaaS can help compare application protocol behavior across a supported service upgrade, but
+it does not validate Self-Hosted database migrations, secret preservation, storage recovery, proxy,
+or host rollback.

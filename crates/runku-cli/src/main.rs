@@ -484,6 +484,9 @@ struct BuildOutputWire<'a> {
     generated_types_digest: String,
     generated_types_path: &'a str,
     stable_generated_types_path: &'a str,
+    stable_browser_runtime_path: &'a str,
+    stable_server_types_path: &'a str,
+    stable_server_runtime_path: &'a str,
     manifest_digest: String,
     manifest_path: &'a str,
     release_id: String,
@@ -2573,6 +2576,26 @@ async fn execute_build(
                 code: "BUILD_OUTPUT_PATH_INVALID",
                 exit: EXIT_INVALID,
             })?;
+    let stable_browser_runtime_path =
+        output
+            .stable_browser_runtime_path
+            .to_str()
+            .ok_or(CliFailure {
+                code: "BUILD_OUTPUT_PATH_INVALID",
+                exit: EXIT_INVALID,
+            })?;
+    let stable_server_types_path = output.stable_server_types_path.to_str().ok_or(CliFailure {
+        code: "BUILD_OUTPUT_PATH_INVALID",
+        exit: EXIT_INVALID,
+    })?;
+    let stable_server_runtime_path =
+        output
+            .stable_server_runtime_path
+            .to_str()
+            .ok_or(CliFailure {
+                code: "BUILD_OUTPUT_PATH_INVALID",
+                exit: EXIT_INVALID,
+            })?;
     let json = serde_json::to_string(&BuildOutputWire {
         artifact_digest: output.artifact_digest.to_string(),
         artifact_path,
@@ -2580,6 +2603,9 @@ async fn execute_build(
         generated_types_digest: output.generated_types_digest.to_string(),
         generated_types_path,
         stable_generated_types_path,
+        stable_browser_runtime_path,
+        stable_server_types_path,
+        stable_server_runtime_path,
         manifest_digest: output.manifest_digest.to_string(),
         manifest_path,
         release_id: output.release_id.to_string(),

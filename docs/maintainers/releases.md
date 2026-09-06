@@ -2,7 +2,7 @@
 
 One repository tag coordinates the public CLI, TypeScript SDKs, and compact Linux server release.
 The release workflow builds six native CLI executables and two native server executables, packages
-the same CLI bytes for GitHub and npm, publishes nine npm packages, publishes one multi-platform
+the same CLI bytes for GitHub and npm, publishes ten npm packages, publishes one multi-platform
 server image, generates checksums/SBOM/provenance, and creates the GitHub Release only after npm and
 the image are complete. It also publishes one compact self-host installation archive.
 
@@ -14,6 +14,7 @@ This procedure publishes irreversible external state. Run it only from a reviewe
 Version `X.Y.Z` produces:
 
 - `@runku/client@X.Y.Z`;
+- `@runku/react@X.Y.Z`;
 - `@runku/server@X.Y.Z`;
 - `@runku/cli@X.Y.Z`;
 - six exact-version `@runku/cli-*` native packages;
@@ -46,11 +47,11 @@ The release owner needs:
 5. repository immutable releases enabled after validating the first release process;
 6. protected release tags so an unreviewed commit cannot trigger publication.
 
-All nine current package names already use trusted publishing. The normal workflow contains no npm
-token or repository secret. A future new package name must exist before npm can select its trusted
-publisher; bootstrap only that new package with a short-lived granular token in a reviewed,
-temporary workflow change, then remove the token wiring immediately after configuring trust. Never
-leave `NPM_TOKEN` or `NODE_AUTH_TOKEN` in the normal release path.
+The React package name must be bootstrapped once before it can use trusted publishing; all existing
+package names already use it. Use a short-lived granular token in a reviewed, temporary workflow
+change for only that package, then remove the token wiring immediately after configuring trust.
+The normal workflow contains no npm token or repository secret. Never leave `NPM_TOKEN` or
+`NODE_AUTH_TOKEN` in the normal release path.
 
 After the first successful publication, configure every package in npm with:
 
@@ -68,7 +69,7 @@ session file into the repository or print it in Actions logs.
 
 ## Version preparation
 
-Runku uses one version for the CLI, both SDKs, and native packages during the `0.x` line. Update:
+Runku uses one version for the CLI, all three SDKs, and native packages during the `0.x` line. Update:
 
 - the root, CLI, client, server, and six native `package.json` files;
 - `crates/runku-cli/Cargo.toml`;
@@ -116,8 +117,8 @@ git push origin vX.Y.Z
 `.github/workflows/release.yml` runs these jobs:
 
 1. `metadata` validates the immutable tag/version relationship.
-2. `sdk-packages` installs the locked JavaScript workspace, runs the three focused package checks,
-   and packs client, server, and CLI launcher tarballs.
+2. `sdk-packages` installs the locked JavaScript workspace, runs the four focused package checks,
+   and packs client, React, server, and CLI launcher tarballs.
 3. `selfhost-package` creates the compact installation archive and statically validates its Compose
    model without starting services.
 4. Six `cli-binaries` jobs run concurrently on native ARM64/x86_64 macOS, Linux, and Windows
@@ -131,7 +132,7 @@ git push origin vX.Y.Z
 7. `server-image` combines those server bytes with the matching native CLI bytes into a digest-
    pinned distroless image, publishes both architectures, and creates the version/commit manifests
    with BuildKit SBOM and provenance attestations.
-8. `publish-npm` verifies the complete nine-package set, publishes native packages first and the
+8. `publish-npm` verifies the complete ten-package set, publishes native packages first and the
    launcher last, and compares registry integrity with the local tarballs.
 9. `github-release` generates checksums, attests assets, and publishes the release after npm and
    the server image pass.
@@ -155,6 +156,7 @@ The workflow is complete only when:
 ```sh
 npm view @runku/cli@X.Y.Z version dist.integrity
 npm view @runku/client@X.Y.Z version dist.integrity
+npm view @runku/react@X.Y.Z version dist.integrity
 npm view @runku/server@X.Y.Z version dist.integrity
 gh release view vX.Y.Z --repo aldemi-tech/runku
 docker buildx imagetools inspect ghcr.io/aldemi-tech/runku-server:X.Y.Z

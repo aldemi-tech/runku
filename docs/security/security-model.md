@@ -31,7 +31,7 @@ Function receives a value only through an exact `secret:NAME` Action capability;
 kind and name again for both Safe V8 and Full Node. The external encryption key is not stored in the
 registry and must be recovered and rotated under the installation secret procedure.
 
-Logical Object Storage access keys additionally support AWS Signature Version 4, where the request
+Runku Object Storage access keys additionally support AWS Signature Version 4, where the request
 does not carry the secret itself. Their SQL generation stores both the normal domain-separated HMAC
 verifier and a fixed-size AES-256-GCM envelope bound to Project, Environment, bucket, key, and
 generation. The deployment key is absent from SQL and backups of SQL alone are unusable for
@@ -79,7 +79,9 @@ audit, and separate failure-domain backups. See
 
 The current repository is pre-release and its production packaging and distributed operational
 profiles are not certified. Do not run mutually untrusted Full Node code outside the documented
-VM-grade microVM boundary. See [SECURITY.md](../../SECURITY.md) to report vulnerabilities.
+VM-grade microVM boundary. Use the
+[private vulnerability reporting policy](https://github.com/aldemi-tech/runku/blob/main/SECURITY.md)
+to report vulnerabilities.
 
 ## Threat classes
 
@@ -109,19 +111,10 @@ accounts, non-root/read-only images, seccomp/AppArmor guidance, immutable digest
 signatures, encrypted secret providers, NetworkPolicy deny-by-default, bounded resources, and
 separate application/management/Agent identities. Gateway never receives KVM/host privileges.
 
-Security-sensitive codec and cryptography dependencies are pinned and reviewed with their feature
-sets. An update must preserve canonical protocol bytes and must not silently enable optional unsafe
-acceleration. Identity, protocol-vector, Realtime, and affected adapter tests are required when a
-dependency crosses those boundaries. Runtime randomness continues to come from the
-operating-system RNG; deterministic signing material exists only in the public unit-test fixture
-described below and is never part of deployment trust.
-
-Run `make security-audit` with a current RustSec database as an explicit networked gate. It remains
-separate from the fast compile/package gate. JWT verification uses `jsonwebtoken`'s `aws_lc_rs`
-backend; Runku does not retain an unfixed RustCrypto `rsa` implementation merely to generate test
-signatures. RSA signing tests use a repository-public, test-only fixture with no deployment trust.
-Unmaintained transitive warnings from the pinned Deno/V8/SWC graph must be tracked during upstream
-updates even when RustSec reports no exploitable advisory.
+Security-sensitive codec and cryptography dependencies are pinned and reviewed as part of each
+published release. Verify the release's checksums, provenance, SBOM, security notices, and known
+issues before deployment. Runtime randomness comes from the operating-system RNG; no test signing
+material is part of deployment trust.
 
 One-time secret material belongs in a secret manager. Rotate with overlap, verify replacement, then
 revoke. Never place secrets in CLI arguments, ConfigMaps, image layers, source, generated types,
@@ -190,8 +183,8 @@ through the network Management API and cannot reopen bootstrap after any operato
 
 Preserve evidence, scope IDs/versions/topology, stop unsafe changes, rotate/revoke credentials,
 isolate affected roles without destroying state, reconcile uncertain effects, restore only verified
-backups, and add an adversarial regression test. Use private reporting in
-[SECURITY.md](../../SECURITY.md).
+backups, and add an adversarial regression test. Use the
+[private vulnerability reporting policy](https://github.com/aldemi-tech/runku/blob/main/SECURITY.md).
 
 Component correctness does not certify an installation. Shared untrusted Full Node requires the
 documented VM-grade boundary and verified assets. Complete the

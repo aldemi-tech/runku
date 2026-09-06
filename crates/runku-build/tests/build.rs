@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Barrier},
 };
 
-use runku_build::{BuildError, BuildMetadata, build_project, source_fingerprint};
+use runku_build::{BuildError, BuildMetadata, BuildOutput, build_project, source_fingerprint};
 use runku_contracts::{Contract, decode_contract, decode_document_schema};
 use runku_core::{BuildId, ProjectId, ReleaseId};
 use runku_releases::{
@@ -97,6 +97,20 @@ fn prepare(root: &Path) -> TestResult {
     Ok(())
 }
 
+fn assert_generated_references(output: &BuildOutput) -> TestResult {
+    let browser = String::from_utf8(std::fs::read(&output.stable_browser_runtime_path)?)?;
+    assert!(browser.contains("api = Object.freeze"));
+    assert!(browser.contains("[\"functions\"]"));
+    assert!(browser.contains("functionReference(\"functions.echo\", \"query\", \"none\")"));
+    assert!(!browser.contains("functions.insert"));
+    let server = String::from_utf8(std::fs::read(&output.stable_server_runtime_path)?)?;
+    assert!(server.contains("serverApi = Object.freeze"));
+    assert!(server.contains("functions.echo"));
+    assert!(!server.contains("functions.insert"));
+    assert!(std::fs::read(&output.stable_server_types_path)?.starts_with(b"import type"));
+    Ok(())
+}
+
 #[test]
 fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() -> TestResult {
     let directory = tempdir()?;
@@ -180,15 +194,18 @@ fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() 
             table: "messages".to_owned()
         }
     );
-    let generated = String::from_utf8(std::fs::read(output.generated_types_path)?)?;
+    let generated = String::from_utf8(std::fs::read(&output.generated_types_path)?)?;
     assert!(generated.contains("readonly \"functions.echo\""));
     assert!(generated.contains("readonly \"messages\""));
     assert!(generated.contains("readonly \"by_rank\""));
     assert!(generated.contains("DocumentId<\"messages\">"));
-    assert_eq!(
-        generated,
-        String::from_utf8(std::fs::read(output.stable_generated_types_path)?)?
-    );
+    assert!(!generated.contains("readonly auth:"));
+    assert!(!generated.contains("export declare const api:"));
+    let stable_generated = String::from_utf8(std::fs::read(&output.stable_generated_types_path)?)?;
+    assert!(stable_generated.contains("readonly auth: \"none\""));
+    assert!(stable_generated.contains("export declare const api:"));
+    assert!(stable_generated.contains("FunctionReference<\"query\""));
+    assert_generated_references(&output)?;
     assert_eq!(
         output.source_fingerprint,
         source_fingerprint(directory.path(), Path::new("runku"))?
@@ -253,6 +270,51 @@ export const invalid = query({
         ),
         Err(BuildError::InvalidConfig)
     );
+    Ok(())
+}
+
+#[test]
+fn generated_reference_trees_separate_service_and_internal_functions() -> TestResult {
+    let directory = tempdir()?;
+    prepare(directory.path())?;
+    std::fs::remove_file(directory.path().join("runku/crons.ts"))?;
+    std::fs::write(
+        directory.path().join("runku/functions.ts"),
+        r#"
+import { action, query, v } from "@runku/server"
+export const browser = query({
+  auth: "user", visibility: "public", capabilities: [],
+  args: v.null(), returns: v.string(), handler: () => "browser",
+})
+export const service = action({
+  auth: "service", visibility: "public", capabilities: [],
+  args: v.null(), returns: v.string(), handler: () => "service",
+})
+export const nested = query({
+  auth: "service", visibility: "internal", capabilities: [],
+  args: v.null(), returns: v.string(), handler: () => "nested",
+})
+"#,
+    )?;
+    let output = build_project(
+        directory.path(),
+        Path::new("runku"),
+        project(),
+        metadata(124),
+    )?;
+    let browser = String::from_utf8(std::fs::read(&output.stable_browser_runtime_path)?)?;
+    let server = String::from_utf8(std::fs::read(&output.stable_server_runtime_path)?)?;
+    assert!(browser.contains("functions.browser"));
+    assert!(!browser.contains("functions.service"));
+    assert!(!browser.contains("functions.nested"));
+    assert!(server.contains("functions.browser"));
+    assert!(server.contains("functions.service"));
+    assert!(!server.contains("functions.nested"));
+    let browser_types = String::from_utf8(std::fs::read(&output.stable_generated_types_path)?)?;
+    let server_types = String::from_utf8(std::fs::read(&output.stable_server_types_path)?)?;
+    assert!(browser_types.contains("FunctionReference<\"query\", null, string, \"user\">"));
+    assert!(!browser_types.contains("FunctionReference<\"action\", null, string, \"service\">"));
+    assert!(server_types.contains("FunctionReference<\"action\", null, string, \"service\">"));
     Ok(())
 }
 

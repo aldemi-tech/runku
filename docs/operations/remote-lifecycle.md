@@ -269,16 +269,10 @@ Recovery rules:
 - interrupted publish: repeat the same canonical package and precondition, then inspect `replayed`;
 - interrupted promotion/rollback: read status before retrying.
 
-## Reproducible acceptance campaign
+## Installation acceptance
 
-Run the complete Docker/browser/runtime gate explicitly:
-
-```sh
-make platform-lifecycle-keycloak-check
-```
-
-The campaign builds the CLI/server once, starts disposable PostgreSQL and an OIDC provider,
-drives an actual browser, and proves:
+Before admitting production traffic, exercise this lifecycle against the installed version and
+the intended OIDC provider:
 
 - invitation bootstrap without an IdP;
 - Authorization Code + PKCE, an incorrect password rejection, and invitation-bound enrollment;
@@ -289,7 +283,6 @@ drives an actual browser, and proves:
 - missing authentication, insufficient capability, and cross-Environment denial;
 - live log-stream termination after session revocation and recovery through OIDC re-login.
 
-The repository uses Keycloak only as a disposable standards fixture. The exercised product
-contract is OIDC; provider selection and qualification remain an installation decision. This gate
-is intentionally separate from `ci-check` because it starts Docker, a browser, a runtime, and the
-full lifecycle. Routine CI only compiles and performs bounded static/package validation.
+Record the exact server and CLI versions, timestamps, request/operation IDs, and redacted results.
+Keycloak can be used as a disposable standards fixture, but it does not qualify a different
+provider: provider selection and acceptance remain installation decisions.

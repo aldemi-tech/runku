@@ -5,7 +5,7 @@ rejection below expected usage, approach to the filesystem free-space floor, S3 
 throttling failures, and incomplete multipart growth reported by the provider. HTTP status,
 `x-runku-request-id`, immutable SHA-256/size metadata, and backend audit logs are the correlation
 surfaces. Never record transfer tokens, user filenames, object keys, or File IDs as unrestricted
-labels. See [Application file storage](../functions/file-storage.md#evidence-and-diagnosis).
+labels. See [Storage operational signals](../self-hosting/storage-configuration.md#operational-signals-and-incidents).
 
 This page defines signal ownership and the minimum dashboards/alerts. The storage, streaming,
 retention, HA, recovery, and exact configuration runbook is

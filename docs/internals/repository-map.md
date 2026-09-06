@@ -100,7 +100,8 @@ authoritative. The client contains no framework configuration discovery.
 ## Generated and durable paths
 
 - `target/`, package `dist/`: generated build output;
-- `runku/_generated/api.d.ts`: generated current application contract;
+- `runku/_generated/api.js` and `api.d.ts`: generated browser Function references and contract;
+- `runku/_generated/server.js` and `server.d.ts`: generated server-only Function references;
 - `.runku/builds-v1/`: immutable local packages;
 - `.runku/`: local authoritative Environment state; never fixture/scaffold material;
 - `.runku/observability.sqlite3`: hot cursor-ordered Operational Log tier;

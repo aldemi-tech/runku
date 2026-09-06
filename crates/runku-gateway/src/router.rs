@@ -348,7 +348,9 @@ async fn file_preflight(
     );
     response.headers_mut().insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("content-length, content-range, etag, x-runku-request-id"),
+        HeaderValue::from_static(
+            "accept-ranges, content-disposition, content-length, content-range, etag, x-runku-request-id",
+        ),
     );
     response.headers_mut().insert(
         header::ACCESS_CONTROL_MAX_AGE,
@@ -852,7 +854,7 @@ fn decorate(mut response: Response, request_id: RequestId, origin: Option<&str>)
         response.headers_mut().insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
             HeaderValue::from_static(
-                "content-length, content-range, content-type, etag, x-runku-file-id, x-runku-file-sha256, x-runku-invocation-id, x-runku-request-id",
+                "accept-ranges, content-disposition, content-length, content-range, content-type, etag, x-runku-file-id, x-runku-file-sha256, x-runku-invocation-id, x-runku-request-id",
             ),
         );
         response

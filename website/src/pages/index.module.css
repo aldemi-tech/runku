@@ -1,0 +1,393 @@
+.page {
+  min-height: 100vh;
+  background: var(--runku-paper);
+}
+
+.docsHeader {
+  padding: 4.5rem 1.5rem 5rem;
+  border-top: 4px solid #7459e6;
+  border-bottom: 1px solid var(--runku-line);
+  background:
+    linear-gradient(rgba(93, 69, 207, .045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(93, 69, 207, .045) 1px, transparent 1px),
+    #f6f3ec;
+  background-size: 32px 32px;
+}
+
+.headerGrid,
+.pathHeading,
+.cards {
+  max-width: 82rem;
+  margin: 0 auto;
+}
+
+.headerGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(18rem, .75fr);
+  gap: clamp(2.5rem, 7vw, 7rem);
+  align-items: end;
+}
+
+.contextLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .55rem;
+  color: #625d69;
+  font: 760 .68rem var(--ifm-font-family-monospace);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.contextLine span {
+  padding: .42rem .58rem;
+  border: 1px solid rgba(24, 23, 29, .18);
+  border-radius: .3rem;
+  background: rgba(255, 255, 255, .65);
+}
+
+.introduction h1 {
+  max-width: 13ch;
+  margin: 1.5rem 0 1.25rem;
+  color: #18171d;
+  font-size: clamp(3.1rem, 6vw, 5.8rem);
+  line-height: .94;
+  letter-spacing: -.067em;
+}
+
+.lead {
+  max-width: 48rem;
+  margin: 0;
+  color: #5f5a65;
+  font-size: clamp(1rem, 1.7vw, 1.18rem);
+  line-height: 1.7;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75rem;
+  margin-top: 1.8rem;
+}
+
+.primary,
+.secondary {
+  min-height: 3rem;
+  border: 1px solid #18171d;
+  border-radius: .45rem;
+  font-size: .82rem;
+  font-weight: 780;
+}
+
+.primary {
+  color: white;
+  background: #18171d;
+}
+
+.primary:hover {
+  color: white;
+  background: #5d45cf;
+}
+
+.secondary {
+  color: #18171d;
+  background: rgba(255, 255, 255, .72);
+}
+
+.secondary:hover {
+  border-color: #5d45cf;
+  color: #5d45cf;
+  background: white;
+}
+
+.quickReference {
+  overflow: hidden;
+  border: 1px solid rgba(24, 23, 29, .2);
+  border-radius: .7rem;
+  background: #fffefa;
+  box-shadow: .75rem .75rem 0 rgba(93, 69, 207, .09);
+}
+
+.quickHeader {
+  padding: 1rem 1.1rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid rgba(24, 23, 29, .14);
+  background: #ece7ff;
+}
+
+.quickHeader strong,
+.quickHeader span {
+  font-size: .72rem;
+}
+
+.quickHeader span {
+  color: #6b6571;
+}
+
+.quickReference > a {
+  padding: .92rem 1.1rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid rgba(24, 23, 29, .11);
+  color: #27242d;
+  font-size: .84rem;
+  font-weight: 710;
+}
+
+.quickReference > a:last-child {
+  border-bottom: 0;
+}
+
+.quickReference > a:hover {
+  color: #5d45cf;
+  background: #faf8ff;
+}
+
+.quickReference > a span {
+  color: #7459e6;
+}
+
+.pathHeading {
+  margin-top: 4.5rem;
+  padding-top: 1.15rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 2rem;
+  border-top: 1px solid rgba(24, 23, 29, .2);
+}
+
+.pathHeading > span {
+  color: #5d45cf;
+  font: 800 .7rem var(--ifm-font-family-monospace);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.pathHeading p {
+  max-width: 39rem;
+  margin: 0;
+  color: #68626e;
+  font-size: .83rem;
+  line-height: 1.55;
+  text-align: right;
+}
+
+.eyebrow {
+  color: #5d45cf;
+  font-size: .67rem;
+  font-weight: 820;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.cards {
+  margin-top: 1.5rem;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid rgba(24, 23, 29, .17);
+  border-left: 1px solid rgba(24, 23, 29, .17);
+}
+
+.card {
+  display: flex;
+  min-height: 15.5rem;
+  flex-direction: column;
+  padding: 1.6rem;
+  border-right: 1px solid rgba(24, 23, 29, .17);
+  border-bottom: 1px solid rgba(24, 23, 29, .17);
+  background: #fffefa;
+}
+
+.card h2 {
+  margin: .8rem 0;
+  color: #18171d;
+  font-size: 1.45rem;
+  letter-spacing: -.035em;
+}
+
+.card p {
+  margin-bottom: 1.5rem;
+  color: #69666f;
+  font-size: .9rem;
+  line-height: 1.6;
+}
+
+.cardLink {
+  margin-top: auto;
+  color: #5d45cf;
+  font-size: .8rem;
+  font-weight: 770;
+}
+
+.section {
+  max-width: 82rem;
+  margin: 0 auto;
+  padding: 5.5rem 1.5rem;
+}
+
+.support {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(16rem, .7fr);
+  gap: 4rem;
+  max-width: calc(82rem - 3rem);
+  margin: 5rem auto 6rem;
+  padding: clamp(2.5rem, 6vw, 5.5rem);
+  border-radius: 1.25rem;
+  background: #dcd5ff;
+}
+
+.support .eyebrow {
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+
+.support h2 {
+  margin: 0;
+  color: #18171d;
+  font-size: clamp(2.4rem, 5vw, 4.6rem);
+  line-height: .96;
+  letter-spacing: -.06em;
+}
+
+.support p {
+  max-width: 49rem;
+  margin-top: 1.6rem;
+  color: #5d5964;
+  line-height: 1.72;
+}
+
+.supportLinks {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: .7rem;
+}
+
+.supportLinks a {
+  padding: 1rem 0;
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px solid rgba(24, 23, 29, .17);
+  color: #18171d;
+  font-size: .82rem;
+  font-weight: 770;
+}
+
+.supportLinks a:last-child {
+  border-bottom: 1px solid rgba(24, 23, 29, .17);
+}
+
+.supportLinks span {
+  color: #5d45cf;
+}
+
+@media (max-width: 996px) {
+  .headerGrid,
+  .support {
+    grid-template-columns: 1fr;
+  }
+
+  .quickReference {
+    max-width: 42rem;
+  }
+
+  .cards {
+    grid-template-columns: 1fr;
+  }
+
+  .card {
+    min-height: 12.5rem;
+  }
+}
+
+@media (max-width: 600px) {
+  .docsHeader {
+    padding: 3rem 1rem 3.5rem;
+    background-size: 24px 24px;
+  }
+
+  .introduction h1 {
+    font-size: clamp(3rem, 15vw, 4.2rem);
+  }
+
+  .contextLine span:last-child {
+    display: none;
+  }
+
+  .actions {
+    display: grid;
+  }
+
+  .pathHeading {
+    margin-top: 3.5rem;
+    display: block;
+  }
+
+  .pathHeading p {
+    margin-top: .75rem;
+    text-align: left;
+  }
+
+  .support {
+    margin: 3rem .5rem 4rem;
+    border-radius: 1rem;
+  }
+}
+
+:global(html[data-theme="dark"]) .docsHeader {
+  background:
+    linear-gradient(rgba(153, 135, 255, .05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(153, 135, 255, .05) 1px, transparent 1px),
+    #111015;
+}
+
+:global(html[data-theme="dark"]) .introduction h1,
+:global(html[data-theme="dark"]) .card h2 {
+  color: #f5f1fa;
+}
+
+:global(html[data-theme="dark"]) .lead,
+:global(html[data-theme="dark"]) .pathHeading p,
+:global(html[data-theme="dark"]) .card p {
+  color: #aba6b3;
+}
+
+:global(html[data-theme="dark"]) .contextLine span,
+:global(html[data-theme="dark"]) .quickReference,
+:global(html[data-theme="dark"]) .card {
+  border-color: rgba(255, 255, 255, .15);
+  background: #1b191f;
+}
+
+:global(html[data-theme="dark"]) .quickHeader {
+  border-color: rgba(255, 255, 255, .14);
+  background: #302849;
+}
+
+:global(html[data-theme="dark"]) .quickReference > a {
+  border-color: rgba(255, 255, 255, .11);
+  color: #eeeaf3;
+}
+
+:global(html[data-theme="dark"]) .quickReference > a:hover {
+  background: #24202d;
+}
+
+:global(html[data-theme="dark"]) .cards {
+  border-color: rgba(255, 255, 255, .15);
+}
+
+:global(html[data-theme="dark"]) .support {
+  background: #302849;
+}
+
+:global(html[data-theme="dark"]) .support h2,
+:global(html[data-theme="dark"]) .supportLinks a {
+  color: #f5f1fa;
+}
+
+:global(html[data-theme="dark"]) .support p {
+  color: #bbb5c4;
+}

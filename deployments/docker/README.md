@@ -17,7 +17,7 @@ operator/CLI origin        ─► host TLS proxy ─► 127.0.0.1:3220 Managemen
                                     one runku-server container
                                       ├─ Safe V8/background/realtime
                                       ├─ Product SQLite + Parquet/DuckDB
-                                      ├─ application files ─► dedicated filesystem or external S3
+                                      ├─ Runku Storage bytes ─► filesystem or external object store
                                       └─ Platform Identity ─► PostgreSQL container
 ```
 
@@ -94,7 +94,7 @@ the bucket/region/unique prefix in `.env`, place access-key ID and secret access
 secret files, and use only an HTTPS S3-compatible endpoint. The bucket must already exist. MinIO or
 the selected provider—not Runku—owns encryption, replication, versioning, lifecycle, capacity,
 backup, restore, and availability. See
-[Application file storage](../../docs/functions/file-storage.md#operator-configuration).
+[Storage configuration and limits](../../docs/self-hosting/storage-configuration.md#external-s3-compatible-backend-profile).
 
 ## Publish the listeners through TLS
 
@@ -160,7 +160,7 @@ external encryption/key-policy reference in the manifest and cannot be `none`:
 Backup briefly stops serving, creates a PostgreSQL custom-format dump, archives the Product,
 Platform, and dedicated `files/` directories, records SHA-256 checksums and the server version, and
 restarts only if the server was previously running. On the standalone filesystem profile this is
-one recovery point for Product metadata, Application Files, and logical Object Storage bytes.
+one recovery point for Product metadata, Application Files, and Runku Object Storage bytes.
 External secret files remain excluded. Profiles using an external application-file/Object Storage
 bucket fail this command closed until the operator has created and verified a provider recovery
 point; the compact helper never labels a metadata-only copy complete.
@@ -186,7 +186,7 @@ check, starts the server, and waits for readiness. Afterward, verify operator lo
 Environment IDs, Application Keys, Channel targets, a Query and idempotent Mutation, Realtime
 reconnect, schedules, and logs across the archive/hot boundary.
 
-The standalone helper restores Application Files and logical Object Storage bytes before running
+The standalone helper restores Application Files and Runku Object Storage bytes before running
 post-restore checks. An external-S3 deployment requires the separately coordinated provider
 recovery point before Product traffic can reopen; missing or mismatched bytes make the recovery
 incomplete and can surface as `FILE_STORAGE_NOT_FOUND` or `FILE_STORAGE_CORRUPT`.

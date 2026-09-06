@@ -7,8 +7,9 @@ manifest, and the runtime resolves the current Environment value when the Functi
 
 ## Function contract
 
-Declare `variable:NAME` for non-secret values and `secret:NAME` for secrets. Names begin with an
-uppercase ASCII letter and contain only uppercase letters, digits, and `_`, up to 64 bytes.
+Declare `variable:NAME` for non-secret values and `secret:NAME` for secrets. Names contain only
+uppercase ASCII letters, digits, and `_`, are at most 64 bytes, and cannot start with `_`. A digit
+is accepted in the first position by the current version.
 Variables are available to Query, Mutation, and Action; secrets are available only to Action.
 
 ```ts
@@ -92,5 +93,6 @@ secrets. Restore the persistent state and matching key material together, then v
 history, a declared variable read, and a declared secret read without printing either secret.
 
 The registry is currently composed through the compact/server SQLite authority. A generic
-PostgreSQL repository for this configuration domain is not claimed. Cloud routes the public
-Management contract and does not copy values into Cloud control metadata.
+PostgreSQL repository for this configuration domain is not claimed. A SaaS deployment can expose
+the same Product-level Management contract, but its current service behavior must be validated
+independently and does not change the Self-Hosted state-ownership or recovery requirements above.

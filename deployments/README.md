@@ -32,7 +32,7 @@ Infrastructure technology does not redefine these responsibilities.
 | [Standalone](standalone/README.md) | Dedicated machine/VM and host requirements | Native contract and Docker compact package |
 | [Docker](docker/README.md) | One Safe V8 Environment on a dedicated Linux host | Supported compact Compose package and optional log overlays |
 | [Kubernetes](kubernetes/README.md) | Dedicated or multi-node single-region topology | Product architecture + Full Node conformance manifests |
-| [`full-node-microvm/`](full-node-microvm) | Implementation-specific shared-untrusted worker assets | Guest init and Agent conformance image only |
+| [`full-node-microvm/`](full-node-microvm/README.md) | Implementation-specific shared-untrusted worker assets | Guest init and Agent conformance image only |
 
 ## State and dependencies
 

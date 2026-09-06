@@ -166,7 +166,7 @@ pub fn build_project(
     }
     let loaded = load_project(root, source_dir, project_id)?;
     let source_fingerprint = loaded.fingerprint;
-    let generated_types = generate_types(&loaded.functions, &loaded.schema, &loaded.index_catalog)?;
+    let generated_api = generate_types(&loaded.functions, &loaded.schema, &loaded.index_catalog)?;
     let schema = loaded.schema;
     let (mut sources, function_entries) = compile_functions(loaded.functions)?;
     let mut contract_resources = Vec::new();
@@ -242,7 +242,7 @@ pub fn build_project(
         &manifest,
         &manifest_bytes,
         &artifact_bytes,
-        &generated_types,
+        &generated_api,
         source_fingerprint,
     )
 }

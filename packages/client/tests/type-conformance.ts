@@ -1,4 +1,11 @@
-import { RunkuClient, documentId, typedClient } from "../src/index.js";
+import {
+  RunkuClient,
+  documentId,
+  functionReference,
+  typedClient,
+  type FunctionArgumentsOf,
+  type FunctionResultOf,
+} from "../src/index.js";
 
 interface GeneratedFunctions {
   readonly "queries.user": {
@@ -41,6 +48,19 @@ const fileUpload = typed.uploadFile({
 const roomId = documentId("rooms", "doc_01ARZ3NDEKTSV4RRFFQ69G5FAV");
 roomId.toString() satisfies string;
 
+const userReference = functionReference<
+  "query",
+  { readonly id: string },
+  { readonly name: string } | null,
+  "user"
+>("queries.user", "query", "user");
+const referencedQuery = client.query(userReference, { id: "one" });
+referencedQuery satisfies Promise<import("../src/index.js").RunkuResult<{ readonly name: string } | null>>;
+const referenceArguments: FunctionArgumentsOf<typeof userReference> = { id: "one" };
+const referenceResult: FunctionResultOf<typeof userReference> = { name: "Ada" };
+// @ts-expect-error reference arguments remain part of the generated contract
+void client.query(userReference, { name: "Ada" });
+
 new RunkuClient({
   baseUrl: "https://api.example",
   target: "channel:stable",
@@ -60,4 +80,4 @@ void realtime.subscribe("mutations.rename", { id: "one", name: "Ada" }, { onValu
 // @ts-expect-error realtime arguments come from the generated query contract
 void realtime.subscribe("queries.user", { name: "Ada" }, { onValue() {} });
 
-void [query, mutation, subscription, fileUpload];
+void [query, mutation, subscription, fileUpload, referencedQuery, referenceArguments, referenceResult];

@@ -160,6 +160,16 @@ export interface FileDownloadGrant {
   readonly metadata: FileMetadata;
 }
 
+/** Validates and refines a structural grant returned by a storage Action. */
+export function fileUploadGrant(value: unknown): FileUploadGrant {
+  return validateUploadGrant(value as FileUploadGrant);
+}
+
+/** Validates and refines a structural grant returned by a storage Action. */
+export function fileDownloadGrant(value: unknown): FileDownloadGrant {
+  return validateDownloadGrant(value as FileDownloadGrant);
+}
+
 export interface FileUploadOptions {
   readonly signal?: AbortSignal;
   /** Must equal the media type declared when the Action created the grant. */
@@ -200,6 +210,60 @@ export interface RunkuFunctionContract<
   readonly visibility: V;
   readonly arguments: A;
   readonly result: R;
+}
+
+export type RunkuFunctionKind = "query" | "mutation" | "action";
+export type RunkuFunctionAuth = "none" | "optional" | "guest" | "user" | "service";
+export type BrowserFunctionAuth = Exclude<RunkuFunctionAuth, "service">;
+
+/** Runtime-safe generated reference to one externally callable Function. */
+export interface FunctionReference<
+  K extends RunkuFunctionKind = RunkuFunctionKind,
+  A extends RunkuValue = RunkuValue,
+  R extends RunkuValue = RunkuValue,
+  H extends RunkuFunctionAuth = RunkuFunctionAuth,
+> {
+  readonly name: string;
+  readonly kind: K;
+  readonly visibility: "public";
+  readonly auth: H;
+  /** Type-only invariant marker. It is never present in generated JavaScript. */
+  readonly __arguments?: (value: A) => A;
+  /** Type-only covariant marker. It is never present in generated JavaScript. */
+  readonly __result?: () => R;
+}
+
+export type FunctionArgumentsOf<Reference> = Reference extends FunctionReference<
+  infer _Kind,
+  infer Arguments,
+  infer _Result,
+  infer _Auth
+> ? Arguments : never;
+
+export type FunctionResultOf<Reference> = Reference extends FunctionReference<
+  infer _Kind,
+  infer _Arguments,
+  infer Result,
+  infer _Auth
+> ? Result : never;
+
+/** Creates the immutable runtime value used by generated `api` and `serverApi` trees. */
+export function functionReference<
+  K extends RunkuFunctionKind,
+  A extends RunkuValue,
+  R extends RunkuValue,
+  H extends RunkuFunctionAuth,
+>(
+  name: string,
+  kind: K,
+  auth: H,
+): FunctionReference<K, A, R, H> {
+  return Object.freeze({
+    name: validateFunctionName(name),
+    kind,
+    visibility: "public" as const,
+    auth,
+  });
 }
 
 type FunctionNameOfKind<Registry, Kind extends RunkuFunctionContract["kind"]> = {
@@ -328,31 +392,61 @@ export class RunkuClient {
     });
   }
 
-  async query<T extends RunkuValue = RunkuValue>(
+  query<A extends RunkuValue, T extends RunkuValue>(
+    reference: FunctionReference<"query", A, T>,
+    argumentsValue: A,
+    options?: CallOptions,
+  ): Promise<RunkuResult<T>>;
+  query<T extends RunkuValue = RunkuValue>(
     functionName: string,
+    argumentsValue: RunkuValue,
+    options?: CallOptions,
+  ): Promise<RunkuResult<T>>;
+  async query<T extends RunkuValue = RunkuValue>(
+    functionName: string | FunctionReference<"query", RunkuValue, T>,
     argumentsValue: RunkuValue,
     options: CallOptions = {},
   ): Promise<RunkuResult<T>> {
-    return this.#call<T>("query", functionName, argumentsValue, options, undefined);
+    return this.#call<T>("query", functionNameOf(functionName, "query"), argumentsValue, options, undefined);
   }
 
-  async mutation<T extends RunkuValue = RunkuValue>(
+  mutation<A extends RunkuValue, T extends RunkuValue>(
+    reference: FunctionReference<"mutation", A, T>,
+    argumentsValue: A,
+    options?: MutationOptions,
+  ): Promise<RunkuResult<T>>;
+  mutation<T extends RunkuValue = RunkuValue>(
     functionName: string,
+    argumentsValue: RunkuValue,
+    options?: MutationOptions,
+  ): Promise<RunkuResult<T>>;
+  async mutation<T extends RunkuValue = RunkuValue>(
+    functionName: string | FunctionReference<"mutation", RunkuValue, T>,
     argumentsValue: RunkuValue,
     options: MutationOptions = {},
   ): Promise<RunkuResult<T>> {
     const operationId = options.operationId === undefined
       ? generateOperationId()
       : validateOperationId(options.operationId);
-    return this.#call<T>("mutation", functionName, argumentsValue, options, operationId);
+    return this.#call<T>("mutation", functionNameOf(functionName, "mutation"), argumentsValue, options, operationId);
   }
 
-  async action<T extends RunkuValue = RunkuValue>(
+  action<A extends RunkuValue, T extends RunkuValue>(
+    reference: FunctionReference<"action", A, T>,
+    argumentsValue: A,
+    options?: CallOptions,
+  ): Promise<RunkuResult<T>>;
+  action<T extends RunkuValue = RunkuValue>(
     functionName: string,
+    argumentsValue: RunkuValue,
+    options?: CallOptions,
+  ): Promise<RunkuResult<T>>;
+  async action<T extends RunkuValue = RunkuValue>(
+    functionName: string | FunctionReference<"action", RunkuValue, T>,
     argumentsValue: RunkuValue,
     options: CallOptions = {},
   ): Promise<RunkuResult<T>> {
-    return this.#call<T>("action", functionName, argumentsValue, options, undefined);
+    return this.#call<T>("action", functionNameOf(functionName, "action"), argumentsValue, options, undefined);
   }
 
   /** Streams a body through a one-shot upload grant. Uploads are never automatically retried. */
@@ -557,9 +651,19 @@ export class RunkuRealtimeClient {
     this.#factory = config.webSocketFactory ?? defaultWebSocketFactory;
   }
 
+  subscribe<A extends RunkuValue, T extends RunkuValue>(
+    reference: FunctionReference<"query", A, T>,
+    argumentsValue: A,
+    options: RealtimeSubscribeOptions<T>,
+  ): RunkuRealtimeSubscription<T>;
   subscribe<T extends RunkuValue = RunkuValue>(
     functionName: string,
-    argumentsValue: T,
+    argumentsValue: RunkuValue,
+    options: RealtimeSubscribeOptions<T>,
+  ): RunkuRealtimeSubscription<T>;
+  subscribe<T extends RunkuValue = RunkuValue>(
+    functionName: string | FunctionReference<"query", RunkuValue, T>,
+    argumentsValue: RunkuValue,
     options: RealtimeSubscribeOptions<T>,
   ): RunkuRealtimeSubscription<T> {
     if (this.#closed) throw localError("SDK_REALTIME_CLOSED", "The Realtime client is closed.");
@@ -572,7 +676,7 @@ export class RunkuRealtimeClient {
     });
     const record: SubscriptionRecord = {
       localId,
-      functionName: validateFunctionName(functionName),
+      functionName: functionNameOf(functionName, "query"),
       argumentsWire: encodeValue(argumentsValue),
       target: options.target === undefined ? this.#target : validateTarget(options.target),
       onValue: (state) => options.onValue(state as RunkuRealtimeState<T>),
@@ -1334,6 +1438,18 @@ function validateFunctionName(value: string): string {
     throw new TypeError("function name is not canonical");
   }
   return value;
+}
+
+function functionNameOf(
+  value: string | FunctionReference,
+  expectedKind: RunkuFunctionKind,
+): string {
+  if (typeof value === "string") return validateFunctionName(value);
+  if (value === null || typeof value !== "object"
+      || value.kind !== expectedKind || value.visibility !== "public") {
+    throw new TypeError(`Function reference is not a public ${expectedKind}`);
+  }
+  return validateFunctionName(value.name);
 }
 
 function validateOperationId(value: string): string {

@@ -3,8 +3,9 @@
 This is the auditable acceptance contract for declaring a Runku Self-Hosted profile supported. The
 compact Docker profile completes a deliberately bounded subset of this checklist. Unchecked items
 remain requirements for general distributed roles, Full Node, active-active/multi-node, and
-Kubernetes; they do not silently expand the compact support boundary. Component tests and
-conformance assets are evidence inputs, not substitutes for a released package.
+Kubernetes; they do not silently expand the compact support boundary. Release evidence and
+conformance results are inputs, not substitutes for validating the installed package in the
+operator's own environment.
 
 ## Compact Docker support decision
 
@@ -33,24 +34,20 @@ The release package and executable evidence cover:
 - [x] restore into empty state with secret fingerprint, `doctor`, migration, and readiness checks;
 - [x] restart with automatic serving of the persisted Channel;
 - [x] explicit image upgrade preflight and guarded data deletion;
-- [x] source-level standalone archive and NATS/S3 archive failure/conformance tests.
+- [x] standalone archive and NATS/S3 archive failure/conformance coverage.
 - [x] filesystem and digest-pinned MinIO file transfer conformance with Safe V8, local Full Node,
       authenticated Action-to-HTTP integration, quotas, checksums, range reads, and cleanup.
 
-The source gate is `make selfhost-package-check`; a pre-tag manual Release workflow additionally
-runs `scripts/selfhost-artifact-evidence.sh` with freshly built Linux archives and the packaged
-Compose profile. The HA dependency campaign remains `make operational-logs-ha-check`.
-
-The server binary also implements an opt-in, exact-Environment PostgreSQL logical Product store,
-covered by `make product-postgres-check`. It is not enabled by the compact Compose package and does
-not expand that package's existing backup or multi-node support boundary.
+The server also implements an opt-in, exact-Environment PostgreSQL logical Product store. It is not
+enabled by the compact Compose package and does not expand that package's existing backup or
+multi-node support boundary. Qualify this profile separately before relying on it.
 
 ## Definition of supported
 
 An independent operator must be able to install, configure, secure, administer, observe, back up,
 restore, upgrade, diagnose, and remove a version using only published artifacts and public
-documentation. Routine operations must not require compiling private composition code, editing
-database rows, or reverse-engineering crates.
+documentation. Routine operations must not require compiling implementation code, editing database
+rows, or reverse-engineering internals.
 
 ## Release artifacts
 

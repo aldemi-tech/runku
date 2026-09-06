@@ -157,7 +157,9 @@ async fn grants_stream_upload_download_range_and_fail_closed() -> Result<(), Box
             .headers()
             .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains("content-range"))
+            .is_some_and(|value| value.contains("content-range")
+                && value.contains("accept-ranges")
+                && value.contains("content-disposition"))
     );
     assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 1-3/6");
     assert_eq!(to_bytes(response.into_body(), 16).await?.as_ref(), b"bcd");

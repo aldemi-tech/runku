@@ -74,6 +74,7 @@ jobs:
           cp LICENSE packages/cli/LICENSE
           npm pack ./packages/client --pack-destination out/npm
           npm pack ./packages/server --pack-destination out/npm
+          npm pack ./packages/react --pack-destination out/npm
           npm pack ./packages/cli --pack-destination out/npm
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

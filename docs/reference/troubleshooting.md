@@ -33,14 +33,15 @@ public issue.
 4. For `CORRUPT`, stop issuing grants for the affected workflow, preserve metadata/provider audit
    evidence, verify object length/SHA-256 and the coordinated backup, then restore or remove through
    an application-authorized procedure.
-5. Run the bounded canary and relevant tests listed in
-   [Application file storage](../functions/file-storage.md#evidence-and-diagnosis).
+5. Run the bounded read/write/delete canaries in
+   [Storage configuration](../self-hosting/storage-configuration.md#validate-before-startup).
 
 ## Symptom map
 
 | Symptom | Likely class | First check |
 |---|---|---|
 | `runku dev` says process already running | Lease/conflict | Find the owner; stop cleanly, do not delete locks |
+| `LOCAL_STATE_UNAVAILABLE` after changing checkout/CLI | Possible CLI/state version mismatch | Compare `runku --version` with the source package before retrying |
 | Listener unavailable | Port conflict/config | Check initialized listener and owning process |
 | Source change not served | Build/watch policy | Read build error; last valid revision should remain active |
 | 401/403 application call | Key/JWT/policy/origin | Validate each authorization axis separately |
@@ -75,6 +76,15 @@ different Workspace/listener values. Inspect permissions and preserve `.runku/`.
 The listener is durable local state. Identify the process using the address. Stop that process or
 initialize a different application root before state exists. Do not manually edit
 `local-state-v1.json`.
+
+### CLI and local-state version mismatch
+
+A stale executable may reduce a newer local-state/schema failure to `LOCAL_STATE_UNAVAILABLE`, and
+some read-only commands may still succeed. Before treating it as a database or filesystem outage,
+compare `runku --version` with `packages/cli/package.json` in a source checkout. Reinstall the
+current source CLI with `make install-cli`, or set the example's `RUNKU_BIN` to the exact binary
+built by the checkout. Do not delete, edit, or partially replace `.runku/`; preserve it and reopen
+it only with the same or an explicitly compatible CLI.
 
 ### Dotenv conflict
 

@@ -9,7 +9,7 @@ use runku_core::{BuildId, ReleaseId};
 use runku_releases::{ReleaseManifestV1, Sha256Digest};
 use serde::Serialize;
 
-use crate::BuildError;
+use crate::{BuildError, codegen::GeneratedApi};
 
 const STATE_DIRECTORY: &str = ".runku";
 const BUILDS_DIRECTORY: &str = "builds-v1";
@@ -20,6 +20,9 @@ const RESULT_FILE: &str = "build-result-v1.json";
 const GENERATED_TYPES_FILE: &str = "runku.generated.d.ts";
 const GENERATED_DIRECTORY: &str = "_generated";
 const STABLE_GENERATED_TYPES_FILE: &str = "api.d.ts";
+const STABLE_BROWSER_RUNTIME_FILE: &str = "api.js";
+const STABLE_SERVER_TYPES_FILE: &str = "server.d.ts";
+const STABLE_SERVER_RUNTIME_FILE: &str = "server.js";
 const LOCK_DEADLINE: Duration = Duration::from_secs(5);
 const LOCK_RETRY: Duration = Duration::from_millis(20);
 
@@ -42,6 +45,12 @@ pub struct BuildOutput {
     pub generated_types_path: PathBuf,
     /// Absolute path to the stable declarations consumed by application source.
     pub stable_generated_types_path: PathBuf,
+    /// Absolute path to the browser-safe generated Function reference tree.
+    pub stable_browser_runtime_path: PathBuf,
+    /// Absolute path to the server-only generated Function declarations.
+    pub stable_server_types_path: PathBuf,
+    /// Absolute path to the server-only generated Function reference tree.
+    pub stable_server_runtime_path: PathBuf,
     /// Digest of exact generated TypeScript declaration bytes.
     pub generated_types_digest: Sha256Digest,
     /// True when the exact immutable directory already existed.
@@ -70,7 +79,7 @@ pub(crate) fn publish_output(
     manifest: &ReleaseManifestV1,
     manifest_bytes: &[u8],
     artifact_bytes: &[u8],
-    generated_types: &[u8],
+    generated_api: &GeneratedApi,
     source_fingerprint: Sha256Digest,
 ) -> Result<BuildOutput, BuildError> {
     let root = std::fs::canonicalize(root).map_err(|_| BuildError::InvalidPath)?;
@@ -85,7 +94,7 @@ pub(crate) fn publish_output(
     let builds = state.join(BUILDS_DIRECTORY);
     create_private_directory(&builds)?;
     let manifest_digest = Sha256Digest::of(manifest_bytes);
-    let generated_types_digest = Sha256Digest::of(generated_types);
+    let generated_types_digest = Sha256Digest::of(&generated_api.immutable_declarations);
     let result_bytes = result_bytes(manifest, manifest_digest, generated_types_digest)?;
     let final_directory = builds.join(manifest.release_id.to_string());
     if final_directory.exists() {
@@ -93,14 +102,13 @@ pub(crate) fn publish_output(
             &final_directory,
             manifest_bytes,
             artifact_bytes,
-            generated_types,
+            generated_api,
             &result_bytes,
         )?;
-        let stable_generated_types_path =
-            publish_stable_generated_types(&source_root, generated_types)?;
+        let stable = publish_stable_generated_api(&source_root, generated_api)?;
         return Ok(build_output(
             &final_directory,
-            stable_generated_types_path,
+            stable,
             manifest,
             manifest_digest,
             generated_types_digest,
@@ -119,7 +127,10 @@ pub(crate) fn publish_output(
     create_private_directory(&staging)?;
     write_new_file(&staging.join(MANIFEST_FILE), manifest_bytes)?;
     write_new_file(&staging.join(ARTIFACT_FILE), artifact_bytes)?;
-    write_new_file(&staging.join(GENERATED_TYPES_FILE), generated_types)?;
+    write_new_file(
+        &staging.join(GENERATED_TYPES_FILE),
+        &generated_api.immutable_declarations,
+    )?;
     write_new_file(&staging.join(RESULT_FILE), &result_bytes)?;
     sync_directory(&staging)?;
     match std::fs::rename(&staging, &final_directory) {
@@ -129,13 +140,13 @@ pub(crate) fn publish_output(
                 &final_directory,
                 manifest_bytes,
                 artifact_bytes,
-                generated_types,
+                generated_api,
                 &result_bytes,
             )?;
             let _ = std::fs::remove_dir(&staging);
             return Ok(build_output(
                 &final_directory,
-                publish_stable_generated_types(&source_root, generated_types)?,
+                publish_stable_generated_api(&source_root, generated_api)?,
                 manifest,
                 manifest_digest,
                 generated_types_digest,
@@ -146,11 +157,10 @@ pub(crate) fn publish_output(
         Err(_) => return Err(BuildError::Unavailable),
     }
     sync_directory(&builds)?;
-    let stable_generated_types_path =
-        publish_stable_generated_types(&source_root, generated_types)?;
+    let stable = publish_stable_generated_api(&source_root, generated_api)?;
     Ok(build_output(
         &final_directory,
-        stable_generated_types_path,
+        stable,
         manifest,
         manifest_digest,
         generated_types_digest,
@@ -182,7 +192,7 @@ fn result_bytes(
 
 fn build_output(
     directory: &Path,
-    stable_generated_types_path: PathBuf,
+    stable: StableGeneratedApi,
     manifest: &ReleaseManifestV1,
     manifest_digest: Sha256Digest,
     generated_types_digest: Sha256Digest,
@@ -197,7 +207,10 @@ fn build_output(
         manifest_path: directory.join(MANIFEST_FILE),
         artifact_path: directory.join(ARTIFACT_FILE),
         generated_types_path: directory.join(GENERATED_TYPES_FILE),
-        stable_generated_types_path,
+        stable_generated_types_path: stable.declarations,
+        stable_browser_runtime_path: stable.browser_runtime,
+        stable_server_types_path: stable.server_declarations,
+        stable_server_runtime_path: stable.server_runtime,
         generated_types_digest,
         replayed,
         source_fingerprint,
@@ -219,28 +232,68 @@ fn canonical_source_root(root: &Path, source_dir: &Path) -> Result<PathBuf, Buil
     Ok(source_root)
 }
 
-fn publish_stable_generated_types(
+struct StableGeneratedApi {
+    declarations: PathBuf,
+    browser_runtime: PathBuf,
+    server_declarations: PathBuf,
+    server_runtime: PathBuf,
+}
+
+fn publish_stable_generated_api(
     source_root: &Path,
-    generated_types: &[u8],
-) -> Result<PathBuf, BuildError> {
+    generated_api: &GeneratedApi,
+) -> Result<StableGeneratedApi, BuildError> {
     let directory = source_root.join(GENERATED_DIRECTORY);
     create_generated_directory(&directory)?;
-    let final_path = directory.join(STABLE_GENERATED_TYPES_FILE);
+    let declarations = publish_generated_file(
+        &directory,
+        STABLE_GENERATED_TYPES_FILE,
+        &generated_api.browser_declarations,
+    )?;
+    let browser_runtime = publish_generated_file(
+        &directory,
+        STABLE_BROWSER_RUNTIME_FILE,
+        &generated_api.browser_runtime,
+    )?;
+    let server_declarations = publish_generated_file(
+        &directory,
+        STABLE_SERVER_TYPES_FILE,
+        &generated_api.server_declarations,
+    )?;
+    let server_runtime = publish_generated_file(
+        &directory,
+        STABLE_SERVER_RUNTIME_FILE,
+        &generated_api.server_runtime,
+    )?;
+    sync_directory(&directory)?;
+    Ok(StableGeneratedApi {
+        declarations,
+        browser_runtime,
+        server_declarations,
+        server_runtime,
+    })
+}
+
+fn publish_generated_file(
+    directory: &Path,
+    name: &'static str,
+    bytes: &[u8],
+) -> Result<PathBuf, BuildError> {
+    let final_path = directory.join(name);
     if let Ok(metadata) = std::fs::symlink_metadata(&final_path)
         && (!metadata.is_file() || metadata.file_type().is_symlink())
     {
         return Err(BuildError::InvalidPath);
     }
-    let staging = directory.join(format!(".{STABLE_GENERATED_TYPES_FILE}.tmp"));
+    let staging = directory.join(format!(".{name}.tmp"));
     if let Ok(metadata) = std::fs::symlink_metadata(&staging) {
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(BuildError::InvalidPath);
         }
         std::fs::remove_file(&staging).map_err(|_| BuildError::Unavailable)?;
     }
-    write_new_file(&staging, generated_types)?;
+    write_new_file(&staging, bytes)?;
     std::fs::rename(&staging, &final_path).map_err(|_| BuildError::Unavailable)?;
-    sync_directory(&directory)?;
     Ok(final_path)
 }
 
@@ -259,14 +312,17 @@ fn verify_existing(
     directory: &Path,
     manifest: &[u8],
     artifact: &[u8],
-    generated_types: &[u8],
+    generated_api: &GeneratedApi,
     result: &[u8],
 ) -> Result<(), BuildError> {
     require_directory(directory)?;
     for (name, expected) in [
         (MANIFEST_FILE, manifest),
         (ARTIFACT_FILE, artifact),
-        (GENERATED_TYPES_FILE, generated_types),
+        (
+            GENERATED_TYPES_FILE,
+            generated_api.immutable_declarations.as_slice(),
+        ),
         (RESULT_FILE, result),
     ] {
         let path = directory.join(name);

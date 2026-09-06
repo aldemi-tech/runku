@@ -38,7 +38,7 @@ Security vulnerabilities must follow [SECURITY.md](SECURITY.md), not the public 
 
 ## Required context and evidence
 
-Read [`AGENTS.md`](AGENTS.md), the documentation portal, platform model, architecture, and
+Read [`AGENTS.md`](https://github.com/aldemi-tech/runku/blob/main/AGENTS.md), the documentation portal, platform model, architecture, and
 task-specific contracts. Classify compatibility before editing. Existing vectors/durable formats
 are never reinterpreted in place.
 

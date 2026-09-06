@@ -14,6 +14,7 @@ const expectedNames = new Set([
   ...releasePlatforms.map((platform) => platform.packageName),
   "@runku/client",
   "@runku/server",
+  "@runku/react",
   "@runku/cli",
 ])
 const actualNames = new Set(tarballs.map((tarball) => tarball.name))
@@ -73,8 +74,9 @@ function findTarballs(parent) {
 function publishOrder(name) {
   if (name.startsWith("@runku/cli-")) return 0
   if (name === "@runku/client" || name === "@runku/server") return 1
-  if (name === "@runku/cli") return 2
-  return 3
+  if (name === "@runku/react") return 2
+  if (name === "@runku/cli") return 3
+  return 4
 }
 
 function isMissingPackage(result) {

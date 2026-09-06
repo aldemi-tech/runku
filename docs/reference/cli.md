@@ -222,8 +222,11 @@ runku build [--root PATH] \
 
 Discovers `runku/`, validates source/metadata/capabilities/contracts, produces an immutable package
 under `.runku/builds-v1/rel_*`, preserves Release-specific generated types, and updates
-`runku/_generated/api.d.ts`. Consume the `manifestPath` and `artifactPath` from its JSON result;
-never guess filenames or edit build output.
+the `api` and `serverApi` runtime/declaration pairs below `runku/_generated`. Its JSON result reports
+the Release-specific `generatedTypesPath`, the four stable `stableGeneratedTypesPath`,
+`stableBrowserRuntimePath`, `stableServerTypesPath`, and `stableServerRuntimePath` values, plus
+`manifestPath` and `artifactPath`. The additional runtime/server modules are not added retroactively
+to the immutable `builds-v1` format. Never guess filenames or edit build output.
 
 ### `runku publish`
 

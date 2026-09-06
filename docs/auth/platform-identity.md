@@ -5,11 +5,11 @@ It is independent from [Application Identity](application-identity.md): `rk_pub_
 `rk_dev_*` identify application or development clients and never authorize Management API access.
 Operator sessions use their own `rk_at_v1_*` access and `rk_rt_v1_*` refresh credentials.
 
-## Implementation and distribution status
+## Available management scope
 
-The current source tree implements the following coherent management slice:
+The current compact distribution provides the following management scope:
 
-- PostgreSQL 16+ authoritative storage and a SQLite conformance backend;
+- PostgreSQL 16+ authoritative storage;
 - first-owner bootstrap with a server-generated, single-use `rk_inv_v1_*` code;
 - delegated invitations with installation, Project, or Environment scope, idempotent issuance
   operations, non-secret reconciliation, and revocation;
@@ -21,9 +21,7 @@ The current source tree implements the following coherent management slice:
   historical/streaming Operational Logs for one configured Product Environment;
 - transactional security audit records and process-local aggregate counters;
 - a tagged `runku-server` Linux binary/image with `check`, `migrate`, `recover-bootstrap`, `serve`,
-  and `version` modes;
-- an executable PostgreSQL + external-OIDC integration campaign, with Keycloak used as its
-  disposable reference fixture.
+  and `version` modes.
 
 The compact `runku-server` distribution can compose Platform Identity with one initialized Product Environment
 selected by `RUNKU_PRODUCT_ROOT`. That profile exercises the real local repositories, artifact
@@ -51,9 +49,8 @@ corresponding credentials or identity links.
 
 ## Prerequisites
 
-For the implemented source composition you need:
+For the compact Self-Hosted installation you need:
 
-- the repository's pinned Rust toolchain;
 - PostgreSQL 16 or newer reachable from the server process;
 - an absolute private state directory writable only by the server identity;
 - two independently generated 32-byte peppers when OIDC is enabled;
@@ -646,59 +643,23 @@ Do not log request bodies, Authorization headers, codes, tokens, peppers, DSNs, 
 subjects, or configuration file contents. Audit records intentionally retain IDs, operation,
 outcome, actor/subject, and time, not bearer material.
 
-## Evidence
+## Installation acceptance
 
-The fast gate is:
+Before exposing Management access, validate the actual identity provider and proxy selected for
+the installation:
 
-```sh
-make platform-identity-check
-```
+1. enroll the first owner from the protected local invitation and prove the code cannot replay;
+2. create a narrowly scoped invitation, reconcile an uncertain issuance, enroll, and revoke;
+3. log in through OIDC Authorization Code + PKCE and verify issuer, audience, asymmetric algorithm,
+   discovery/JWKS rotation, expiry, and linked subject;
+4. reject wrong issuer/audience/algorithm/key, expired token, token tampering, callback mismatch,
+   login CSRF/mix-up, and a different Management origin;
+5. prove exact Installation/Project/Environment capability denial and live session revocation;
+6. exercise managed grant revisions/replay/stale/divergent updates when managed enrollment is used;
+7. restart and verify sessions/grants/audit persist without exposing tokens or raw external subjects;
+8. restore PostgreSQL plus matching peppers into an isolated installation and reconcile all
+   sessions/invitations/grants before reopening access.
 
-It runs domain/repository tests on SQLite, Management HTTP tests, CLI parser/process tests, and
-strict Clippy for all affected crates.
-
-The source-owned reconciliation adapter campaign is separately opt-in and creates then removes one
-randomly named database on the pinned local PostgreSQL 16 fixture:
-
-```sh
-docker compose -f compose.storage.yml up -d --wait
-RUNKU_TEST_POSTGRES_URL='postgres://runku:runku_local_test_only@127.0.0.1:55432/runku_test' \
-  cargo test -p runku-platform-identity --test postgres_managed_grants --locked -- --test-threads=1
-```
-
-It proves schema v3 initialization, concurrent revision conflict, stale rejection, exact replay,
-source ownership, and full `u64` source-revision persistence on PostgreSQL. SQLite migration and
-legacy adoption remain in `make platform-identity-check`.
-
-The external-provider campaign is explicit because it starts containers and a server process. Its
-target name identifies the concrete fixture rather than the product's integration boundary:
-
-```sh
-make platform-identity-keycloak-check
-```
-
-That campaign starts pinned PostgreSQL 16 and Keycloak 26.7.3 on loopback, imports a deterministic
-test realm, obtains a real RS256 token, fetches discovery and JWKS through Runku's bounded local
-OIDC path, enrolls an invited operator through the CLI, logs in again through the linked identity,
-verifies `/me`, proves idempotent invitation replay/conflict and uncertain-response
-reconcile/revoke behavior, and rejects credential replay and token tampering.
-
-The complete Product campaign is:
-
-```sh
-make platform-lifecycle-keycloak-check
-```
-
-It adds an actual browser Authorization Code + PKCE flow and covers publish, replay, Release,
-promotion, invocation, historical and streaming logs, replacement, rollback, stale CAS,
-capability/scope denial, live session revocation, and linked-identity recovery. The exact commands
-and assertions are documented in
-[Authenticated remote lifecycle](../operations/remote-lifecycle.md#reproducible-acceptance-campaign).
-
-Keycloak was selected for this exercise because a pinned disposable container and imported realm
-make the evidence reproducible without an external account. The campaign evaluates Runku's
-standards path against one real provider implementation; it does not compare identity products,
-certify Keycloak, validate a production topology, or imply a preferred provider. Keycloak's
-development mode, local HTTP endpoint, imported password, and direct grant are confined to this
-fixture and must not be copied into a production installation. Use the qualification procedure
-above with the identity provider actually selected for the installation.
+Repeat this qualification with the identity provider actually selected. A development-mode IdP or
+successful SaaS login does not validate the Self-Hosted provider, TLS, secret, recovery, or operator
+access policy.

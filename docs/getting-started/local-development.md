@@ -7,8 +7,8 @@ workers, watches `runku/`, and serves the `workspace:local` target.
 ## Prerequisites
 
 - Node.js 20.18.1 or newer for npm installation and application tooling;
-- pnpm 10.18.1 when working with the included examples;
-- Git, `make`, a POSIX shell, and the exact Rust toolchain only when building Runku from source.
+- pnpm 10.18.1 when using pnpm in the application;
+- a supported operating system/architecture from the table below.
 
 ## Install the CLI
 
@@ -23,14 +23,14 @@ runku --version
 with `--omit=optional`, `--no-optional`, or an equivalent policy cannot run. The npm launcher itself
 requires Node.js; the native executable does not.
 
-| Operating system | Architecture | Rust target | npm native package | Archive |
-|---|---|---|---|---|
-| macOS | ARM64 | `aarch64-apple-darwin` | `@runku/cli-darwin-arm64` | `.tar.gz` |
-| macOS | x86_64 | `x86_64-apple-darwin` | `@runku/cli-darwin-x64` | `.tar.gz` |
-| Linux GNU/glibc | ARM64 | `aarch64-unknown-linux-gnu` | `@runku/cli-linux-arm64-gnu` | `.tar.gz` |
-| Linux GNU/glibc | x86_64 | `x86_64-unknown-linux-gnu` | `@runku/cli-linux-x64-gnu` | `.tar.gz` |
-| Windows | ARM64 | `aarch64-pc-windows-msvc` | `@runku/cli-win32-arm64-msvc` | `.zip` |
-| Windows | x86_64 | `x86_64-pc-windows-msvc` | `@runku/cli-win32-x64-msvc` | `.zip` |
+| Operating system | Architecture | npm native package | Archive |
+|---|---|---|---|
+| macOS | ARM64 | `@runku/cli-darwin-arm64` | `.tar.gz` |
+| macOS | x86_64 | `@runku/cli-darwin-x64` | `.tar.gz` |
+| Linux GNU/glibc | ARM64 | `@runku/cli-linux-arm64-gnu` | `.tar.gz` |
+| Linux GNU/glibc | x86_64 | `@runku/cli-linux-x64-gnu` | `.tar.gz` |
+| Windows | ARM64 | `@runku/cli-win32-arm64-msvc` | `.zip` |
+| Windows | x86_64 | `@runku/cli-win32-x64-msvc` | `.zip` |
 
 Linux musl, Windows 32-bit x86, and other combinations are not release targets. The release gate
 compiles and executes `--version` and `--help` natively on every row; broader application behavior
@@ -75,20 +75,6 @@ Expand-Archive .\runku-v0.4.5-x86_64-pc-windows-msvc.zip -DestinationPath .\runk
 Compare the printed Windows/macOS hash with the exact filename entry in `SHA256SUMS`. Move the
 executable to a user-controlled directory on `PATH`; do not overwrite a system-managed binary. On
 Windows, keep the archive's `duckdb.dll` in the same directory as `runku.exe`.
-
-### Source checkout
-
-```sh
-git clone https://github.com/aldemi-tech/runku.git
-cd runku
-make toolchain
-pnpm install --frozen-lockfile
-make install-cli
-runku --version
-```
-
-For a source installation, also record `git rev-parse HEAD`; the version identifies a published
-release only when installed from its immutable tag artifacts.
 
 ## Safe application roots
 
@@ -191,7 +177,14 @@ runku build
 ```
 
 `--prepare` creates/reconciles local state and application configuration, then exits. `build`
-updates `runku/_generated/api.d.ts` and returns immutable output paths in JSON.
+updates the generated `api` and `serverApi` runtime/declaration pairs and returns immutable output
+paths in JSON.
+
+Repository examples must run with the current source CLI. Their gates set `RUNKU_BIN` to the exact
+built executable; Field Board otherwise builds and launches the workspace CLI itself so a stale
+global installation cannot open newer local state. For other examples, compare `runku --version`
+with the source package version before opening `.runku/`. Do not delete state to resolve a version
+mismatch.
 
 ## Browser origins and functional identity
 

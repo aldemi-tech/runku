@@ -121,5 +121,6 @@ HTTP. Backends, quotas, token security, retry behavior, and operator-owned recov
 - Artifact/runtime mismatch fails closed without falling back to other code or weaker isolation.
 - Logs must not contain arguments, credentials, tokens, or unrestricted user-controlled fields.
 
-See [`@runku/server`](../../packages/server/README.md) for exact types and
-[Full Node Actions](../../examples/node-actions/README.md) for executable cross-runtime behavior.
+For exact declarations, parameters, context methods, capabilities, and limits, use the
+[Function API reference](../reference/function-api.md). For task-oriented examples, continue with
+[Query, Mutation, and Action](query-mutation-action.md).

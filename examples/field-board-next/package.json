@@ -1,0 +1,36 @@
+{
+  "name": "@runku/example-field-board-next",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.1",
+  "scripts": {
+    "runku:build": "node scripts/runku.mjs build",
+    "predev": "node scripts/runku.mjs dev --prepare --public-env-prefix NEXT_PUBLIC_RUNKU_",
+    "dev": "concurrently --kill-others --success first \"next dev --hostname 127.0.0.1 --port 3001\" \"node scripts/runku.mjs dev --origin http://127.0.0.1:3001 --public-env-prefix NEXT_PUBLIC_RUNKU_\"",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3001",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "test:launcher": "node scripts/runku.mjs --version",
+    "check": "pnpm test:launcher && pnpm typecheck && pnpm lint && pnpm build"
+  },
+  "dependencies": {
+    "@runku/client": "workspace:*",
+    "@runku/react": "workspace:*",
+    "@runku/server": "workspace:*",
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "concurrently": "9.2.4",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.3",
+    "typescript": "6.0.3"
+  },
+  "engines": { "node": ">=20.18.1" }
+}

@@ -7,11 +7,14 @@ const rootPackage = readJson("package.json")
 const cliPackage = readJson("packages/cli/package.json")
 const clientPackage = readJson("packages/client/package.json")
 const serverPackage = readJson("packages/server/package.json")
+const reactPackage = readJson("packages/react/package.json")
 const version = cliPackage.version
 
 assertVersion("root package", rootPackage.version, version)
 assertVersion("@runku/client", clientPackage.version, version)
 assertVersion("@runku/server", serverPackage.version, version)
+assertVersion("@runku/react", reactPackage.version, version)
+assertVersion("@runku/react peer @runku/client", reactPackage.peerDependencies["@runku/client"], version)
 
 const cargoManifest = read("crates/runku-cli/Cargo.toml")
 const cargoVersion = cargoManifest.match(/^version = "([^"]+)"$/m)?.[1]

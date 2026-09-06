@@ -1,0 +1,40 @@
+{
+  "name": "@runku/react",
+  "version": "0.4.7",
+  "description": "React and Next.js bindings for the Runku TypeScript client",
+  "type": "module",
+  "license": "Apache-2.0",
+  "sideEffects": false,
+  "files": ["dist", "README.md", "LICENSE"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "engines": { "node": ">=20" },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
+  "peerDependencies": {
+    "@runku/client": "0.4.7",
+    "react": ">=18.3.0 <20"
+  },
+  "devDependencies": {
+    "@runku/client": "workspace:*",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript": "7.0.2"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "lint": "tsc -p tsconfig.check.json",
+    "test": "pnpm build && node --test tests/*.test.mjs",
+    "check": "pnpm typecheck && pnpm lint && pnpm test"
+  }
+}

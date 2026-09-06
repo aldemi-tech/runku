@@ -5,8 +5,8 @@ Projects, Environments, code lifecycle, identity, configuration, data, recovery,
 
 ## Current support boundary
 
-The source tree implements the local CLI/product process, gateway, runtimes, data/release/identity
-repositories, Realtime, scheduling, remote development protocols, PostgreSQL/S3/NATS adapters, Full
+The current product implements the local CLI/product process, gateway, runtimes, data/release/identity
+repositories, Realtime, scheduling, remote development protocols, PostgreSQL/external-object-store/NATS adapters, Full
 Node isolation adapters, and a PostgreSQL-backed Platform Identity Management API slice with
 first-owner invitation bootstrap, sessions, scoped grants, and optional OIDC.
 Delegated invitation issuance can be reconciled by a durable Operation ID and pending material can
@@ -21,7 +21,7 @@ In that profile, authenticated
 operators use the real Workspace/Release/Channel lifecycle, Product Gateway/runtime/background
 process, historical logs, and one-connection log streaming. Tagged releases publish Linux GNU
 ARM64/x86_64 server archives plus a matching multi-platform, non-root Safe V8 OCI image. The
-source also implements `runku-server logs-worker` for the optional NATS-to-S3 HA log path, using the
+server also implements `runku-server logs-worker` for the optional NATS-to-S3 HA log path, using the
 same server artifact. The project does not yet publish general distributed role/Agent binaries, a
 supported Kubernetes package, multi-Environment orchestration, active-active Product writers, or
 rolling multi-node upgrades. Tagged releases do include a supported Docker standalone package with
@@ -33,12 +33,14 @@ Provider automation may initialize a new persistent Product root with an exact p
 scope through `runku init --project-id prj_* --environment-id env_*`. Both IDs are required
 together. Repeating the same command is idempotent; a different scope conflicts without replacing
 Product state. This lets an external fleet controller reconcile durable identity without editing
-private state files or linking engine crates.
+private state files or relying on implementation APIs.
 
-Application file storage is an Environment-scoped Product capability backed by a dedicated
-filesystem directory or an operator-provided S3-compatible prefix. The compact package implements
-both choices; it does not operate MinIO/S3 or back up, replicate, or version application file bytes.
-See [Application file storage](../functions/file-storage.md) before selecting capacity and recovery.
+Runku Storage provides Environment-scoped Application Files and Runku Object Storage, backed by a
+dedicated filesystem directory or an operator-provided S3-compatible prefix. The compact package implements
+both choices. Compact backup includes filesystem-backed bytes; external S3-compatible bytes,
+replication, versioning, and provider recovery remain operator-owned. See
+[Application file storage](../functions/file-storage.md) and
+[Storage configuration](storage-configuration.md) before selecting capacity and recovery.
 
 ## Product topology
 
@@ -97,7 +99,8 @@ local `init`/`link` state remains loopback-only. See
   attached Environment with an atomic Project/Environment database binding; also used separately by
   Platform Identity.
 - filesystem Parquet + embedded DuckDB: default standalone Operational Log history/query.
-- S3-compatible object storage: immutable distributed artifacts and optional log Parquet/manifests.
+- external S3-compatible object-store backend: immutable distributed artifacts and optional log
+  Parquet/manifests. This is infrastructure storage, not the Runku Object Storage product surface.
 - NATS JetStream: distributed Full Node queue when enabled and replicated Operational Log journal
   only in the optional HA log profile; these use separate named streams/subjects.
 - OCI registry: Full Node images referenced by digest.
@@ -136,31 +139,15 @@ least-privilege filesystem/network/security context, capacity limits, metrics/tr
 backup/restore, upgrade/rollback, compatibility matrix, and failure-tested runbooks.
 
 See [Production readiness](production-readiness.md) for the complete gate and
-[Deployment assets](../../deployments/README.md) for profile-specific boundaries.
+[Docker package](../../deployments/docker/README.md) for the supported compact profile.
 For the exact one-process and HA Operational Log layouts, variables, failure modes, and runbook, see
 [Operational Log storage and administration](../operations/operational-logs.md).
 
-## Installation and maintainer validation
+## Install the supported package
 
 For a released compact installation, download `runku-selfhost-vX.Y.Z.tar.gz`, verify it against
-`SHA256SUMS`, pin the OCI manifest digest, and follow the packaged Docker guide. Source evaluation
-and maintainer evidence use:
-
-```sh
-make install-cli-check
-make node-example-check
-make chat-example-check
-make storage-check
-make release-repository-check
-make realtime-check
-make scheduling-check
-make remote-execution-infra-check
-make platform-lifecycle-keycloak-check
-```
-
-Read each Makefile target before running it; several start Docker dependencies. These gates prove
-component and vertical contracts on the stated environment. The explicit compact installation
-campaign additionally proves clean setup, invitation login, Product lifecycle, backup/offline
-verification, empty-install restore, and restart from release-shaped artifacts. HA NATS/S3 failure
-evidence remains separate, and neither campaign certifies a future distributed or Kubernetes
-profile.
+`SHA256SUMS`, pin the OCI manifest digest, and follow the
+[compact deployment guide](deployment-guide.md) and packaged
+[Docker procedure](../../deployments/docker/README.md). Complete installation, first-owner,
+publication, backup/restore, security, capacity, and upgrade acceptance on the actual host before
+serving production traffic.

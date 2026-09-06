@@ -11,21 +11,21 @@ npm install @runku/client
 ## Create and type a client
 
 ```ts
-import { RunkuClient, typedClient, type CodeTarget } from "@runku/client"
-import type { RunkuFunctions } from "./runku/_generated/api.js"
+import { RunkuClient, type CodeTarget } from "@runku/client"
+import { api } from "./runku/_generated/api.js"
 
-const raw = new RunkuClient({
+export const runku = new RunkuClient({
   baseUrl: process.env.RUNKU_URL!,
   target: process.env.RUNKU_TARGET! as CodeTarget,
   applicationKey: process.env.RUNKU_KEY!,
   getBearer: async () => currentUserToken(),
 })
-
-export const runku = typedClient<RunkuFunctions>(raw)
 ```
 
-`RunkuClient` is the runtime class. `typedClient` is a zero-runtime-cost view over the generated
-registry. The SDK does not read environment variables or detect frameworks; application code passes
+`RunkuClient` accepts generated Function references such as `api.notes.list`. `api` excludes
+internal and service-auth Functions; `runku/_generated/server.js` contains the separate server
+tree. The legacy `typedClient` string view remains available. The SDK does not read environment
+variables or detect frameworks; application code passes
 configuration explicitly.
 
 `baseUrl` requires HTTPS except loopback development. Credentials in URL/userinfo are rejected.
@@ -46,10 +46,10 @@ the resolved Release/Dev Revision.
 ## Typed calls and result envelopes
 
 ```ts
-const created = await runku.mutation("notes.create", { title: "Read runbook" })
+const created = await runku.mutation(api.notes.create, { title: "Read runbook" })
 const noteId = created.value.id
-const loaded = await runku.query("notes.get", { id: noteId })
-const image = await runku.action("images.render", { width: 64n, height: 64n })
+const loaded = await runku.query(api.notes.get, { id: noteId })
+const image = await runku.action(api.images.render, { width: 64n, height: 64n })
 ```
 
 Each call returns:
@@ -126,16 +126,19 @@ documented interface.
 ## File upload and download
 
 An authorized Action first returns a one-shot `FileUploadGrant` or short-lived
-`FileDownloadGrant`. Transfer through the client so the secret remains an Authorization header and
-the path cannot escape the configured origin:
+`FileDownloadGrant`. Pass the structural generated result through `fileUploadGrant(...)` or
+`fileDownloadGrant(...)` to validate and refine its IDs and paths. Transfer through the client so
+the secret remains an Authorization header and the path cannot escape the configured origin:
 
 ```ts
-const grant = (await runku.action("files.beginUpload", { size: BigInt(file.size) })).value
+const grant = fileUploadGrant(
+  (await runku.action("files.beginUpload", { size: BigInt(file.size) })).value,
+)
 const metadata = await runku.uploadFile(grant, file, { contentType: "image/png" })
 
-const readGrant = (await runku.action("files.beginDownload", {
-  fileId: metadata.fileId,
-})).value
+const readGrant = fileDownloadGrant(
+  (await runku.action("files.beginDownload", { fileId: metadata.fileId })).value,
+)
 const response = await runku.downloadFile(readGrant)
 await response.body?.pipeTo(destination)
 ```

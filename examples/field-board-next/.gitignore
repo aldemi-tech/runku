@@ -1,0 +1,5 @@
+.next/
+.env.local
+.runku/
+node_modules/
+*.tsbuildinfo

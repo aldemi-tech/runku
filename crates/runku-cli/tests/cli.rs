@@ -1261,7 +1261,19 @@ export const insert = mutation({
     let stable_generated = built["stableGeneratedTypesPath"]
         .as_str()
         .ok_or("stable generated types path missing")?;
-    assert_eq!(generated_text, std::fs::read_to_string(stable_generated)?);
+    let stable_generated_text = std::fs::read_to_string(stable_generated)?;
+    assert!(!generated_text.contains("export declare const api:"));
+    assert!(stable_generated_text.contains("export declare const api:"));
+    for stable in [
+        "stableBrowserRuntimePath",
+        "stableServerTypesPath",
+        "stableServerRuntimePath",
+    ] {
+        let stable = built[stable]
+            .as_str()
+            .ok_or("stable generated API path missing")?;
+        assert!(!std::fs::read(stable)?.is_empty());
+    }
     assert!(generated_text.contains("readonly \"queries.echo\""));
     assert!(generated_text.contains("readonly \"messages\""));
     assert!(

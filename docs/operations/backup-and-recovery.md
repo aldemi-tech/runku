@@ -4,7 +4,7 @@
 > `${RUNKU_DATA_DIRECTORY}/files` tree when the standalone filesystem profile is selected. It does
 > not copy external S3 buckets or configure their replication/versioning. An S3-backed recovery
 > point must coordinate and independently verify that byte backend with Product metadata. See
-> [Application file storage](../functions/file-storage.md#backup-restore-and-residual-responsibility).
+> [Storage configuration and limits](../self-hosting/storage-configuration.md#backup-and-restore).
 
 Backup is an integrity protocol, not a file-copy feature. A recoverable Runku backup must capture
 all authoritative state required to preserve Project/Environment identity, application data,
@@ -23,7 +23,7 @@ Release routing, credentials, schedules, and artifact references.
 | Operational logs/export checkpoints | `.runku/observability.sqlite3` + `.runku/observability-archive/` | hot Product store + filesystem/S3 Parquet; optional NATS journal | Operational evidence; retention policy applies |
 | Platform operators/grants/sessions/invitations/audit | not part of local application state | PostgreSQL Platform Identity schema | Authoritative and sensitive |
 | Platform credential/OIDC peppers | not part of local application state | Secret provider + coordinated recovery manifest | Authoritative cryptographic material |
-| Artifacts | `.runku/artifacts/` and build store | S3-compatible object storage | Authoritative immutable content by digest |
+| Artifacts | `.runku/artifacts/` and build store | filesystem or external S3-compatible object-store backend | Authoritative immutable content by digest |
 | Application files | `.runku/file-storage-objects/` plus `.runku/file-storage.sqlite3` metadata | dedicated filesystem or S3-compatible prefix plus Product metadata | Authoritative bytes; compact filesystem backup includes `files/`, external S3 is operator-coordinated |
 | Process locks/caches/scratch | local ephemeral paths | Pod/host ephemeral storage | Reconstructible; never restore as authority |
 
@@ -88,7 +88,7 @@ profile:
 The helper quiesces `runku-server`, dumps Platform Identity PostgreSQL in custom format, archives
 the complete Product, Platform, and dedicated `files/` directories, writes SHA-256 digests and the
 exact server version, and restarts only a previously running server. Thus the standalone filesystem
-profile keeps Product metadata, Application Files, and logical Object Storage bytes in one recovery
+profile keeps Product metadata, Application Files, and Runku Object Storage bytes in one recovery
 point. Verification parses the PostgreSQL catalog and rejects corrupt digests, unsafe archive paths,
 missing Product identity or byte directory, unknown manifest versions, and a missing
 encryption-policy reference without changing durable state.
@@ -105,7 +105,7 @@ checks/migrates the schema, starts the server, and waits for readiness. Detailed
 post-restore application/session checks are in the
 [Docker guide](../../deployments/docker/README.md#total-loss-restore).
 
-The packaged command fails closed for profiles using external Application File/Object Storage S3
+The packaged command fails closed for profiles using an external S3-compatible backend for Runku Storage
 bytes. Those profiles need a provider-native, checksum-verified recovery point coordinated with the
 database/Product snapshot; a metadata-only archive is never reported as a complete backup.
 

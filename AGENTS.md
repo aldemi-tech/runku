@@ -19,14 +19,14 @@ Then read the task-specific sources:
 | Change area | Required reading |
 |---|---|
 | CLI/local development | `docs/getting-started/local-development.md`, `docs/reference/cli.md`, `crates/runku-cli/src/lib.rs` |
-| Function SDK/build | `docs/functions/functions-and-runtimes.md`, `packages/server/README.md`, `packages/server/src/index.ts`, `crates/runku-build/` |
+| Function SDK/build | `docs/functions/development-workflow.md`, `docs/functions/functions-and-runtimes.md`, `packages/server/README.md`, `packages/server/src/index.ts`, `crates/runku-build/` |
 | Client/protocol/realtime | `packages/client/README.md`, `docs/data/data-and-realtime.md`, `protocol/README.md`, protocol vectors and gateway tests |
 | Data/schema/indexes | `docs/data/data-and-realtime.md`, `crates/runku-data/README.md`, `crates/runku-value/README.md`, adapter conformance tests |
 | Identity/security | `docs/auth/application-identity.md`, `docs/security/security-model.md`, `SECURITY.md`, identity and gateway tests |
 | Release/Workspace | `docs/development/releases-and-workspaces.md`, `docs/reference/compatibility.md`, release/workspace tests |
 | Distribution/release automation | `docs/maintainers/releases.md`, `.github/workflows/release.yml`, `scripts/release-*.mjs`, package manifests |
-| Self-hosting/deployment | `docs/self-hosting/overview.md`, `docs/self-hosting/production-readiness.md`, `deployments/README.md`, role-specific runbooks |
-| Operations | `docs/operations/administration.md`, `docs/operations/operational-logs.md`, `docs/operations/observability.md`, `docs/operations/backup-and-recovery.md` |
+| Self-hosting/deployment | `docs/self-hosting/overview.md`, `docs/self-hosting/deployment-guide.md`, `docs/self-hosting/server-configuration.md`, `docs/self-hosting/production-readiness.md`, `deployments/README.md`, role-specific runbooks |
+| Operations | `docs/operations/operator-handbook.md`, `docs/operations/administration.md`, `docs/operations/operational-logs.md`, `docs/operations/observability.md`, `docs/operations/backup-and-recovery.md`, `docs/operations/upgrades.md`, `docs/operations/capacity-planning.md` |
 | Architecture/evolution | `docs/internals/repository-map.md`, `docs/development/evolving-runku.md`, protocol vectors, relevant crate APIs |
 
 Do not claim to have read a file unless you read it completely in the current task.

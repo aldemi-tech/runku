@@ -8,6 +8,8 @@ target/
 node_modules/
 .next/
 dist/
+/website/.docusaurus/
+/website/build/
 coverage/
 playwright-report/
 test-results/

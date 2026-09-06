@@ -10,6 +10,9 @@ import {
   decodeValue,
   documentId,
   encodeValue,
+  fileDownloadGrant,
+  fileUploadGrant,
+  functionReference,
 } from "../dist/index.js";
 
 const REQUEST_ID = "req_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -76,6 +79,31 @@ test("Document IDs validate canonical shape and retain their wire value", () => 
   assert.throws(() => documentId("rooms", "opn_01ARZ3NDEKTSV4RRFFQ69G5FAV"), TypeError);
 });
 
+test("File grant refiners validate structural Action results", () => {
+  const upload = fileUploadGrant({
+    uploadId: "upl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    path: "/v1/files/uploads/upl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    token: "authority",
+    expiresAtMicros: "1",
+    maxBytes: "3",
+  });
+  assert.equal(Object.isFrozen(upload), true);
+  const download = fileDownloadGrant({
+    path: "/v1/files/downloads/fil_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    token: "authority",
+    expiresAtMicros: "1",
+    metadata: {
+      fileId: "fil_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      sizeBytes: "3",
+      sha256: "a".repeat(64),
+      contentType: "text/plain",
+      createdAtMicros: "1",
+    },
+  });
+  assert.equal(download.metadata.fileId, "fil_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+  assert.throws(() => fileDownloadGrant({ ...download, path: "/wrong" }), TypeError);
+});
+
 test("Wire Value matches the protocol golden vector shared with Rust", () => {
   const golden = JSON.parse(readFileSync(
     new URL("../../../protocol/v1/public-wire-vectors.json", import.meta.url),
@@ -106,6 +134,24 @@ test("Query sends explicit target and independently resolved credentials", async
   assert.equal(calls[0].init.headers.get("x-runku-key"), PUBLISHABLE_KEY);
   assert.equal(calls[0].init.headers.get("authorization"), "Bearer signed.jwt");
   assert.equal(bearerCalls, 1);
+});
+
+test("generated Function references call the same protocol endpoint and reject kind confusion", async () => {
+  const calls = [];
+  const client = new RunkuClient({
+    baseUrl: "https://api.example",
+    target: "channel:stable",
+    applicationKey: PUBLISHABLE_KEY,
+    fetch: async (url) => {
+      calls.push(url);
+      return response({ type: "string", value: "ready" });
+    },
+  });
+  const reference = functionReference("users.me", "query", "user");
+  assert.equal(Object.isFrozen(reference), true);
+  assert.equal((await client.query(reference, null)).value, "ready");
+  assert.deepEqual(calls, ["https://api.example/v1/query"]);
+  await assert.rejects(client.action(reference, null), TypeError);
 });
 
 test("Default fetch keeps the browser global receiver", async () => {

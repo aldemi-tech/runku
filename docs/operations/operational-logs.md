@@ -319,20 +319,9 @@ For an HA upgrade: validate configuration, upgrade one worker, prove frontier pr
 upgrade remaining workers, then upgrade serving cells. Roll back only within the published
 compatibility window; immutable v1 Parquet/manifests remain the recovery boundary.
 
-Repository maintainers can run the fast compile gate without starting services:
-
-```sh
-make ci-check
-```
-
-The explicit acceptance campaign starts disposable NATS JetStream and MinIO, proves PubAck,
-source replay/deduplication, batched archive commit, ACK, and tiered query, then removes only its test
-volumes:
-
-```sh
-make operational-logs-ha-check
-```
-
-Filesystem/DuckDB tests also cover archive replay, safe cursor-bounded retention, cross-scope
-isolation, changed manifests, and changed Parquet bytes. The Docker campaign is intentionally not a
-regular hosted CI job.
+For the optional HA path, qualify the installed topology with disposable test events before
+production use. Verify PubAck, redelivery deduplication, batched archive commit, consumer ACK, and
+tiered query across the hot/archive boundary. Repeat the exercise after an upgrade and after a
+restore. For the standalone path, inject and retrieve events on both sides of the retention
+frontier, then confirm that a changed manifest or Parquet object fails closed instead of returning
+unverified history.

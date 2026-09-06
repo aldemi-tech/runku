@@ -163,7 +163,9 @@ archive frontier. Standalone embeds this work; HA runs the archive consumer as t
 7. **Close:** document cause, blast radius, data/effect uncertainty, remediation, and a regression
    test/runbook update.
 
-Security incidents follow [SECURITY.md](../../SECURITY.md) and the
+Security incidents follow the
+[private vulnerability reporting policy](https://github.com/aldemi-tech/runku/blob/main/SECURITY.md)
+and the
 [security model](../security/security-model.md).
 
 ## Capacity and maintenance windows
@@ -183,4 +185,4 @@ success signals, and owner.
 A production package must expose authenticated, versioned operations for Projects, Environments,
 Releases, Channels, Workspaces, Application/Development credentials, identity providers,
 configuration, secrets, limits, backups, upgrades, and audit events. Operators must not need direct
-database writes, host filesystem edits, or private crate composition for routine administration.
+database writes, host filesystem edits, or internal implementation APIs for routine administration.

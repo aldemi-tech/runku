@@ -1,13 +1,15 @@
-# Environment lifecycle registry
+# Administer an Environment lifecycle
 
-Runku needs one Product authority for Environment identity and desired configuration before a
-management surface can safely create or reconcile subordinate Release, identity, schedule, or
-storage state. The standalone Environment lifecycle registry provides that authority without
-embedding provider placement, DNS, billing, or HTTP behavior.
+An Environment is the persistent-state boundary for application data, identity, configuration,
+storage metadata, Releases/Channels, schedules, and operational state. Its lifecycle record
+describes desired Product state; it does not expose host, DNS, database, billing, or provider
+placement.
 
-## Current status and boundary
+Use the Management API when an operator/controller must create, replace, archive, restore, or
+reconcile the exact Environment record. The compact server operates one preconfigured exact
+Project/Environment scope; the URL never allocates or guesses IDs.
 
-The following behavior is implemented and test-covered:
+## Permissions and endpoint
 
 - `runku-environments` owns validated names, Project-unique slugs, logical regions, protection and
   purpose policy, desired/observed state, compare-and-set revisions, idempotent commands, operation
@@ -122,24 +124,38 @@ assert_eq!(page.environments.len(), 1);
 # }
 ```
 
-A production composition selects `connect_postgres` with `EnvironmentRepositoryConfig::PRODUCTION`.
-SQLite rejects the Production role and PostgreSQL rejects the Local role. PostgreSQL older than 16
-fails closed.
+Base path:
 
-## Idempotency, conflict, and recovery
+```text
+/v1/projects/{projectId}/environments/{environmentId}
+```
 
-Every write carries a caller-generated `opn_*` identity. The command digest binds the exact Project,
-Environment, complete intent, precondition, and trusted timestamp.
+| Operation | Method/path | Capability |
+|---|---|---|
+| read Environment | `GET <base>` | `environments:read` |
+| create exact record | `POST <base>` | `environments:manage` |
+| replace configuration | `PUT <base>` | `environments:manage` |
+| archive | `POST <base>/archive` | `environments:manage` |
+| restore | `POST <base>/restore` | `environments:manage` |
+| reconcile operation | `GET <base>/environment-operations/{opn_*}` | `environments:read` |
 
-| Result | Meaning and safe action |
-|---|---|
-| exact replay | The same operation ID and identical command returns the immutable prior outcome |
-| `ENVIRONMENT_OPERATION_ID_REUSED` | The operation ID was presented with different intent; stop and allocate a new ID only for a genuinely new intent |
-| `ENVIRONMENT_CONFLICT` | Revision, slug, or lifecycle state changed; read current state and decide again |
-| `ENVIRONMENT_NOT_FOUND` | The exact scope does not exist; update/materialize never creates it |
-| `ENVIRONMENT_RESULT_UNCERTAIN` | Commit acknowledgement was lost; look up the same operation under the same exact scope before retrying |
-| busy/unavailable | Retry with bounded backoff and the same operation ID/body |
-| corrupt/unsupported | Stop writes, preserve the database and migration evidence, and recover rather than editing rows |
+Protected calls use `Authorization: Bearer rk_at_v1_*`. Every mutation also uses one canonical
+`Idempotency-Key: opn_*`. Application Keys, functional JWTs, development credentials, and Product
+storage keys are rejected.
+
+## Configuration fields
+
+```json
+{
+  "name": "Production",
+  "slug": "production",
+  "region": "cl-santiago",
+  "purpose": "production",
+  "protection": "production",
+  "location": "selfHosted",
+  "workspaceTargetsEnabled": false
+}
+```
 
 The compact Management adapter may persist a create or update intent before local materialization
 fails. Retry the identical request with the same operation ID: the durable operation replay is
@@ -151,53 +167,223 @@ Operation lookup is not authorization. A caller must still hold current authorit
 stored scope. Looking up an operation under another Project or Environment returns no record and
 never leaks the original outcome.
 
-## Persistence, upgrade, and rollback
+| Field | Accepted value | Operational meaning |
+|---|---|---|
+| `name` | trimmed UTF-8, 1–120 bytes, no controls | operator-facing display name |
+| `slug` | lowercase DNS-label, 1–63 bytes, Project-unique | stable human routing/catalog label |
+| `region` | lowercase logical label, 1–64 bytes | portable region choice; not a provider host/account |
+| `purpose` | `development`, `preview`, `staging`, `production` | intended workload/lifecycle class |
+| `protection` | `open`, `protected`, `production` | change-protection policy axis |
+| `location` | `local`, `managed`, `selfHosted` | Product ownership/location classification |
+| `workspaceTargetsEnabled` | boolean | whether development Workspace targets may serve |
 
-Schema v1 adds three namespaced tables:
+An update replaces this complete configuration. It is not a partial patch. Keep fields unchanged
+when you do not intend to modify them.
 
-- `runku_environments` for authoritative desired/observed records;
-- `runku_environment_operations` for exact-scope replay and uncertain-result reconciliation;
-- `runku_environment_schema_migrations` for ordered version/checksum evidence.
-
-The schema is additive and independent from existing local/release/identity Environment helper
-rows. Future changes append a new migration; applied migration text/checksums must never be edited.
-Unknown future migration versions fail closed.
-
-Schema v2 rebuilds only the operation journal constraint to admit the additive `archive` and
-`restore` kinds while copying every v1 operation unchanged. The Environment table already admitted
-both desired-state values. Migration remains transactional and checksum protected; after v2, an
-older binary must not resume writes to the same registry.
-
-The current source compact server composes this repository in Product state, so backup/restore must
-quiesce writers and capture the complete registry database, operation journal, migration rows, and
-subordinate Product stores at one coordinated recovery point. Restoring only the registry or only
-subordinate stores is invalid. Rollback to a binary that does not understand an adopted registry
-must not resume writes; use the composition's documented forward recovery or verified coordinated
-restore.
-
-## Security and operational limits
-
-- Scope is present in every record, operation key, lookup, uniqueness rule, and query predicate.
-- Slug uniqueness never substitutes for exact Environment identity.
-- List requests are bounded to 100 records and use an exclusive Environment ID cursor.
-- Names, slugs, regions, revisions, states, timestamps, and decoded rows are revalidated on read.
-- Pool, lock, statement, and idle-transaction timeouts are bounded.
-- Telemetry contains aggregate counts and pool gauges only; it does not label names, slugs, regions,
-  operation IDs, Projects, or Environments.
-- The library performs no authorization. The Management adapter enforces current
-  `environments:read`/`environments:manage` grants before every call and does not accept Application
-  or Development credentials.
-
-## Evidence
-
-`cargo test -p runku-environments -p runku-environment-repository` covers pure lifecycle rules,
-scope-bound command digests, replay/reuse conflicts, exact-scope isolation, absent-scope behavior,
-slug isolation, pagination, materialization, reopen, checksum tampering, and concurrent CAS. SQLite
-runs by default. The same repository conformance and concurrency campaign runs against PostgreSQL
-when `RUNKU_TEST_POSTGRES_URL` names an explicitly managed PostgreSQL 16+ test database.
-
-Strict lint evidence is provided by:
+## Read current state
 
 ```sh
-cargo clippy -p runku-environments -p runku-environment-repository --all-targets -- -D warnings
+curl --fail-with-body \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}"
 ```
+
+The response contains:
+
+| Field | Meaning |
+|---|---|
+| `projectId`, `environmentId` | exact persistent scope |
+| `configuration` | complete desired configuration |
+| `configurationRevision` | positive compare-and-set revision |
+| `desiredState` | `active` or `archived` |
+| `observedState` | `pending`, `ready`, or `failed` |
+| `observedConfigurationRevision` | exact revision most recently observed, or null |
+| `converged` | true only when current desired revision is observed ready |
+| timestamps | canonical decimal Unix microseconds |
+
+Do not equate HTTP success with serving readiness. For an active change, wait until `converged` is
+true and `observedConfigurationRevision === configurationRevision`, then check Product readiness
+and a representative application request.
+
+## Create the exact Environment record
+
+The Project and Environment IDs are already allocated/configured outside this route. Create their
+portable record:
+
+```sh
+curl --fail-with-body \
+  -X POST \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FAY" \
+  -H "content-type: application/json" \
+  --data-binary @- \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}" <<'JSON'
+{
+  "configuration": {
+    "name": "Production",
+    "slug": "production",
+    "region": "cl-santiago",
+    "purpose": "production",
+    "protection": "production",
+    "location": "selfHosted",
+    "workspaceTargetsEnabled": false
+  },
+  "createdAtMicros": "1800000000000000"
+}
+JSON
+```
+
+Creation starts `configurationRevision: 1`, `desiredState: "active"`, and observation pending until
+the compact Product applies/records the matching state. Repeat the exact request with the same
+operation ID after an uncertain result.
+
+## Replace configuration safely
+
+First GET and record the current revision. Then send the complete new configuration:
+
+```sh
+curl --fail-with-body \
+  -X PUT \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FAZ" \
+  -H "content-type: application/json" \
+  --data-binary @- \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}" <<'JSON'
+{
+  "expectedRevision": 1,
+  "configuration": {
+    "name": "Production",
+    "slug": "production",
+    "region": "cl-santiago",
+    "purpose": "production",
+    "protection": "production",
+    "location": "selfHosted",
+    "workspaceTargetsEnabled": false
+  },
+  "updatedAtMicros": "1800000000000001"
+}
+JSON
+```
+
+A successful replacement increments the revision and returns observation to `pending`. The prior
+observed revision can remain visible so operators can distinguish a newly pending update from an
+Environment that was never ready.
+
+On conflict, GET again and decide whether your intent is still valid. Do not substitute the new
+revision into an old request automatically.
+
+## Archive
+
+Archive preserves configuration and subordinate durable state but requests that the Environment
+stop serving:
+
+```sh
+curl --fail-with-body \
+  -X POST \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FB0" \
+  -H "content-type: application/json" \
+  --data-binary '{"expectedRevision":2,"changedAtMicros":"1800000000000002"}' \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/archive"
+```
+
+The compact server stops the Product listener before recording the archived revision ready. An
+archived Product remains non-serving after process restart.
+
+Before archive:
+
+1. stop new deployments/configuration/storage mutations;
+2. decide how pending scheduled/Cron/external work is handled;
+3. verify and retain the required backup;
+4. record current Release/Channel/configuration/credential/storage state;
+5. communicate that Application API traffic will stop.
+
+Archive does not delete Product data, revoke every credential, remove storage bytes, or destroy
+infrastructure. Apply those separately under the retention/offboarding plan.
+
+## Restore
+
+Restore changes desired state back to active under the current revision:
+
+```sh
+curl --fail-with-body \
+  -X POST \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  -H "idempotency-key: opn_01ARZ3NDEKTSV4RRFFQ69G5FB1" \
+  -H "content-type: application/json" \
+  --data-binary '{"expectedRevision":3,"changedAtMicros":"1800000000000003"}' \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/restore"
+```
+
+The Product becomes ready to serve only when its dependencies and an eligible Channel/serving
+state exist. A valid no-Release Environment may remain operationally idle rather than serving an
+invented target.
+
+After restore, verify exact IDs/revision, Product readiness, Channel/Release, Application Client and
+functional identity, Query/Mutation replay, Realtime resync, schedules/Cron, files/Object Storage,
+logs, and recovery monitoring.
+
+## Desired versus observed state
+
+| Desired | Observed | Interpretation |
+|---|---|---|
+| active | pending | activation/configuration requested but not yet applied |
+| active | ready at current revision | converged and eligible for readiness/traffic checks |
+| active | failed at current revision | desired activation could not be applied |
+| archived | pending | drain/stop requested but not yet confirmed |
+| archived | ready at current revision | Product serving stopped for this lifecycle intent |
+| any | ready/failed at older revision | a newer desired change remains unconverged |
+
+Never route traffic based only on `desiredState`. `converged` plus Product readiness and serving
+policy are separate conditions.
+
+## Idempotency and uncertain results
+
+Every write binds the operation ID to exact Project, Environment, path, complete body, CAS
+precondition, and caller-pinned timestamp.
+
+| Result | Safe action |
+|---|---|
+| exact replay | accept the immutable prior result; `replayed` is true |
+| operation ID reused | stop; use a new ID only for genuinely new intent |
+| revision/slug conflict | read current state and reconcile |
+| result uncertain/timeout | GET the exact operation; repeat only the identical request/ID when needed |
+| busy/unavailable | bounded backoff with identical body/ID |
+| corruption/unsupported state | stop lifecycle writes, preserve evidence, restore/repair deliberately |
+
+Operation lookup:
+
+```sh
+curl --fail-with-body \
+  -H "authorization: Bearer ${RUNKU_ACCESS_TOKEN}" \
+  "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/environment-operations/opn_..."
+```
+
+Lookup still requires current exact-scope `environments:read` permission and does not expose an
+operation from another Environment.
+
+## Backup, upgrades, and removal
+
+The Environment lifecycle record is only one part of a recovery point. A valid backup coordinates
+it with Product repositories, documents/indexes/outbox/schedules, Release/Workspace/Channel state,
+application identity, configuration/secrets, Cron state, logs, artifacts, and storage bytes.
+
+Do not restore only the lifecycle record or manually edit its revision/observation. Use the
+[Backup and recovery](../operations/backup-and-recovery.md) and
+[Upgrade](../operations/upgrades.md) procedures for the supported compact profile.
+
+Archival is reversible lifecycle state; uninstall/delete-data is destructive installation removal.
+Do not substitute one for the other.
+
+## Current limitations
+
+- There is no general Environment-create CLI command; ordinary CLI `link` selects an already
+  authorized Environment.
+- The compact server operates one configured exact Product Environment rather than allocating a
+  fleet through this route.
+- Provider provisioning, DNS, physical placement, and billing are not fields or effects of this
+  Product lifecycle API.
+- General distributed reconciliation is not a shipped Self-Hosted role topology.
+
+Use the [Management API reference](../reference/management-api.md) for common transport/security
+rules and the [operator handbook](../operations/operator-handbook.md) for maintenance/incident flow.

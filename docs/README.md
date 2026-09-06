@@ -1,145 +1,187 @@
-# Runku documentation
+---
+slug: /docs
+title: Runku documentation
+description: Use and administer Runku Self-Hosted.
+---
 
-This documentation is the operational knowledge base for Runku Self-Hosted. It is organized by
-tasks and decisions so an application developer, operator, maintainer, or AI assistant can locate
-the authoritative context without reading implementation history.
+# Use and administer Runku
 
-## Documentation status
+This documentation explains how to build applications on Runku and operate Runku Self-Hosted. It
+is organized by responsibility so application code, CLI workflows, and server administration do
+not blur together.
 
-Every document must distinguish these states:
+## Choose your path
 
-| State | Meaning |
-|---|---|
-| Implemented | Code and executable tests cover the stated behavior |
-| Conformance | A component contract was verified in a bounded test environment |
-| Production requirement | Required before a deployment profile can be called supported |
-| Pre-release limitation | Deliberately not promised by the current source line |
+| You want to… | Start here | You will work with |
+|---|---|---|
+| build an application backend | [Application tutorial](getting-started/application-tutorial.md) | schemas, Query/Mutation/Action, data, auth, client |
+| look up an exact Function parameter/type/limit | [Function API reference](reference/function-api.md) | `@runku/server` declarations and handler context |
+| call Runku from TypeScript | [TypeScript client](reference/typescript-client.md) | `@runku/client`, typed calls, Realtime, file grants |
+| use React or Next.js | [React and Next.js integration](reference/react-client.md) | hooks, SSR hydration, server calls, generated references |
+| call Runku without an SDK | [Public HTTP API](reference/public-api.md) | canonical HTTP/JSON, credentials, retries |
+| use the command line | [CLI guide](cli/overview.md) | local dev, login/link, publish, promote, rollback |
+| install Self-Hosted | [Deployment guide](self-hosting/deployment-guide.md) | compact Docker package, TLS, state, readiness |
+| operate an installation | [Operator handbook](operations/operator-handbook.md) | health, logs, backup, upgrades, incidents |
+| configure the Runku Storage backend | [Storage configuration](self-hosting/storage-configuration.md) | filesystem/external object-store bytes, quota, capacity, recovery |
 
-Conformance is not installation support. A requirement is not an implemented feature. A benchmark
-is not an SLO. The current product boundary is summarized in the
-[root README](../README.md#distribution-status).
+## Application development
 
-## Application developer path
+Follow this route when writing the backend and the application that consumes it:
+
+1. [Application tutorial](getting-started/application-tutorial.md) — complete first application.
+2. [Schema and data types](functions/schema-and-types.md) — every validator, table/index rule,
+   naming constraint, size/depth limit, and rollout concern.
+3. [Query, Mutation, and Action](functions/query-mutation-action.md) — choose the correct semantic
+   operation, define authentication/visibility/capabilities, handle retries/effects/scheduling.
+4. [Function API reference](reference/function-api.md) — exact declaration fields, handler
+   parameters, context methods, capability matrix, and runtime limits.
+5. [Documents and indexes](data/documents-and-indexes.md) — IDs, reads/writes, revisions, OCC,
+   index ordering, scan constraints, pagination limits, and Realtime dependencies.
+6. [Data and Realtime](data/data-and-realtime.md) — broader transaction, outbox, subscription,
+   resync, and administrative-data contract.
+7. [Application identity](auth/application-identity.md) — Application Clients, functional identity,
+   public/secret/development credentials, JWT/OIDC, browser/server separation, and rotation.
+8. [Environment variables and secrets](concepts/environment-configuration.md) — declare and read
+   exact configuration capabilities safely.
+9. [Application Files](functions/file-storage.md) — Action permissions, grant parameters, streaming,
+   direct bytes, lifecycle, limits, and recovery consequences.
+10. [TypeScript client](reference/typescript-client.md) or [HTTP without an SDK](reference/public-api.md)
+    — consume the application API.
+
+Use [Application development workflow](functions/development-workflow.md) for build, Dev Revision,
+Release, Channel, compatibility, testing, and delivery as one task flow.
+
+## Storage products
+
+Runku exposes two distinct application-facing storage capabilities:
+
+| Capability | Application interface | Administration | Best for |
+|---|---|---|---|
+| Application Files | Action `ctx.storage` + short-lived HTTP grants | Self-Hosted byte quota/backend | user attachments and authorized transfers |
+| Runku Object Storage | Runku Product route with S3-compatible protocol | buckets, policies, CORS, quotas, Product access keys | application objects and compatible tooling |
+
+Read [Application Files](functions/file-storage.md) or
+[Runku Object Storage](concepts/object-storage.md) for usage. Operators should separately
+read [Storage configuration and limits](self-hosting/storage-configuration.md), because the
+physical filesystem or external object-store credentials, capacity, backup, and migration are
+installation concerns.
+
+## CLI
+
+The [CLI guide](cli/overview.md) covers:
+
+- installation and supported platforms;
+- `init`, `dev`, `build`, `status`, `doctor`, and local logs;
+- Self-Hosted `login` and Environment `link`;
+- remote publish, Release freeze, Channel promotion, and rollback;
+- local versus remote authority, CAS conflicts, exit-code behavior, and security.
+
+Use the [CLI reference](reference/cli.md) when you need exact syntax and flags. The CLI does not
+define Function parameters and is not the `runku-server` administration/configuration interface.
+
+## Self-Hosted installation
 
 Read in this order:
 
-1. [Local development](getting-started/local-development.md): install the CLI, understand local
-   state, start/stop the process, and diagnose startup.
-2. [Application tutorial](getting-started/application-tutorial.md): build a schema, Query, Mutation,
-   Action, typed client, Realtime subscription, and scheduled operation.
-3. [Platform model](concepts/platform-model.md): Project, Environment, Release, Channel, Workspace,
-   identity, and code pinning.
-   [Environment lifecycle](concepts/environment-lifecycle.md) documents the exact-scope Management
-   authority and its remaining archive/restore/materialization limits.
-   [Serving policy](concepts/serving-policy.md) documents revisioned atomic/gradual Release weights,
-   the compatibility gate, and deterministic `environment:default` request selection.
-   [Logical Object Storage](concepts/object-storage.md) documents the provider-independent bucket
-   and Product access-key Management API, content-addressed filesystem/S3 bytes, console transfers,
-   and the supported S3 subset.
-   [Environment variables and secrets](concepts/environment-configuration.md) documents revisioned
-   administration, encrypted secret references, runtime capabilities, audit, and recovery.
-4. [Functions and runtimes](functions/functions-and-runtimes.md): declarations, capabilities, Safe
-   V8, Full Node, nested calls, HTTPS, scheduling, and failure semantics.
-5. [Application file storage](functions/file-storage.md): Action APIs, streamed HTTP transfer,
-   filesystem/S3 backends, quotas, security, and operator-owned recovery.
-6. [Data and Realtime](data/data-and-realtime.md): values, documents, indexes, transactions, OCC,
-   outbox, subscriptions, and resync.
-7. [Application identity](auth/application-identity.md): Application Clients, key types, user/service
-   identity, JWT/OIDC, browser/server separation, and rotation.
-8. [Platform operator identity](auth/platform-identity.md): first-owner bootstrap, `runku login`,
-   scoped invitations, sessions, OIDC, PostgreSQL state, and recovery.
-9. [Authenticated remote lifecycle](operations/remote-lifecycle.md): use one operator session for
-   publish, Release validation, promotion, rollback, historical logs, and streaming logs.
-10. [`@runku/server`](../packages/server/README.md) and
-   [`@runku/client`](../packages/client/README.md): exact TypeScript APIs and examples.
+1. [Self-hosting overview](self-hosting/overview.md) — current supported distribution and fit.
+2. [Compact deployment guide](self-hosting/deployment-guide.md) — plan, install, expose TLS,
+   initialize ownership, publish, verify, and remove.
+3. [Docker package](../deployments/docker/README.md) — exact package commands and profiles.
+4. [Server configuration](self-hosting/server-configuration.md) — `runku-server` commands,
+   listeners, identity, Product database, browser auth, logs, and validation.
+5. [Storage configuration](self-hosting/storage-configuration.md) — filesystem or external
+   object-store parameters, capacity, credentials, canaries, backup, restore, and backend changes.
+6. [Function data PostgreSQL](self-hosting/product-postgresql.md) — optional Environment-scoped
+   document/index/outbox/schedule database and its recovery boundary.
+7. [Production readiness](self-hosting/production-readiness.md) — explicit go/no-go criteria.
 
-## Release and CI/CD path
+The current supported package is a compact non-root `runku-server` plus Docker Compose for one
+initialized Safe V8 Product Environment. Repository assets for separated general-purpose roles,
+Kubernetes, and VM-isolated shared Full Node are not a supported Helm/cluster distribution.
 
-- [Publishing a distribution](maintainers/releases.md): coordinated version, six native CLI
-  targets, npm trusted publishing, GitHub assets, fast gates, failure recovery, and verification.
-- [Releases and Workspaces](development/releases-and-workspaces.md): development revisions,
-  immutable packages, compatibility, promotion, rollback, remote sync, and scheduled-code pinning.
-- [CLI reference](reference/cli.md): exact commands, outputs, exit codes, automation expectations,
-  and safe retry rules.
-- [Compatibility](reference/compatibility.md): support boundaries for CLI, SDK, protocol, manifests,
-  storage, runtime, and upgrade behavior.
-- [Troubleshooting](reference/troubleshooting.md): symptom-driven diagnosis and evidence collection.
+## Operate Self-Hosted
 
-## Operator path
+Use these guides after installation:
 
-Read the support boundary before designing infrastructure:
+1. [Operator handbook](operations/operator-handbook.md) — routine checks, safe changes, rollout,
+   incident triage, restart, restore decisions, and evidence.
+2. [Administration](operations/administration.md) — Environment lifecycle, credentials, retention,
+   capacity, maintenance, and incidents.
+3. [Observability](operations/observability.md) — signal catalog, dashboards, alerts, correlation,
+   privacy, and OTLP behavior.
+4. [Operational logs](operations/operational-logs.md) — standalone/HA storage, query/follow,
+   archive frontier, retention, recovery, sizing, and upgrades.
+5. [Backup and recovery](operations/backup-and-recovery.md) — state inventory, compact commands,
+   restore verification, external dependencies, and disaster recovery.
+6. [Upgrades and rollback](operations/upgrades.md) — server/database/package change procedure.
+7. [Capacity planning](operations/capacity-planning.md) — workload model, resource signals,
+   saturation tests, and limits.
+8. [Troubleshooting](reference/troubleshooting.md) — symptom-first diagnosis.
 
-1. [Self-hosting overview](self-hosting/overview.md): topology, roles, dependencies, runtime profiles,
-   configuration domains, and current packaging state.
-2. [Production readiness](self-hosting/production-readiness.md): auditable go/no-go checklist for
-   installation, administration, HA, security, recovery, upgrades, and release artifacts.
-3. [Docker standalone installation](../deployments/docker/README.md): exact compact-profile install,
-   TLS boundary, secrets, backup, restore, upgrade, and removal procedure.
-4. [Environment-scoped Function platform PostgreSQL](self-hosting/product-postgresql.md): optional
-   transactional Function database, exact scope binding, secrets, readiness, and recovery boundary.
-5. [Administration](operations/administration.md): daily checks, lifecycle operations, credentials,
-   retention, capacity, maintenance windows, and incident workflow.
-6. [Authenticated remote lifecycle](operations/remote-lifecycle.md): exact server/CLI workflow,
-   authorization, failures, rollback, logs, and executable acceptance evidence.
-7. [Operational Log storage and administration](operations/operational-logs.md): choose standalone
-   or HA; configure filesystem/S3/NATS; query, stream, retain, recover, size, and upgrade it.
-8. [Observability](operations/observability.md): signal catalog, correlation, privacy, dashboards,
-   alerts, capacity indicators, and OTLP behavior.
-9. [Backup and recovery](operations/backup-and-recovery.md): local and packaged compact procedures,
-   inventory, restore verification, disaster-recovery acceptance, and current limitations.
-10. [Security model](security/security-model.md): boundaries, threats, deployment controls, secrets,
-   incident response, and residual risk.
-11. [Platform operator identity](auth/platform-identity.md): configure and operate management trust.
-12. [Deployment assets](../deployments/README.md): standalone, Docker, and Kubernetes profile scope.
+Application Release rollback and Self-Hosted server rollback are different operations. A Channel
+move does not restore data, change the binary, or reverse an external effect.
 
-## Maintainer and AI-assistant path
+## Identity and security
 
-AI assistants must begin with [`AGENTS.md`](../AGENTS.md). Human maintainers should use the same
-reading order because it records the product invariants and definition of done.
+- [Identity map](auth/identity-map.md) distinguishes Application Client, functional principal,
+  Platform operator, file grant, Product storage key, and physical provider credential.
+- [Application identity](auth/application-identity.md) covers runtime callers.
+- [Platform operator identity](auth/platform-identity.md) covers owners, invitations, OIDC,
+  sessions, grants, and recovery.
+- [Security model](security/security-model.md) covers trust boundaries, threats, controls, secrets,
+  and residual risk.
+- [Hardening checklist](security/hardening-checklist.md) is the deployment acceptance checklist.
 
-- [System architecture](internals/architecture.md): component and trust boundaries, serving/data/
-  runtime/management paths, consistency, scaling, and failure containment.
-- [Environment lifecycle](concepts/environment-lifecycle.md): revisioned desired/observed state,
-  authenticated Management API/server composition, idempotency, repository conformance, and
-  recovery.
-- [Serving policy](concepts/serving-policy.md): weighted Release intent, canonical compatibility
-  evidence, desired/observed state, deterministic request selection, audit, and recovery.
-- [Logical Object Storage](concepts/object-storage.md): revisioned buckets, scoped Product access
-  keys, authenticated Management API/server composition, SQL conformance, recovery, and the
-  current provider/data-plane integration limit.
-- [Releases and Workspaces](development/releases-and-workspaces.md): immutable code targets,
-  durable per-declaration Cron activation, Scheduled history, CAS/idempotency, and recovery.
-- [Repository map](internals/repository-map.md): crate ownership, dependency direction, tests,
-  generated artifacts, and where to implement a change.
-- [Evolving Runku](development/evolving-runku.md): contract classification, versioning, migrations,
-  rollout, rollback, security review, and evidence requirements.
-- [Documentation maintenance](maintainers/documentation.md): required reading maps, source
-  precedence, update matrix, link/example checks, and review rubric.
-- [Brand identity](brand.md): public Product logo assets, color modes, and usage constraints.
-- [Public protocol vectors](../protocol/README.md): exact persisted and wire compatibility fixtures.
-- [Contributing](../CONTRIBUTING.md): toolchain, gates, pull-request contract, and review workflow.
+Credentials cannot exchange roles. In particular, an Application Key cannot call the Management
+API, an operator token cannot replace a Function bearer/file grant, and a Runku Storage Product key
+is not the physical external-backend credential held by `runku-server`.
 
-## Examples and evidence
+## Administration APIs
 
-| Resource | What it proves | What it does not prove |
-|---|---|---|
-| [Realtime chat](../examples/chat-next/README.md) | Browser/server key separation, JWT/OIDC, data, two users, Realtime, restart | General production capacity or IdP coverage |
-| [Full Node Actions](../examples/node-actions/README.md) | Node built-ins/npm, Safe↔Node, typed bytes, scheduling, restart | Shared-host production isolation |
-| [Storage benchmark](../benchmarks/storage/README.md) | Repeatable local PostgreSQL index baseline | Production SLO or remote database sizing |
-| [Runtime benchmark](../benchmarks/runtime/README.md) | Repeatable invocation regression baseline | End-user latency or fleet throughput |
-| [Artifact benchmark](../benchmarks/artifacts/README.md) | Local hashing/read/write regression | S3 availability or network performance |
-| [Release benchmark](../benchmarks/releases/README.md) | Repository operation regression | Multi-node management capacity |
+Use the [Management API reference](reference/management-api.md) only when building an operator UI or
+controller. It covers Platform sessions/capabilities, exact Project/Environment scope, CAS,
+idempotency, one-time secret responses, lifecycle, Releases/Channels, configuration, credentials,
+storage, data administration, schedules/Cron, logs, and errors.
 
-## Terminology and writing rules
+Application clients use the [Public HTTP API](reference/public-api.md). Never expose the Management
+origin/token as an application backend API.
 
-- Capitalized Project, Environment, Release, Channel, Workspace, Function, Query, Mutation, and
-  Action refer to Runku domain concepts.
-- “Local” means one application root managed by `runku dev`; it does not mean insecure defaults may
-  be copied to a networked deployment.
-- “Production” is used only for an explicitly supported distribution profile with release artifacts,
-  limits, runbooks, upgrade/restore evidence, and a compatibility window.
-- Technology names describe an implementation profile. Product manifests and generic operational
-  procedures use Runku roles such as API, background, management, and Full Node Agent.
-- Commands and API examples must match the current strict parser and exported package surface.
-- Unknown, planned, or unsupported behavior must be stated directly; never fill gaps with invented
-  configuration.
+## Product model
+
+The durable vocabulary is:
+
+- **Environment = persistent state**;
+- **Release = immutable code**;
+- **Channel = traffic policy**;
+- **Workspace = mutable pointer to immutable development revisions**.
+
+Read [Platform model](concepts/platform-model.md),
+[Environment lifecycle](concepts/environment-lifecycle.md),
+[Serving policy](concepts/serving-policy.md), and
+[Releases and Workspaces](development/releases-and-workspaces.md) when operating delivery/routing.
+Every request, subscription, nested call, Cron activation, and scheduled invocation pins exact
+code for its defined lifetime; there is no implicit `latest`.
+
+## Support status vocabulary
+
+Documentation uses these states precisely:
+
+| State | Meaning |
+|---|---|
+| Implemented | available in the current product path described |
+| Conformance | a bounded contract/test exists; this alone is not installation support |
+| Production requirement | acceptance criterion that must be met before production use |
+| Pre-release limitation | capability or guarantee deliberately not promised by the current line |
+
+Start with [Capability and support status](concepts/capability-status.md) before relying on optional
+runtimes, distributed topology, HTTPS egress, storage backends, or backup guarantees.
+
+## Validate in Runku SaaS
+
+[SaaS validation](getting-started/saas-validation.md) can shorten application contract validation:
+schemas, Functions, clients, identity behavior, canonical calls, Release targeting, and supported
+storage flows can be compared there when enabled.
+
+SaaS validation does not prove Self-Hosted TLS, proxy behavior, physical Runku Storage backend
+policy, PostgreSQL, capacity, backup/restore, upgrade, or incident readiness. Repeat those
+acceptance tests on the actual Self-Hosted installation.

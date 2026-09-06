@@ -206,4 +206,5 @@ pnpm --dir packages/server check
 ```
 
 The package check builds and runs type conformance. Changes to declarations also require builder,
-runtime, generated-contract, and example gates described in [`AGENTS.md`](../../AGENTS.md).
+runtime, generated-contract, and example gates described in
+[`AGENTS.md`](https://github.com/aldemi-tech/runku/blob/main/AGENTS.md).

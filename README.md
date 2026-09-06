@@ -22,7 +22,7 @@ Runku is currently pre-release.
 | Capability | Current status |
 |---|---|
 | Versioned CLI for macOS, Linux GNU, and Windows on ARM64/x86_64 | Published from tagged releases through GitHub and npm |
-| `@runku/client` and `@runku/server` TypeScript SDKs | Published together with the CLI version |
+| `@runku/client`, `@runku/react`, and `@runku/server` TypeScript SDKs | Published together with the CLI version |
 | Complete SQLite-backed local development process | Implemented and test-covered |
 | Safe V8, local Full Node, HTTP, WebSocket, scheduling, identity, logs | Implemented and test-covered |
 | Environment-scoped application files | Filesystem implemented/tested; S3-compatible adapter has MinIO conformance; byte-store backup remains operator-owned |
@@ -32,6 +32,7 @@ Runku is currently pre-release.
 | Environment lifecycle authority | Domain service, SQLite/PostgreSQL repository, exact-scope create/get/update/archive/restore/operation Management API, and synchronous compact create/update/archive/restore reconciliation implemented and test-covered; provider materialization remains a separate Cloud gate |
 | Weighted serving-policy authority | Atomic/gradual policy, strict compatibility gate, materialized ready observation, deterministic `environment:default` runtime selection, retry-stable Mutation routing, operation journal, audit, and Management API are implemented and test-covered |
 | Logical Object Storage authority | Revisioned bucket/object/access-key domain, SQLite/PostgreSQL metadata authority, content-addressed filesystem/S3 bytes, authenticated console transfer/browser API, bounded lifecycle execution, and a shared SigV4 Product path for object/version listing, HEAD/GET/PUT/COPY/DELETE, multipart create/upload/list/complete/abort, public reads, presigned URLs, CORS, and one-time keys are implemented/test-covered; the exact profile has official AWS CLI conformance and coordinated compact-filesystem backup |
+| Environment variables and secrets | Exact-Environment CAS registry, encrypted secret references, value-free audit, Management API, and manifest-gated runtime reads are implemented in the current source line; treat them as pre-release until included in a tag |
 | Cron/Scheduled console authority | Authenticated code-derived Cron catalog, durable per-declaration enable/disable with CAS/operation recovery, and bounded Scheduled Invocation history are implemented over the same SQLite/PostgreSQL authorities; declaration editing and Scheduled retry/cancel remain code/runtime concerns |
 | Console operations telemetry | Authenticated exact-Environment aggregate runtime/cache/worker metrics and sanitized Product component health are implemented and test-covered; diagnostic counters are not billing authority |
 | Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
@@ -56,8 +57,10 @@ deployment.
 |---|---|
 | Run Runku locally | [Local development](docs/getting-started/local-development.md) |
 | Build a first application | [Application tutorial](docs/getting-started/application-tutorial.md) |
+| Follow the complete development lifecycle | [Application development workflow](docs/functions/development-workflow.md) |
 | Learn schema and Functions | [`@runku/server`](packages/server/README.md) |
 | Call Runku from an application | [`@runku/client`](packages/client/README.md) |
+| Use Runku with React or Next.js | [`@runku/react`](packages/react/README.md) |
 | Add authentication | [Application identity](docs/auth/application-identity.md) |
 | Bootstrap operator access | [Platform operator identity](docs/auth/platform-identity.md) |
 | Operate a Product through `runku login` | [Authenticated remote lifecycle](docs/operations/remote-lifecycle.md) |
@@ -65,8 +68,11 @@ deployment.
 | Build an operator console over Function/schema catalogs and logical Data Admin | [Data Admin](docs/data/data-and-realtime.md#management-data-admin) |
 | Publish, promote, or roll back code | [Releases and Workspaces](docs/development/releases-and-workspaces.md) |
 | Evaluate self-hosting | [Self-hosting overview](docs/self-hosting/overview.md) |
+| Plan and execute a compact deployment | [Self-Hosted deployment guide](docs/self-hosting/deployment-guide.md) |
 | Install the compact self-hosted product | [Docker standalone installation](deployments/docker/README.md) |
-| Operate or recover a local Environment | [Administration](docs/operations/administration.md) |
+| Operate or recover a local Environment | [Operator handbook](docs/operations/operator-handbook.md) |
+| Review the exact Management HTTP surface | [Management API](docs/reference/management-api.md) |
+| Validate the product model in SaaS | [SaaS validation](docs/getting-started/saas-validation.md) |
 | Store and administer logs in standalone or HA | [Operational Log storage](docs/operations/operational-logs.md) |
 | Upload/download application files | [Application file storage](docs/functions/file-storage.md) |
 | Contribute to Runku | [Contributing](CONTRIBUTING.md) |
@@ -107,6 +113,10 @@ For development from this repository:
 - `rustup` and the Rust version in [`rust-toolchain.toml`](rust-toolchain.toml);
 - pnpm 10.18.1;
 - `make` and a POSIX-compatible shell.
+
+Run the documentation portal locally with `pnpm docs:dev`; create the production static build with
+`pnpm docs:build`. `make docs` also builds Rust API documentation and fails on Docusaurus type/link
+errors.
 
 Docker is optional and is used by PostgreSQL, object-storage, execution-queue, and OCI conformance
 gates. Linux/KVM is required only for the microVM Full Node isolation profile; it is not required
@@ -254,21 +264,20 @@ export const create = mutation({
 })
 ```
 
-`runku build` generates `runku/_generated/api.d.ts`. The client uses that registry without generated
-runtime code:
+`runku build` generates browser and server Function-reference trees with matching declarations:
 
 ```ts
-import { RunkuClient, typedClient, type CodeTarget } from "@runku/client"
-import type { RunkuFunctions } from "./runku/_generated/api.js"
+import { RunkuClient, type CodeTarget } from "@runku/client"
+import { api } from "./runku/_generated/api.js"
 
-const runku = typedClient<RunkuFunctions>(new RunkuClient({
+const runku = new RunkuClient({
   baseUrl: process.env.RUNKU_URL!,
   target: process.env.RUNKU_TARGET! as CodeTarget,
   applicationKey: process.env.RUNKU_KEY!,
   getBearer: () => session.accessToken,
-}))
+})
 
-const result = await runku.mutation("notes.create", { title: "Read the runbook" })
+const result = await runku.mutation(api.notes.create, { title: "Read the runbook" })
 console.log(result.value)
 ```
 
