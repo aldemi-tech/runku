@@ -111,6 +111,22 @@ function platformContext(request, channel) {
       error: async (...values) => console.error(...values),
     }),
   };
+  if ([...capabilities].some((capability) => capability.startsWith("variable:"))) {
+    context.env = Object.freeze({
+      get: (name) => channel.call("configurationRead", {
+        kind: "variable",
+        name: String(name),
+      }, "text"),
+    });
+  }
+  if ([...capabilities].some((capability) => capability.startsWith("secret:"))) {
+    context.secrets = Object.freeze({
+      get: (name) => channel.call("configurationRead", {
+        kind: "secret",
+        name: String(name),
+      }, "text"),
+    });
+  }
   if (capabilities.has("function:query")) {
     context.runQuery = (func, args) => channel.call("functionCall", { kind: "query", function: func, arguments: encode(args) });
   }

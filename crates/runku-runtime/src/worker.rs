@@ -3,6 +3,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
+    collections::BTreeSet,
     rc::Rc,
     sync::{
         Arc,
@@ -31,11 +32,11 @@ use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
 use crate::{
-    DataDocument, DataGetRequest, DataIndexEntry, DataRead, DataScanRequest, DataWrite, FileBytes,
-    FileDownloadGrant, FileDownloadGrantRequest, FileMetadata, FileStorage, FileStoreRequest,
-    FileUploadGrant, FileUploadGrantRequest, FunctionCallError, FunctionCallKind,
-    FunctionCallRequest, FunctionInvoke, HttpsEgress, HttpsRequest, HttpsResponse, RuntimeError,
-    ScheduleCreate, ScheduleRequest, ScheduleTime,
+    ConfigurationRead, ConfigurationValueKind, DataDocument, DataGetRequest, DataIndexEntry,
+    DataRead, DataScanRequest, DataWrite, FileBytes, FileDownloadGrant, FileDownloadGrantRequest,
+    FileMetadata, FileStorage, FileStoreRequest, FileUploadGrant, FileUploadGrantRequest,
+    FunctionCallError, FunctionCallKind, FunctionCallRequest, FunctionInvoke, HttpsEgress,
+    HttpsRequest, HttpsResponse, RuntimeError, ScheduleCreate, ScheduleRequest, ScheduleTime,
     invocation::{InvocationRequest, RuntimeLimits},
     logging::InvocationLogContext,
     value_bridge::{WireValue, from_wire, to_wire},
@@ -69,6 +70,9 @@ struct PlatformState {
     storage_read: bool,
     storage_write: bool,
     file_storage: Option<Arc<dyn FileStorage>>,
+    variables: BTreeSet<String>,
+    secrets: BTreeSet<String>,
+    configuration: Option<Arc<dyn ConfigurationRead>>,
     function_query: bool,
     function_mutation: bool,
     function_action: bool,
@@ -184,6 +188,12 @@ struct WireFunctionLog {
     fields: Option<WireValue>,
 }
 
+#[derive(Deserialize)]
+struct WireConfigurationRead {
+    kind: String,
+    name: String,
+}
+
 impl OpBudget {
     fn take(&self) -> Result<(), deno_error::JsErrorBox> {
         let used = self.used.fetch_add(1, Ordering::Relaxed) + 1;
@@ -202,6 +212,41 @@ async fn op_runku_cooperate(state: Rc<RefCell<OpState>>) -> Result<(), deno_erro
     platform.budget.take()?;
     tokio::task::yield_now().await;
     Ok(())
+}
+
+#[op2]
+#[string]
+async fn op_runku_configuration_read(
+    state: Rc<RefCell<OpState>>,
+    #[serde] request: WireConfigurationRead,
+) -> Result<String, deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    let kind = match request.kind.as_str() {
+        "variable" if platform.variables.contains(&request.name) => {
+            ConfigurationValueKind::Variable
+        }
+        "secret" if platform.secrets.contains(&request.name) => ConfigurationValueKind::Secret,
+        _ => {
+            return Err(deno_error::JsErrorBox::generic(
+                "CONFIGURATION_CAPABILITY_DENIED",
+            ));
+        }
+    };
+    let configuration = platform
+        .configuration
+        .as_ref()
+        .ok_or_else(|| deno_error::JsErrorBox::generic("CONFIGURATION_BROKER_UNAVAILABLE"))?;
+    configuration
+        .read(
+            kind,
+            &request.name,
+            platform.deadline,
+            platform.cancellation.clone(),
+        )
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
 }
 
 #[op2]
@@ -724,6 +769,7 @@ fn op_runku_log(
 
 fn platform_extension() -> Extension {
     const COOPERATE_OP: OpDecl = op_runku_cooperate();
+    const CONFIGURATION_READ_OP: OpDecl = op_runku_configuration_read();
     const HTTPS_OP: OpDecl = op_runku_https();
     const DATA_GET_OP: OpDecl = op_runku_data_get();
     const DATA_SCAN_OP: OpDecl = op_runku_data_scan();
@@ -756,6 +802,7 @@ fn platform_extension() -> Extension {
         esm_entry_point: Some("ext:runku_platform_js_1/runtime_bootstrap.js"),
         ops: Cow::Borrowed(&[
             COOPERATE_OP,
+            CONFIGURATION_READ_OP,
             HTTPS_OP,
             DATA_GET_OP,
             DATA_SCAN_OP,
@@ -793,6 +840,8 @@ struct WireInvocationMetadata {
     function_name: String,
     function_type: &'static str,
     capabilities: Vec<String>,
+    variable_enabled: bool,
+    secret_enabled: bool,
     https_enabled: bool,
     data_enabled: bool,
     data_write_enabled: bool,
@@ -860,6 +909,7 @@ struct ValidatedInvocation {
     document_schema: Option<Arc<DocumentSchemaV1>>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_input(
     request: &InvocationRequest,
     limits: RuntimeLimits,
@@ -876,7 +926,13 @@ fn validate_input(
     }
     if !matches!(
         request.manifest.runtime_version.as_str(),
-        "platform-js-1" | "runku-js-1" | "runku-js-2" | "runku-hybrid-1" | "runku-hybrid-2"
+        "platform-js-1"
+            | "runku-js-1"
+            | "runku-js-2"
+            | "runku-js-3"
+            | "runku-hybrid-1"
+            | "runku-hybrid-2"
+            | "runku-hybrid-3"
     ) {
         return Err(RuntimeError::UnsupportedRuntime);
     }
@@ -918,7 +974,7 @@ fn validate_input(
         decode_safe_esm_bundle(resource_bytes).map_err(|_| RuntimeError::InvalidArtifact)?;
     if matches!(
         request.manifest.runtime_version.as_str(),
-        "runku-hybrid-1" | "runku-hybrid-2"
+        "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3"
     ) {
         let node_bundle = runku_releases::decode_node_esm_bundle(resource_bytes)
             .map_err(|_| RuntimeError::InvalidArtifact)?;
@@ -942,7 +998,12 @@ fn validate_input(
         .to_owned();
     let (result_contract, document_schema) = if matches!(
         request.manifest.runtime_version.as_str(),
-        "runku-js-1" | "runku-js-2" | "runku-hybrid-1" | "runku-hybrid-2"
+        "runku-js-1"
+            | "runku-js-2"
+            | "runku-js-3"
+            | "runku-hybrid-1"
+            | "runku-hybrid-2"
+            | "runku-hybrid-3"
     ) {
         let arguments_contract = contract_resource(&bundle, function.arguments_contract_hash)?;
         arguments_contract
@@ -1109,6 +1170,10 @@ fn platform_state(
     document_schema: Option<Arc<DocumentSchemaV1>>,
     logs: Option<Arc<InvocationLogContext>>,
 ) -> Arc<PlatformState> {
+    let configuration_runtime = matches!(
+        request.manifest.runtime_version.as_str(),
+        "runku-js-3" | "runku-hybrid-3"
+    );
     let network_https = function.function_type == FunctionType::Action
         && function.capabilities.contains(&Capability::NetworkHttps);
     let data_read = matches!(
@@ -1140,6 +1205,33 @@ fn platform_state(
         storage_write: function.function_type == FunctionType::Action
             && function.capabilities.contains(&Capability::FileWrite),
         file_storage: request.file_storage.clone(),
+        variables: if configuration_runtime {
+            function
+                .capabilities
+                .iter()
+                .filter_map(|capability| match capability {
+                    Capability::Variable(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            BTreeSet::new()
+        },
+        secrets: if configuration_runtime {
+            function
+                .capabilities
+                .iter()
+                .filter_map(|capability| match capability {
+                    Capability::Secret(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            BTreeSet::new()
+        },
+        configuration: configuration_runtime
+            .then(|| request.configuration.clone())
+            .flatten(),
         function_query: function.capabilities.contains(&Capability::FunctionQuery),
         function_mutation: function
             .capabilities
@@ -1404,6 +1496,10 @@ fn function_as_value(
 
 fn metadata(request: &InvocationRequest, function: &FunctionManifest) -> WireInvocationMetadata {
     let auth_enabled = function.capabilities.contains(&Capability::AuthRead);
+    let configuration_runtime = matches!(
+        request.manifest.runtime_version.as_str(),
+        "runku-js-3" | "runku-hybrid-3"
+    );
     WireInvocationMetadata {
         project_id: request.scope.project_id().to_string(),
         environment_id: request.scope.environment_id().to_string(),
@@ -1414,6 +1510,16 @@ fn metadata(request: &InvocationRequest, function: &FunctionManifest) -> WireInv
         function_name: function.name.to_string(),
         function_type: function_type(function.function_type),
         capabilities: function.capabilities.iter().map(capability).collect(),
+        variable_enabled: configuration_runtime
+            && function
+                .capabilities
+                .iter()
+                .any(|capability| matches!(capability, Capability::Variable(_))),
+        secret_enabled: configuration_runtime
+            && function
+                .capabilities
+                .iter()
+                .any(|capability| matches!(capability, Capability::Secret(_))),
         https_enabled: function.function_type == FunctionType::Action
             && function.capabilities.contains(&Capability::NetworkHttps),
         data_enabled: matches!(
@@ -1502,5 +1608,6 @@ fn capability(value: &Capability) -> String {
         Capability::FileRead => "storage:read".to_owned(),
         Capability::FileWrite => "storage:write".to_owned(),
         Capability::Secret(name) => format!("secret:{name}"),
+        Capability::Variable(name) => format!("variable:{name}"),
     }
 }

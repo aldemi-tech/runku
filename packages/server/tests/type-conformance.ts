@@ -43,6 +43,30 @@ const action = (async (ctx) => {
   return BigInt(response.status)
 }) satisfies ActionHandler<"network:https", null, bigint>
 
+const configuredQuery = (async (ctx) => {
+  // @ts-expect-error Secrets are never exposed to Queries.
+  void ctx.secrets
+  return ctx.env.get("FEATURE_CHECKOUT_V3")
+}) satisfies QueryHandler<"variable:FEATURE_CHECKOUT_V3", null, string>
+
+const configuredAction = (async (ctx) => {
+  const endpoint = await ctx.env.get("STRIPE_WEBHOOK_URL")
+  const apiKey = await ctx.secrets.get("PAYMENTS_API_KEY")
+  return `${endpoint}:${apiKey.length}`
+}) satisfies ActionHandler<
+  "variable:STRIPE_WEBHOOK_URL" | "secret:PAYMENTS_API_KEY",
+  null,
+  string
+>
+
+const actionWithoutConfiguration = (async (ctx) => {
+  // @ts-expect-error Environment variables require an exact variable capability.
+  void ctx.env
+  // @ts-expect-error Environment secrets require an exact secret capability.
+  void ctx.secrets
+  return null
+}) satisfies ActionHandler<"network:https", null, null>
+
 const nestedQuery = (async (ctx, input) => {
   const result = await ctx.runQuery("queries.child", input)
   // @ts-expect-error Query callers cannot invoke a Mutation.
@@ -161,6 +185,9 @@ void [
   query,
   mutation,
   action,
+  configuredQuery,
+  configuredAction,
+  actionWithoutConfiguration,
   nestedQuery,
   nestedMutation,
   nestedAction,

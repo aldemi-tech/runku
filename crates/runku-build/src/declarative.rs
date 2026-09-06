@@ -1659,7 +1659,10 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
     match function_type {
         FunctionType::Query => matches!(
             capability,
-            Capability::DbRead | Capability::AuthRead | Capability::FunctionQuery
+            Capability::DbRead
+                | Capability::AuthRead
+                | Capability::FunctionQuery
+                | Capability::Variable(_)
         ),
         FunctionType::Mutation => matches!(
             capability,
@@ -1669,6 +1672,7 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
                 | Capability::FunctionQuery
                 | Capability::FunctionMutation
                 | Capability::SchedulerCreate
+                | Capability::Variable(_)
         ),
         FunctionType::Action => matches!(
             capability,
@@ -1681,6 +1685,7 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
                 | Capability::FileRead
                 | Capability::FileWrite
                 | Capability::Secret(_)
+                | Capability::Variable(_)
         ),
     }
 }
@@ -1697,7 +1702,15 @@ fn parse_capability(value: &str) -> Result<Capability, BuildError> {
         "scheduler:create" => Ok(Capability::SchedulerCreate),
         "storage:read" => Ok(Capability::FileRead),
         "storage:write" => Ok(Capability::FileWrite),
-        _ => Err(BuildError::InvalidConfig),
+        _ => value
+            .strip_prefix("secret:")
+            .map(|name| Capability::Secret(name.to_owned()))
+            .or_else(|| {
+                value
+                    .strip_prefix("variable:")
+                    .map(|name| Capability::Variable(name.to_owned()))
+            })
+            .ok_or(BuildError::InvalidConfig),
     }
 }
 

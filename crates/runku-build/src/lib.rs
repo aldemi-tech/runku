@@ -40,6 +40,9 @@ const HYBRID_RUNTIME_VERSION: &str = "runku-hybrid-1";
 const CONTRACT_STORAGE_RUNTIME_VERSION: &str = "runku-js-2";
 const NODE_STORAGE_RUNTIME_VERSION: &str = "runku-node-2";
 const HYBRID_STORAGE_RUNTIME_VERSION: &str = "runku-hybrid-2";
+const CONTRACT_CONFIGURATION_RUNTIME_VERSION: &str = "runku-js-3";
+const NODE_CONFIGURATION_RUNTIME_VERSION: &str = "runku-node-3";
+const HYBRID_CONFIGURATION_RUNTIME_VERSION: &str = "runku-hybrid-3";
 const FUNCTION_ID_DOMAIN: &[u8] = b"RUNKU_FUNCTION_ID_V1";
 const FUNCTION_CONTRACT_DOMAIN: &[u8] = b"RUNKU_FUNCTION_CONTRACT_V1";
 type CompiledFunctions = Vec<(LoadedFunction, Sha256Digest)>;
@@ -209,7 +212,14 @@ pub fn build_project(
             .iter()
             .any(|capability| matches!(capability, Capability::FileRead | Capability::FileWrite))
     });
-    let runtime_version = artifact_runtime_version(&artifact, storage_runtime);
+    let configuration_runtime = functions.iter().any(|function| {
+        function
+            .capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::Secret(_) | Capability::Variable(_)))
+    });
+    let runtime_version =
+        artifact_runtime_version(&artifact, storage_runtime, configuration_runtime);
     let (artifact_bytes, artifact_descriptor) = match &artifact {
         CompiledArtifact::Safe(bundle) => (
             encode_safe_esm_bundle(bundle).map_err(map_release)?,
@@ -254,14 +264,21 @@ pub fn build_project(
     )
 }
 
-fn artifact_runtime_version(artifact: &CompiledArtifact, storage: bool) -> &'static str {
-    match (artifact, storage) {
-        (CompiledArtifact::Safe(_), false) => CONTRACT_RUNTIME_VERSION,
-        (CompiledArtifact::Safe(_), true) => CONTRACT_STORAGE_RUNTIME_VERSION,
-        (CompiledArtifact::LocalNode(_), false) => NODE_RUNTIME_VERSION,
-        (CompiledArtifact::LocalNode(_), true) => NODE_STORAGE_RUNTIME_VERSION,
-        (CompiledArtifact::Hybrid(_), false) => HYBRID_RUNTIME_VERSION,
-        (CompiledArtifact::Hybrid(_), true) => HYBRID_STORAGE_RUNTIME_VERSION,
+fn artifact_runtime_version(
+    artifact: &CompiledArtifact,
+    storage: bool,
+    configuration: bool,
+) -> &'static str {
+    match (artifact, storage, configuration) {
+        (CompiledArtifact::Safe(_), _, true) => CONTRACT_CONFIGURATION_RUNTIME_VERSION,
+        (CompiledArtifact::Safe(_), true, false) => CONTRACT_STORAGE_RUNTIME_VERSION,
+        (CompiledArtifact::Safe(_), false, false) => CONTRACT_RUNTIME_VERSION,
+        (CompiledArtifact::LocalNode(_), _, true) => NODE_CONFIGURATION_RUNTIME_VERSION,
+        (CompiledArtifact::LocalNode(_), true, false) => NODE_STORAGE_RUNTIME_VERSION,
+        (CompiledArtifact::LocalNode(_), false, false) => NODE_RUNTIME_VERSION,
+        (CompiledArtifact::Hybrid(_), _, true) => HYBRID_CONFIGURATION_RUNTIME_VERSION,
+        (CompiledArtifact::Hybrid(_), true, false) => HYBRID_STORAGE_RUNTIME_VERSION,
+        (CompiledArtifact::Hybrid(_), false, false) => HYBRID_RUNTIME_VERSION,
     }
 }
 
@@ -432,6 +449,7 @@ fn capability_text(value: &Capability) -> String {
         Capability::FileRead => "storage:read".to_owned(),
         Capability::FileWrite => "storage:write".to_owned(),
         Capability::Secret(name) => format!("secret:{name}"),
+        Capability::Variable(name) => format!("variable:{name}"),
     }
 }
 

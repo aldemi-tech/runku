@@ -41,7 +41,8 @@ use runku_releases::{
     ServingSnapshot, Sha256Digest,
 };
 use runku_runtime::{
-    DataReadError, FileStorage, HttpsEgress, InvocationRequest, RuntimeError, ScheduleError,
+    ConfigurationRead, DataReadError, FileStorage, HttpsEgress, InvocationRequest, RuntimeError,
+    ScheduleError,
 };
 use runku_schema::SchemaError;
 use runku_value::TimestampMicros;
@@ -609,6 +610,7 @@ pub struct ProductInvocationService {
     action: ActionExecutor,
     full_node: Option<Arc<dyn FullNodeActionRuntime>>,
     https: Option<Arc<dyn HttpsEgress>>,
+    configuration: Option<Arc<dyn ConfigurationRead>>,
     operational_logs: Option<Arc<dyn OperationalLogSink>>,
 }
 
@@ -629,6 +631,7 @@ impl fmt::Debug for ProductInvocationService {
             .field("action", &self.action)
             .field("full_node_configured", &self.full_node.is_some())
             .field("https_configured", &self.https.is_some())
+            .field("configuration_configured", &self.configuration.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -683,6 +686,7 @@ impl ProductInvocationService {
             action,
             full_node: None,
             https,
+            configuration: None,
             operational_logs: None,
         })
     }
@@ -730,6 +734,13 @@ impl ProductInvocationService {
     #[must_use]
     pub fn with_file_storage(mut self, storage: Arc<dyn FileStorage>) -> Self {
         self.action = self.action.clone().with_file_storage(storage);
+        self
+    }
+
+    /// Attaches exact-Environment variables and secrets to capability-authorized Functions.
+    #[must_use]
+    pub fn with_configuration(mut self, configuration: Arc<dyn ConfigurationRead>) -> Self {
+        self.configuration = Some(configuration);
         self
     }
 
@@ -876,6 +887,7 @@ impl ProductInvocationService {
         Ok(Arc::new(identity))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn invocation_request(
         &self,
         resolved: &ResolvedCode,
@@ -915,6 +927,25 @@ impl ProductInvocationService {
                 failure(ErrorClassV1::Unavailable, "ACTION_HTTPS_UNAVAILABLE", true)
             })?;
             request = request.with_https(Arc::clone(https)).map_err(map_runtime)?;
+        }
+        if matches!(
+            resolved.manifest.runtime_version.as_str(),
+            "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+        ) && function
+            .capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::Variable(_) | Capability::Secret(_)))
+        {
+            let configuration = self.configuration.as_ref().ok_or_else(|| {
+                failure(
+                    ErrorClassV1::Unavailable,
+                    "ENVIRONMENT_CONFIGURATION_UNAVAILABLE",
+                    true,
+                )
+            })?;
+            request = request
+                .with_configuration(Arc::clone(configuration))
+                .map_err(map_runtime)?;
         }
         Ok(request)
     }
@@ -1469,7 +1500,9 @@ fn map_release(error: ReleaseError) -> GatewayFailure {
         ReleaseError::ReleaseRetired => ErrorClassV1::Gone,
         ReleaseError::LimitExceeded => ErrorClassV1::LimitExceeded,
         ReleaseError::Busy => ErrorClassV1::Busy,
-        ReleaseError::Unavailable | ReleaseError::ResultUncertain => ErrorClassV1::Unavailable,
+        ReleaseError::Unavailable
+        | ReleaseError::ResultUncertain
+        | ReleaseError::EnvironmentServingPolicyNotReady => ErrorClassV1::Unavailable,
         ReleaseError::RepositoryConflict | ReleaseError::OperationIdReused => {
             ErrorClassV1::Conflict
         }
@@ -1477,7 +1510,6 @@ fn map_release(error: ReleaseError) -> GatewayFailure {
         | ReleaseError::DefaultChannelMissing
         | ReleaseError::EnvironmentServingPolicyMissing
         | ReleaseError::ReleaseNotServable => ErrorClassV1::NotFound,
-        ReleaseError::EnvironmentServingPolicyNotReady => ErrorClassV1::Unavailable,
         ReleaseError::InvalidManifest
         | ReleaseError::InvalidArtifact
         | ReleaseError::Unsupported

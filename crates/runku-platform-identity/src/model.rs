@@ -141,6 +141,10 @@ pub enum PlatformCapability {
     DataRead,
     /// Insert, replace, or delete logical application documents.
     DataWrite,
+    /// Read Environment variables and non-secret secret-reference metadata.
+    ConfigurationRead,
+    /// Create, replace, rotate, or delete Environment configuration entries.
+    ConfigurationManage,
     /// Read non-secret credential metadata.
     CredentialsRead,
     /// Create, rotate, revoke, or delete credentials.
@@ -183,6 +187,8 @@ impl PlatformCapability {
             Self::FunctionsInvoke => "functions:invoke",
             Self::DataRead => "data:read",
             Self::DataWrite => "data:write",
+            Self::ConfigurationRead => "configuration:read",
+            Self::ConfigurationManage => "configuration:manage",
             Self::CredentialsRead => "credentials:read",
             Self::CredentialsManage => "credentials:manage",
             Self::StorageRead => "storage:read",
@@ -216,6 +222,8 @@ impl PlatformCapability {
             "functions:invoke" => Ok(Self::FunctionsInvoke),
             "data:read" => Ok(Self::DataRead),
             "data:write" => Ok(Self::DataWrite),
+            "configuration:read" => Ok(Self::ConfigurationRead),
+            "configuration:manage" => Ok(Self::ConfigurationManage),
             "credentials:read" => Ok(Self::CredentialsRead),
             "credentials:manage" => Ok(Self::CredentialsManage),
             "storage:read" => Ok(Self::StorageRead),
@@ -247,6 +255,8 @@ impl PlatformCapability {
             Self::FunctionsInvoke,
             Self::DataRead,
             Self::DataWrite,
+            Self::ConfigurationRead,
+            Self::ConfigurationManage,
             Self::CredentialsRead,
             Self::CredentialsManage,
             Self::StorageRead,
@@ -345,6 +355,8 @@ impl OperatorRole {
                 C::FunctionsInvoke,
                 C::DataRead,
                 C::DataWrite,
+                C::ConfigurationRead,
+                C::ConfigurationManage,
                 C::CredentialsRead,
                 C::CredentialsManage,
                 C::StorageRead,
@@ -368,6 +380,7 @@ impl OperatorRole {
                 C::FunctionsInvoke,
                 C::DataRead,
                 C::DataWrite,
+                C::ConfigurationRead,
                 C::CredentialsRead,
                 C::StorageRead,
                 C::CronRead,
@@ -387,6 +400,7 @@ impl OperatorRole {
                 C::LogsRead,
                 C::LogsFollow,
                 C::DataRead,
+                C::ConfigurationRead,
                 C::UsageRead,
             ]
             .into_iter()

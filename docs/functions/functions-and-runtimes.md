@@ -21,8 +21,11 @@ developer feedback, not the security boundary.
 | Action | Mediated/external effects and orchestration | Never automatic |
 
 Capabilities are `db:read`, `db:write`, `auth:read`, `function:query`, `function:mutation`,
-`function:action`, `network:https`, `scheduler:create`, `storage:read`, and `storage:write`. Each Function class accepts a safe
-subset. An absent capability removes that context member and is rejected at runtime if bypassed.
+`function:action`, `network:https`, `scheduler:create`, `storage:read`, `storage:write`,
+`variable:NAME`, and `secret:NAME`. Each Function class accepts a safe subset. An absent capability
+removes that context member and is rejected at runtime if bypassed. Variables are available to all
+Function classes; secrets are Action-only and both require the exact declared name. See
+[Environment variables and secrets](../concepts/environment-configuration.md).
 
 ## Safe V8
 

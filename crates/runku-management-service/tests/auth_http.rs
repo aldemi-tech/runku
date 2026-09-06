@@ -17,7 +17,10 @@ use axum::{
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementApplicationClientList,
-    ManagementBucketPage, ManagementCronActivationResult, ManagementCronActivationSet,
+    ManagementBucketPage, ManagementConfigurationAuditEntry, ManagementConfigurationDelete,
+    ManagementConfigurationEntry, ManagementConfigurationHistory,
+    ManagementConfigurationHistoryQuery, ManagementConfigurationResult, ManagementConfigurationSet,
+    ManagementConfigurationSnapshot, ManagementCronActivationResult, ManagementCronActivationSet,
     ManagementCronCatalog, ManagementCronQuery, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataWriteResult, ManagementEnvironment,
     ManagementEnvironmentConfiguration, ManagementEnvironmentLifecycleChange,
@@ -71,6 +74,8 @@ struct DataProbeProduct {
     compatibility_reads: AtomicUsize,
     environment_archives: AtomicUsize,
     environment_restores: AtomicUsize,
+    configuration_reads: AtomicUsize,
+    configuration_writes: AtomicUsize,
 }
 
 fn lifecycle_environment(
@@ -211,6 +216,87 @@ impl ManagementProduct for DataProbeProduct {
         self.environment_restores.fetch_add(1, Ordering::SeqCst);
         Ok(ManagementEnvironmentResult {
             environment: lifecycle_environment(self.scope, request.expected_revision + 1, "active"),
+            operation_id: operation_id.to_string(),
+            replayed: false,
+        })
+    }
+
+    async fn configuration(
+        &self,
+    ) -> Result<ManagementConfigurationSnapshot, ManagementProductError> {
+        self.configuration_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementConfigurationSnapshot {
+            version: 1,
+            configuration_revision: 1,
+            entries: vec![ManagementConfigurationEntry {
+                name: "PAYMENTS_API_KEY".to_owned(),
+                kind: "secret".to_owned(),
+                value: None,
+                revision: 1,
+                created_at_micros: "1".to_owned(),
+                updated_at_micros: "1".to_owned(),
+            }],
+        })
+    }
+
+    async fn configuration_history(
+        &self,
+        _query: &ManagementConfigurationHistoryQuery,
+    ) -> Result<ManagementConfigurationHistory, ManagementProductError> {
+        self.configuration_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementConfigurationHistory {
+            version: 1,
+            entries: vec![ManagementConfigurationAuditEntry {
+                sequence: 1,
+                operation_id: OperationId::generate().to_string(),
+                actor: runku_core::OperatorId::generate().to_string(),
+                name: "PAYMENTS_API_KEY".to_owned(),
+                action: "set".to_owned(),
+                kind: "secret".to_owned(),
+                configuration_revision: 1,
+                occurred_at_micros: "1".to_owned(),
+            }],
+            next_before_sequence: None,
+        })
+    }
+
+    async fn configuration_set(
+        &self,
+        name: &str,
+        operation_id: OperationId,
+        _actor: runku_core::OperatorId,
+        request: &ManagementConfigurationSet,
+    ) -> Result<ManagementConfigurationResult, ManagementProductError> {
+        self.configuration_writes.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.value, "private-payment-key");
+        Ok(ManagementConfigurationResult {
+            version: 1,
+            configuration_revision: request.expected_revision + 1,
+            entry: Some(ManagementConfigurationEntry {
+                name: name.to_owned(),
+                kind: request.kind.clone(),
+                value: None,
+                revision: request.expected_revision + 1,
+                created_at_micros: request.changed_at_micros.clone(),
+                updated_at_micros: request.changed_at_micros.clone(),
+            }),
+            operation_id: operation_id.to_string(),
+            replayed: false,
+        })
+    }
+
+    async fn configuration_delete(
+        &self,
+        _name: &str,
+        operation_id: OperationId,
+        _actor: runku_core::OperatorId,
+        request: &ManagementConfigurationDelete,
+    ) -> Result<ManagementConfigurationResult, ManagementProductError> {
+        self.configuration_writes.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementConfigurationResult {
+            version: 1,
+            configuration_revision: request.expected_revision + 1,
+            entry: None,
             operation_id: operation_id.to_string(),
             replayed: false,
         })
@@ -945,6 +1031,43 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_009),
         )
         .await?;
+    let configuration_reader = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "configuration-reader".to_owned(),
+            },
+            OperatorName::from_str("Configuration reader")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([PlatformCapability::ConfigurationRead]),
+            }],
+            DeviceName::from_str("configuration reader device")?,
+            TimestampMicros::new(1_900_000_000_000_010),
+        )
+        .await?;
+    let configuration_manager = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "configuration-manager".to_owned(),
+            },
+            OperatorName::from_str("Configuration manager")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([
+                    PlatformCapability::ConfigurationRead,
+                    PlatformCapability::ConfigurationManage,
+                ]),
+            }],
+            DeviceName::from_str("configuration manager device")?,
+            TimestampMicros::new(1_900_000_000_000_011),
+        )
+        .await?;
     let automation_reader = identity
         .login_with_managed_external_identity(
             ExternalOperatorIdentity {
@@ -1035,6 +1158,8 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         compatibility_reads: AtomicUsize::new(0),
         environment_archives: AtomicUsize::new(0),
         environment_restores: AtomicUsize::new(0),
+        configuration_reads: AtomicUsize::new(0),
+        configuration_writes: AtomicUsize::new(0),
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -1079,6 +1204,13 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         scope.project_id(),
         scope.environment_id()
     );
+    let configuration_path = format!(
+        "/v1/projects/{}/environments/{}/configuration",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let secret_path = format!("{configuration_path}/PAYMENTS_API_KEY");
+    let configuration_history_path = format!("{configuration_path}/history?limit=10");
     let environment_path = format!(
         "/v1/projects/{}/environments/{}",
         scope.project_id(),
@@ -1185,6 +1317,16 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     assert_eq!(product.environment_reads.load(Ordering::SeqCst), 0);
     let response = router
         .clone()
+        .oneshot(
+            Request::get(&configuration_path)
+                .header(header::AUTHORIZATION, format!("Bearer {manager_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.configuration_reads.load(Ordering::SeqCst), 0);
+    let response = router
+        .clone()
         .oneshot(lifecycle(&environment_archive_path, manager_access, 1)?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1195,6 +1337,88 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.environment_restores.load(Ordering::SeqCst), 1);
+
+    let configuration_reader_access = configuration_reader.login.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&configuration_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {configuration_reader_access}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.configuration_reads.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&configuration_history_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {configuration_reader_access}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.configuration_reads.load(Ordering::SeqCst), 2);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::put(&secret_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {configuration_reader_access}"),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", OperationId::generate().to_string())
+                .body(Body::from(
+                    json!({
+                        "expectedRevision": 1,
+                        "kind": "secret",
+                        "value": "private-payment-key",
+                        "changedAtMicros": "1900000000000012"
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(product.configuration_writes.load(Ordering::SeqCst), 0);
+
+    let configuration_manager_access = configuration_manager.login.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::put(&secret_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {configuration_manager_access}"),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", OperationId::generate().to_string())
+                .body(Body::from(
+                    json!({
+                        "expectedRevision": 1,
+                        "kind": "secret",
+                        "value": "private-payment-key",
+                        "changedAtMicros": "1900000000000012"
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_bytes = to_bytes(response.into_body(), 16 * 1024).await?;
+    assert!(
+        !response_bytes
+            .windows(b"private-payment-key".len())
+            .any(|window| window == b"private-payment-key")
+    );
+    assert_eq!(product.configuration_writes.load(Ordering::SeqCst), 1);
     let response = router
         .clone()
         .oneshot(

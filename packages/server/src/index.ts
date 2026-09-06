@@ -34,6 +34,9 @@ export type RunkuValue =
   | { readonly [key: string]: RunkuValue }
 
 /** Platform capability names implemented by the safe runtime. */
+export type VariableCapability = `variable:${string}`
+export type SecretCapability = `secret:${string}`
+
 export type ImplementedCapability =
   | "db:read"
   | "db:write"
@@ -45,10 +48,12 @@ export type ImplementedCapability =
   | "scheduler:create"
   | "storage:read"
   | "storage:write"
+  | VariableCapability
+  | SecretCapability
 
 export type QueryCapability = Extract<
   ImplementedCapability,
-  "db:read" | "auth:read" | "function:query"
+  "db:read" | "auth:read" | "function:query" | VariableCapability
 >
 export type MutationCapability = Extract<
   ImplementedCapability,
@@ -58,6 +63,7 @@ export type MutationCapability = Extract<
   | "function:query"
   | "function:mutation"
   | "scheduler:create"
+  | VariableCapability
 >
 export type ActionCapability = Extract<
   ImplementedCapability,
@@ -69,6 +75,8 @@ export type ActionCapability = Extract<
   | "scheduler:create"
   | "storage:read"
   | "storage:write"
+  | VariableCapability
+  | SecretCapability
 >
 
 export interface InvocationMetadata {
@@ -81,6 +89,8 @@ export interface InvocationMetadata {
   readonly functionName: string
   readonly functionType: "query" | "mutation" | "action"
   readonly capabilities: readonly string[]
+  readonly variableEnabled: boolean
+  readonly secretEnabled: boolean
   readonly httpsEnabled: boolean
   readonly dataEnabled: boolean
   readonly dataWriteEnabled: boolean
@@ -296,6 +306,27 @@ interface BaseContext {
   readonly log: FunctionLogger
 }
 
+/** Capability-scoped non-secret Environment variable reader. */
+export interface EnvironmentVariables {
+  get(name: string): Promise<string>
+}
+
+/** Capability-scoped Environment secret reader. Secret values are never administrative output. */
+export interface EnvironmentSecrets {
+  get(name: string): Promise<string>
+}
+
+type VariableFeature<C extends ImplementedCapability> = Extract<
+  C,
+  VariableCapability
+> extends never
+  ? Record<never, never>
+  : { readonly env: EnvironmentVariables }
+
+type SecretFeature<C extends ImplementedCapability> = Extract<C, SecretCapability> extends never
+  ? Record<never, never>
+  : { readonly secrets: EnvironmentSecrets }
+
 type AuthFeature<C extends ImplementedCapability> = "auth:read" extends C
   ? { readonly auth: AuthContext }
   : Record<never, never>
@@ -347,11 +378,13 @@ type RunActionFeature<C extends ImplementedCapability> = "function:action" exten
 
 export type QueryContext<C extends QueryCapability> = BaseContext &
   AuthFeature<C> &
+  VariableFeature<C> &
   QueryDataFeature<C> &
   RunQueryFeature<C>
 
 export type MutationContext<C extends MutationCapability> = BaseContext &
   AuthFeature<C> &
+  VariableFeature<C> &
   MutationDataFeature<C> &
   SchedulerFeature<C> &
   RunQueryFeature<C> &
@@ -359,6 +392,8 @@ export type MutationContext<C extends MutationCapability> = BaseContext &
 
 export type ActionContext<C extends ActionCapability> = BaseContext &
   AuthFeature<C> &
+  VariableFeature<C> &
+  SecretFeature<C> &
   HttpsFeature<C> &
   StorageFeature<C> &
   SchedulerFeature<C> &

@@ -584,18 +584,17 @@ impl ObjectStorageService {
             return Err(ObjectStorageError::Internal);
         }
         let aad = access_key_aad(scope, bucket_id, access_key_id, generation);
-        let encrypted = match self.cipher()?.encrypt(
+        let encrypted = if let Ok(value) = self.cipher()?.encrypt(
             Nonce::from_slice(&nonce),
             Payload {
                 msg: &raw,
                 aad: aad.as_bytes(),
             },
         ) {
-            Ok(value) => EncryptedAccessKeySecret::new(nonce, value),
-            Err(_) => {
-                raw.zeroize();
-                return Err(ObjectStorageError::Internal);
-            }
+            EncryptedAccessKeySecret::new(nonce, value)
+        } else {
+            raw.zeroize();
+            return Err(ObjectStorageError::Internal);
         };
         let secret = AccessKeySecret::from_parts(access_key_id, &raw);
         raw.zeroize();

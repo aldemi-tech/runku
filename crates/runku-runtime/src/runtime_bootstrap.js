@@ -1,5 +1,6 @@
 import {
   op_runku_cooperate,
+  op_runku_configuration_read,
   op_runku_data_get,
   op_runku_data_document_id,
   op_runku_data_insert,
@@ -107,6 +108,13 @@ async function httpsRequest(input) {
     status: response.status,
     headers: freezeHeaders(response.headers),
     body: ReflectApply(Uint8ArrayFrom, Uint8ArrayCtor, [response.body]),
+  });
+}
+
+async function configurationRead(kind, name) {
+  return await op_runku_configuration_read({
+    kind,
+    name: StringCtor(name),
   });
 }
 
@@ -442,6 +450,16 @@ ObjectDefineProperty(globalThis, "__runkuPlatformInvoke", {
     }
     if (metadata.httpsEnabled === true) {
       context.https = ObjectFreeze({ request: ObjectFreeze(httpsRequest) });
+    }
+    if (metadata.variableEnabled === true) {
+      context.env = ObjectFreeze({
+        get: ObjectFreeze((name) => configurationRead("variable", name)),
+      });
+    }
+    if (metadata.secretEnabled === true) {
+      context.secrets = ObjectFreeze({
+        get: ObjectFreeze((name) => configurationRead("secret", name)),
+      });
     }
     if (metadata.dataEnabled === true) {
       const database = {

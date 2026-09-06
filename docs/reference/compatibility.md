@@ -167,6 +167,20 @@ that profile is rejected rather than silently dropping the capability. File meta
 generated S3 key layout `v1/projects/{project}/environments/{environment}/files/{file}` are durable;
 future changes require expand/migrate/contract and rollback documentation.
 
+Environment variables and encrypted secrets add the `variable:NAME` capability and activate the
+previously reserved `secret:NAME` capability through runtime versions `runku-js-3`,
+`runku-node-3`, and `runku-hybrid-3`. Version 3 is a superset of the version 2 application-file
+Platform Ops. Builders select version 3 whenever either named configuration capability exists;
+older runtimes reject the new version rather than omitting configuration. Legacy manifest vectors
+that encoded an unused secret tag remain decodable, but only version 3 exposes `ctx.env` or
+`ctx.secrets`. Safe V8 and local Full Node implement version 3. Production OCI/distributed Full
+Node remains on version 1 until its mediated Agent channel carries the configuration operation, so
+promotion of a Node configuration manifest to that profile is rejected. Configuration registry
+schema v1 is additive, checksum-protected, and stores
+idempotent result snapshots plus value-free audit. Older binaries must not write a registry after
+it is adopted. The authenticated Management routes and `configuration:read`/
+`configuration:manage` capabilities must be upgraded together.
+
 The source line also contains an Environment lifecycle domain and repository. Its schema
 v1 creates only new `runku_environments`, `runku_environment_operations`, and
 `runku_environment_schema_migrations` tables; it does not reinterpret existing Product rows or

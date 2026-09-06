@@ -485,6 +485,124 @@ pub struct ManagementEnvironmentOperation {
     pub completed_at_micros: String,
 }
 
+/// Safe administrative projection of one Environment variable or secret reference.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationEntry {
+    /// Canonical uppercase configuration name.
+    pub name: String,
+    /// `variable` or `secret`.
+    pub kind: String,
+    /// Plain variable value; always absent for a secret reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Global Environment configuration revision that last changed the entry.
+    pub revision: u64,
+    /// Canonical decimal creation timestamp.
+    pub created_at_micros: String,
+    /// Canonical decimal last update or rotation timestamp.
+    pub updated_at_micros: String,
+}
+
+/// Complete bounded configuration snapshot for one Environment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationSnapshot {
+    /// Wire version.
+    pub version: u8,
+    /// Global compare-and-set revision, zero before the first entry.
+    pub configuration_revision: u64,
+    /// Name-ordered variables and safe secret-reference metadata.
+    pub entries: Vec<ManagementConfigurationEntry>,
+}
+
+/// Value-free immutable audit record for one Environment configuration mutation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationAuditEntry {
+    /// Monotonic sequence within the Environment.
+    pub sequence: u64,
+    /// Idempotent mutation identity.
+    pub operation_id: String,
+    /// Product operator that performed the change.
+    pub actor: String,
+    /// Affected configuration name.
+    pub name: String,
+    /// `set` or `delete`.
+    pub action: String,
+    /// `variable` or `secret`.
+    pub kind: String,
+    /// Global revision produced by the change.
+    pub configuration_revision: u64,
+    /// Canonical decimal event timestamp.
+    pub occurred_at_micros: String,
+}
+
+/// Query for newest-first immutable configuration history.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationHistoryQuery {
+    /// Exclusive audit sequence returned by a prior page.
+    pub before_sequence: Option<u64>,
+    /// Page size in `1..=100`; defaults to 50.
+    pub limit: Option<u16>,
+}
+
+/// Bounded value-free Environment configuration history page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationHistory {
+    /// Wire version.
+    pub version: u8,
+    /// Newest-first immutable audit events.
+    pub entries: Vec<ManagementConfigurationAuditEntry>,
+    /// Exclusive cursor for the next page.
+    pub next_before_sequence: Option<u64>,
+}
+
+/// Complete create/update/rotation intent for one configuration name.
+///
+/// Debug is intentionally absent because `value` can contain secret material.
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationSet {
+    /// Required current global Environment configuration revision.
+    pub expected_revision: u64,
+    /// `variable` or `secret`.
+    pub kind: String,
+    /// Plain variable or secret material. Secret material is never returned.
+    pub value: String,
+    /// Caller-pinned canonical decimal timestamp for exact replay.
+    pub changed_at_micros: String,
+}
+
+/// Exact delete intent for one configuration name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationDelete {
+    /// Required current global Environment configuration revision.
+    pub expected_revision: u64,
+    /// Caller-pinned canonical decimal timestamp for exact replay.
+    pub changed_at_micros: String,
+}
+
+/// Result of one durable configuration mutation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementConfigurationResult {
+    /// Wire version.
+    pub version: u8,
+    /// New global Environment configuration revision.
+    pub configuration_revision: u64,
+    /// Current safe entry after set, or absent after delete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<ManagementConfigurationEntry>,
+    /// Correlated operation identity.
+    pub operation_id: String,
+    /// Whether exact durable operation content was replayed.
+    pub replayed: bool,
+}
+
 /// One bounded logical bucket CORS rule.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -737,7 +855,7 @@ pub struct ManagementObject {
     pub version_id: String,
     /// Lossless byte length.
     pub size_bytes: String,
-    /// Stable quoted Product ETag.
+    /// Stable quoted Product `ETag`.
     pub etag: String,
     /// Lower-case SHA-256 digest.
     pub sha256: String,
@@ -1329,6 +1447,46 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         operation_id: OperationId,
     ) -> Result<ManagementEnvironmentOperation, ManagementProductError> {
         let _ = operation_id;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Lists Environment variables and non-secret secret-reference metadata.
+    async fn configuration(
+        &self,
+    ) -> Result<ManagementConfigurationSnapshot, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Returns value-free immutable Environment configuration history.
+    async fn configuration_history(
+        &self,
+        query: &ManagementConfigurationHistoryQuery,
+    ) -> Result<ManagementConfigurationHistory, ManagementProductError> {
+        let _ = query;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Creates, updates, or rotates one Environment configuration entry.
+    async fn configuration_set(
+        &self,
+        name: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementConfigurationSet,
+    ) -> Result<ManagementConfigurationResult, ManagementProductError> {
+        let _ = (name, operation_id, actor, request);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Deletes one Environment configuration entry under global CAS.
+    async fn configuration_delete(
+        &self,
+        name: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementConfigurationDelete,
+    ) -> Result<ManagementConfigurationResult, ManagementProductError> {
+        let _ = (name, operation_id, actor, request);
         Err(ManagementProductError::NotFound)
     }
 

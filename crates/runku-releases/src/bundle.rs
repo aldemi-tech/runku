@@ -230,7 +230,7 @@ impl SafeEsmBundleV1 {
         }
         if matches!(
             manifest.runtime_version.as_str(),
-            "runku-js-1" | "runku-js-2"
+            "runku-js-1" | "runku-js-2" | "runku-js-3"
         ) && (self.resource(manifest.schema_contract_hash).is_none()
             || self.resource(manifest.index_contract_hash).is_none()
             || manifest.functions.iter().any(|function| {

@@ -31,6 +31,7 @@ runku-artifact-s3 = { path = "../runku-artifact-s3" }
 runku-file-storage = { path = "../runku-file-storage" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+zeroize.workspace = true
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@
 
 use std::{error::Error, path::Path, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use runku_build::{BuildMetadata, build_project};
 use runku_core::{
     BuildId, EnvironmentId, EnvironmentScope, InvocationId, ProjectId, ReleaseId, RequestId,
@@ -13,9 +14,35 @@ use runku_observability::{
     PerformanceOutcome, PerformanceRuntime,
 };
 use runku_releases::{ArtifactFormat, RuntimeClass, decode_release_manifest};
-use runku_runtime::{CancellationToken, FileStorage, FileStoreRequest, InvocationRequest};
+use runku_runtime::{
+    CancellationToken, ConfigurationRead, ConfigurationReadError, ConfigurationValueKind,
+    FileStorage, FileStoreRequest, InvocationRequest,
+};
 use runku_value::{CanonicalValue, TimestampMicros};
 use tempfile::tempdir;
+use zeroize::Zeroizing;
+
+#[derive(Debug)]
+struct TestConfiguration;
+
+#[async_trait]
+impl ConfigurationRead for TestConfiguration {
+    async fn read(
+        &self,
+        kind: ConfigurationValueKind,
+        name: &str,
+        _deadline: std::time::Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<Zeroizing<String>, ConfigurationReadError> {
+        match (kind, name) {
+            (ConfigurationValueKind::Variable, "REGION") => Ok(Zeroizing::new("south".to_owned())),
+            (ConfigurationValueKind::Secret, "API_KEY") => {
+                Ok(Zeroizing::new("node-private".to_owned()))
+            }
+            _ => Err(ConfigurationReadError::NotFound),
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
@@ -92,6 +119,15 @@ export const forgedDelete = action({
     return null;
   },
 })
+export const configured = action({
+  auth: "none", visibility: "internal", capabilities: ["secret:API_KEY", "variable:REGION"],
+  args: v.null(), returns: v.string(),
+  async handler(ctx) {
+    const region = await ctx.env.get("REGION");
+    const key = await ctx.secrets.get("API_KEY");
+    return `${region}:${key.length}`;
+  },
+})
 "#,
     )?;
     let project_id = ProjectId::generate();
@@ -111,7 +147,7 @@ export const forgedDelete = action({
     )?)?);
     assert_eq!(manifest.artifact.format, ArtifactFormat::NodeEsmBundleV1);
     assert_eq!(manifest.functions[0].runtime_class, RuntimeClass::FullNode);
-    assert_eq!(manifest.runtime_version.as_str(), "runku-node-2");
+    assert_eq!(manifest.runtime_version.as_str(), "runku-node-3");
     let basename_id = manifest
         .functions
         .iter()
@@ -135,6 +171,12 @@ export const forgedDelete = action({
         .iter()
         .find(|function| function.name.as_str() == "functions.forgedDelete")
         .ok_or("forged delete function missing")?
+        .id;
+    let configured_id = manifest
+        .functions
+        .iter()
+        .find(|function| function.name.as_str() == "functions.configured")
+        .ok_or("configured function missing")?
         .id;
     let artifact: Arc<[u8]> = std::fs::read(output.artifact_path)?.into();
     let environment_id = EnvironmentId::generate();
@@ -221,6 +263,17 @@ export const forgedDelete = action({
         )
         .await?;
     assert_eq!(storage_outcome.value, CanonicalValue::Bytes(vec![1, 2, 3]));
+    let configuration: Arc<dyn ConfigurationRead> = Arc::new(TestConfiguration);
+    let configured_outcome = runtime
+        .execute(
+            request(configured_id, CanonicalValue::Null, Duration::from_secs(5))?
+                .with_configuration(configuration)?,
+        )
+        .await?;
+    assert_eq!(
+        configured_outcome.value,
+        CanonicalValue::String("south:12".to_owned())
+    );
     let outcome = runtime
         .execute(request(
             basename_id,

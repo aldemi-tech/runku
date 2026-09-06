@@ -25,6 +25,7 @@ runku-data = { path = "../runku-data" }
 runku-data-postgres = { path = "../runku-data-postgres" }
 runku-data-sqlite = { path = "../runku-data-sqlite" }
 runku-development = { path = "../runku-development" }
+runku-environment-configuration = { path = "../runku-environment-configuration" }
 runku-environment-repository = { path = "../runku-environment-repository" }
 runku-environments = { path = "../runku-environments" }
 runku-gateway = { path = "../runku-gateway" }
@@ -39,6 +40,7 @@ runku-object-storage = { path = "../runku-object-storage" }
 runku-object-storage-repository = { path = "../runku-object-storage-repository" }
 runku-protocol = { path = "../runku-protocol" }
 runku-releases = { path = "../runku-releases" }
+runku-runtime = { path = "../runku-runtime" }
 runku-schema = { path = "../runku-schema" }
 runku-serving = { path = "../runku-serving" }
 runku-serving-repository = { path = "../runku-serving-repository" }
@@ -46,6 +48,7 @@ runku-value = { path = "../runku-value" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 url.workspace = true
 zeroize.workspace = true

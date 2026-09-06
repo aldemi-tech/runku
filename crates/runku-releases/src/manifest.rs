@@ -103,6 +103,8 @@ pub enum Capability {
     FileWrite,
     /// Read one named secret through the secret provider.
     Secret(String),
+    /// Read one named non-secret Environment variable.
+    Variable(String),
 }
 
 /// Canonical platform JavaScript API/runtime version.
@@ -266,11 +268,17 @@ impl ReleaseManifestV1 {
         if storage_requested
             && !matches!(
                 self.runtime_version.as_str(),
-                "runku-js-2" | "runku-node-2" | "runku-hybrid-2"
+                "runku-js-2"
+                    | "runku-node-2"
+                    | "runku-hybrid-2"
+                    | "runku-js-3"
+                    | "runku-node-3"
+                    | "runku-hybrid-3"
             )
         {
             return Err(ReleaseError::InvalidManifest);
         }
+        validate_configuration_runtime(self)?;
         let mut previous_cron: Option<&CronName> = None;
         for cron in &self.cron_definitions {
             let target = self
@@ -304,7 +312,7 @@ impl ReleaseManifestV1 {
         self.validate()?;
         if !matches!(
             self.runtime_version.as_str(),
-            "platform-js-1" | "runku-js-1" | "runku-js-2"
+            "platform-js-1" | "runku-js-1" | "runku-js-2" | "runku-js-3"
         ) || self
             .functions
             .iter()
@@ -362,11 +370,11 @@ impl ReleaseManifestV1 {
     pub fn ensure_local_full_node_supported(&self) -> Result<(), ReleaseError> {
         self.validate()?;
         let version_supported = match self.runtime_version.as_str() {
-            "runku-node-1" | "runku-node-2" => self
+            "runku-node-1" | "runku-node-2" | "runku-node-3" => self
                 .functions
                 .iter()
                 .all(|function| function.runtime_class == RuntimeClass::FullNode),
-            "runku-hybrid-1" | "runku-hybrid-2" => {
+            "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3" => {
                 self.functions
                     .iter()
                     .any(|function| function.runtime_class == RuntimeClass::SafeV8)
@@ -443,7 +451,7 @@ pub fn encode_release_manifest(manifest: &ReleaseManifestV1) -> Result<Vec<u8>, 
         push_u16(&mut output, function.capabilities.len())?;
         for capability in &function.capabilities {
             output.push(capability_tag(capability));
-            if let Capability::Secret(name) = capability {
+            if let Capability::Secret(name) | Capability::Variable(name) = capability {
                 push_text(&mut output, name)?;
             }
         }
@@ -530,10 +538,10 @@ pub fn decode_release_manifest(bytes: &[u8]) -> Result<ReleaseManifestV1, Releas
         let mut capabilities = Vec::with_capacity(capability_count);
         for _ in 0..capability_count {
             let tag = cursor.byte()?;
-            capabilities.push(if tag == 9 {
-                Capability::Secret(cursor.text(MAX_SECRET_NAME_BYTES)?.to_owned())
-            } else {
-                decode_capability(tag)?
+            capabilities.push(match tag {
+                9 => Capability::Secret(cursor.text(MAX_SECRET_NAME_BYTES)?.to_owned()),
+                12 => Capability::Variable(cursor.text(MAX_SECRET_NAME_BYTES)?.to_owned()),
+                _ => decode_capability(tag)?,
             });
         }
         functions.push(FunctionManifest {
@@ -745,7 +753,10 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
     match function_type {
         FunctionType::Query => matches!(
             capability,
-            Capability::DbRead | Capability::AuthRead | Capability::FunctionQuery
+            Capability::DbRead
+                | Capability::AuthRead
+                | Capability::FunctionQuery
+                | Capability::Variable(_)
         ),
         FunctionType::Mutation => matches!(
             capability,
@@ -755,6 +766,7 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
                 | Capability::FunctionQuery
                 | Capability::FunctionMutation
                 | Capability::SchedulerCreate
+                | Capability::Variable(_)
         ),
         FunctionType::Action => matches!(
             capability,
@@ -767,13 +779,14 @@ fn capability_allowed(function_type: FunctionType, capability: &Capability) -> b
                 | Capability::FileRead
                 | Capability::FileWrite
                 | Capability::Secret(_)
+                | Capability::Variable(_)
         ),
     }
 }
 
 fn valid_capability(capability: &Capability) -> bool {
     match capability {
-        Capability::Secret(name) => {
+        Capability::Secret(name) | Capability::Variable(name) => {
             !name.is_empty()
                 && name.len() <= MAX_SECRET_NAME_BYTES
                 && name
@@ -782,6 +795,49 @@ fn valid_capability(capability: &Capability) -> bool {
         }
         _ => true,
     }
+}
+
+fn valid_configuration_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_uppercase())
+        && bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn validate_configuration_runtime(manifest: &ReleaseManifestV1) -> Result<(), ReleaseError> {
+    let configuration_runtime = matches!(
+        manifest.runtime_version.as_str(),
+        "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+    );
+    let mut configuration_requested = false;
+    let mut variable_requested = false;
+    for capability in manifest
+        .functions
+        .iter()
+        .flat_map(|function| &function.capabilities)
+    {
+        match capability {
+            Capability::Variable(name) => {
+                configuration_requested = true;
+                variable_requested = true;
+                if configuration_runtime && !valid_configuration_name(name) {
+                    return Err(ReleaseError::InvalidManifest);
+                }
+            }
+            Capability::Secret(name) => {
+                configuration_requested = true;
+                if configuration_runtime && !valid_configuration_name(name) {
+                    return Err(ReleaseError::InvalidManifest);
+                }
+            }
+            _ => {}
+        }
+    }
+    if variable_requested && !configuration_runtime
+        || configuration_runtime && !configuration_requested
+    {
+        return Err(ReleaseError::InvalidManifest);
+    }
+    Ok(())
 }
 
 fn push_text(output: &mut Vec<u8>, value: &str) -> Result<(), ReleaseError> {
@@ -857,5 +913,6 @@ const fn capability_tag(value: &Capability) -> u8 {
         Capability::FileRead => 10,
         Capability::FileWrite => 11,
         Capability::Secret(_) => 9,
+        Capability::Variable(_) => 12,
     }
 }

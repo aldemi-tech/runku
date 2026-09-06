@@ -3,7 +3,7 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use runku_identity::IdentityError;
-use runku_releases::{AuthPolicy, FunctionManifest, FunctionType};
+use runku_releases::{AuthPolicy, Capability, FunctionManifest, FunctionType};
 use runku_runtime::{
     FunctionCallError, FunctionCallKind, FunctionCallRequest, InvocationRequest, RuntimeError,
 };
@@ -47,6 +47,19 @@ pub(crate) fn prepare_child(
             return Err(FunctionCallError::Denied);
         }
         None => {}
+    }
+    if matches!(
+        root.manifest().runtime_version.as_str(),
+        "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+    ) && target
+        .capabilities
+        .iter()
+        .any(|capability| matches!(capability, Capability::Variable(_) | Capability::Secret(_)))
+    {
+        let configuration = root.configuration().ok_or(FunctionCallError::Unavailable)?;
+        child = child
+            .with_configuration(configuration)
+            .map_err(map_runtime_error)?;
     }
     Ok((child, target))
 }

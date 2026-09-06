@@ -86,6 +86,10 @@ impl S3ProductConfig {
 struct S3State(S3ProductConfig);
 
 /// Builds the strict path-style S3 Product router for one exact Environment.
+///
+/// # Errors
+///
+/// Returns a stable validation error when the Product configuration is invalid.
 pub fn build_s3_router(config: S3ProductConfig) -> Result<Router, ObjectStorageError> {
     config.validate()?;
     let state = S3State(config);
@@ -113,6 +117,7 @@ async fn s3_object(
     handle(state, bucket, Some(key), request).await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle(
     state: S3State,
     bucket_name: String,
@@ -161,8 +166,7 @@ async fn handle(
     let operation = match (&method, key, headers.get("x-amz-copy-source")) {
         (&Method::GET, None, _) => AccessKeyOperation::List,
         (&Method::GET | &Method::HEAD, Some(_), _) => AccessKeyOperation::Read,
-        (&Method::PUT, Some(_), Some(_)) => AccessKeyOperation::Write,
-        (&Method::PUT, Some(_), None) => AccessKeyOperation::Write,
+        (&Method::PUT, Some(_), _) => AccessKeyOperation::Write,
         (&Method::DELETE, Some(_), _) => AccessKeyOperation::Delete,
         _ => {
             return s3_error(
@@ -257,9 +261,8 @@ async fn authenticate(
     body: &[u8],
     now: TimestampMicros,
 ) -> Result<Option<Authentication>, AuthFailure> {
-    let parsed = match ParsedSignature::parse(uri, headers, now, &config.logical_region)? {
-        Some(value) => value,
-        None => return Ok(None),
+    let Some(parsed) = ParsedSignature::parse(uri, headers, now, &config.logical_region)? else {
+        return Ok(None);
     };
     let actual_payload = sha256_hex(body);
     if parsed.payload_hash != "UNSIGNED-PAYLOAD" && parsed.payload_hash != actual_payload {
@@ -448,7 +451,7 @@ impl ParsedSignature {
         }
         let signed_headers = parse_signed_headers(signed_headers)?;
         let signed_at = parse_amz_date(&amz_date).ok_or_else(malformed_auth)?;
-        if date != &amz_date[..8] {
+        if date != amz_date[..8] {
             return Err(malformed_auth());
         }
         let earliest = signed_at.saturating_sub(CLOCK_SKEW_MICROS);
@@ -712,6 +715,7 @@ fn derive_signing_key(secret: &str, date: &str, region: &str, service: &str) -> 
     signing_key
 }
 
+#[allow(clippy::expect_used)]
 fn hmac_sha256(key: &[u8], value: &[u8]) -> [u8; 32] {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("SHA-256 accepts every HMAC key size");
     mac.update(value);
@@ -738,6 +742,7 @@ fn signature_operation_id(
     OperationId::from_ulid(Ulid::from(u128::from_be_bytes(id)))
 }
 
+#[allow(clippy::format_push_string)]
 async fn list_objects(
     request_id: RequestId,
     config: &S3ProductConfig,
@@ -825,9 +830,8 @@ async fn get_object(
     uri: &Uri,
     headers: &HeaderMap,
 ) -> Response {
-    let version = match requested_version(uri) {
-        Ok(value) => value,
-        Err(()) => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+    let Ok(version) = requested_version(uri) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
     };
     if version.is_some()
         && bucket.configuration.versioning != runku_object_storage::Versioning::Enabled
@@ -869,19 +873,16 @@ async fn get_object(
         Ok(value) => value,
         Err(response) => return s3_error(request_id, response.0, response.1),
     };
-    let range = match requested_range(headers, object.size, &object) {
-        Ok(value) => value,
-        Err(()) => {
-            let mut response = s3_error(
-                request_id,
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "InvalidRange",
-            );
-            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", object.size)) {
-                response.headers_mut().insert(header::CONTENT_RANGE, value);
-            }
-            return response;
+    let Ok(range) = requested_range(headers, object.size, &object) else {
+        let mut response = s3_error(
+            request_id,
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "InvalidRange",
+        );
+        if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", object.size)) {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
         }
+        return response;
     };
     let selected = range
         .map(|(start, end)| bytes.slice(start..end))
@@ -978,9 +979,7 @@ fn requested_range(
         let matches = if if_range.starts_with('"') {
             if_range == object.etag
         } else {
-            httpdate::parse_http_date(if_range)
-                .ok()
-                .is_some_and(|at| object_system_time(object) <= at)
+            httpdate::parse_http_date(if_range).is_ok_and(|at| object_system_time(object) <= at)
         };
         if !matches {
             return Ok(None);
@@ -1023,6 +1022,7 @@ fn object_system_time(object: &ObjectMetadata) -> SystemTime {
     UNIX_EPOCH + Duration::from_micros(micros)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn put_object(
     request_id: RequestId,
     config: &S3ProductConfig,
@@ -1036,9 +1036,8 @@ async fn put_object(
     let Some(auth) = auth else {
         return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
     };
-    let metadata = match object_user_metadata(headers) {
-        Ok(value) => value,
-        Err(()) => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+    let Ok(metadata) = object_user_metadata(headers) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
     };
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -1154,14 +1153,13 @@ async fn copy_object(
     {
         return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
     }
-    let source = match headers
+    let Some(source) = headers
         .get("x-amz-copy-source")
         .and_then(|value| value.to_str().ok())
         .and_then(percent_decode)
         .and_then(|value| String::from_utf8(value).ok())
-    {
-        Some(value) => value,
-        None => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+    else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
     };
     let Some((source_bucket, source_key)) = source.trim_start_matches('/').split_once('/') else {
         return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
@@ -1189,9 +1187,8 @@ async fn copy_object(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == "REPLACE");
     let (content_type, metadata) = if replace {
-        let metadata = match object_user_metadata(headers) {
-            Ok(value) => value,
-            Err(()) => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+        let Ok(metadata) = object_user_metadata(headers) else {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
         };
         let content_type = headers
             .get(header::CONTENT_TYPE)
@@ -1620,7 +1617,7 @@ fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut output = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         output[index] = (hex_value(chunk[0])? << 4) | hex_value(chunk[1])?;
     }
     Some(output)
@@ -1712,6 +1709,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn s3_and_admin_share_exact_object_authority() -> Result<(), Box<dyn Error>> {
         let directory = tempdir()?;
         let database_url = format!(
@@ -1815,7 +1813,7 @@ mod tests {
         if put.status() != StatusCode::OK {
             let status = put.status();
             let failure = String::from_utf8(to_bytes(put.into_body(), 8_192).await?.to_vec())?;
-            panic!("S3 PUT failed with {status}: {failure}");
+            return Err(format!("S3 PUT failed with {status}: {failure}").into());
         }
         assert!(put.headers().contains_key("x-amz-version-id"));
         let first_version = put
@@ -1945,8 +1943,8 @@ mod tests {
             .await?;
         assert_eq!(presigned.status(), StatusCode::OK);
         let mut tampered_uri = presigned_uri.clone();
-        let last = tampered_uri.pop().ok_or("presigned URL empty")?;
-        tampered_uri.push(if last == '0' { '1' } else { '0' });
+        let signature_last = tampered_uri.pop().ok_or("presigned URL empty")?;
+        tampered_uri.push(if signature_last == '0' { '1' } else { '0' });
         let tampered = router
             .clone()
             .oneshot(
@@ -2015,6 +2013,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)]
     async fn official_aws_cli_conformance_when_enabled() -> Result<(), Box<dyn Error>> {
         if std::env::var("RUNKU_TEST_AWS_CLI").ok().as_deref() != Some("1") {
             return Ok(());

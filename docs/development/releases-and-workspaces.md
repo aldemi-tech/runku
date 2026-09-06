@@ -18,9 +18,11 @@ and digest.
 Promotion changes a Channel pointer after compatibility and readiness checks. Rollback selects a
 previous immutable Release; it does not rebuild source.
 
-The source line also includes a standalone [weighted serving-policy registry](../concepts/serving-policy.md).
-It records atomic/gradual desired intent and observations but is not yet connected to Channel or
-request routing. Therefore it must not be described as changing live traffic.
+The source line also includes a [weighted serving-policy registry](../concepts/serving-policy.md).
+It records atomic or gradual desired intent, rejects incompatible Release sets, and resolves
+`environment:default` to one deterministic exact Release before authorization and execution.
+Explicit `release:*`, `channel:*`, and `workspace:*` targets keep their own semantics; a policy
+update never silently rewrites one of those targets.
 
 ## Shared data
 

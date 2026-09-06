@@ -52,7 +52,7 @@ use runku_release_repository::{RepositoryConfig, SqlReleaseRepository};
 use runku_releases::{
     ArtifactStore, FilesystemArtifactStore, FilesystemStoreRole, ReleaseRepository,
 };
-use runku_runtime::{RuntimeLimits, RuntimeSupervisor};
+use runku_runtime::{ConfigurationRead, RuntimeLimits, RuntimeSupervisor};
 use runku_value::TimestampMicros;
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
@@ -89,6 +89,8 @@ pub struct LocalProcessConfig {
     pub data_store: Option<Arc<dyn LogicalStore>>,
     /// Optional Environment default-policy resolver for production-style traffic selection.
     pub environment_serving_resolver: Option<Arc<dyn EnvironmentServingResolver>>,
+    /// Optional exact-Environment broker for manifest-authorized variables and secrets.
+    pub configuration: Option<Arc<dyn ConfigurationRead>>,
     /// Environment, per-file, Action-memory, concurrency, and grant limits.
     pub file_storage_limits: FileStorageLimits,
     /// Optional at-least-once sink for authoritative application-file usage events.
@@ -112,6 +114,7 @@ impl Default for LocalProcessConfig {
             file_object_store: None,
             data_store: None,
             environment_serving_resolver: None,
+            configuration: None,
             file_storage_limits: FileStorageLimits::DEFAULT,
             file_usage_sink: None,
             file_usage_interval: Duration::from_secs(5),
@@ -142,6 +145,10 @@ impl fmt::Debug for LocalProcessConfig {
                     .environment_serving_resolver
                     .as_ref()
                     .map(|_| "configured"),
+            )
+            .field(
+                "configuration",
+                &self.configuration.as_ref().map(|_| "configured"),
             )
             .field("file_storage_limits", &self.file_storage_limits)
             .field(
@@ -600,6 +607,9 @@ impl LocalProcess {
         .with_operational_logs(log_boundary);
         if let Some(resolver) = config.environment_serving_resolver.clone() {
             service = service.with_environment_serving_resolver(resolver);
+        }
+        if let Some(configuration) = config.configuration.clone() {
+            service = service.with_configuration(configuration);
         }
         let service = Arc::new(service);
         let registry = SubscriptionRegistry::new(RegistryConfig::PRODUCTION)

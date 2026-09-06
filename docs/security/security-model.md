@@ -24,6 +24,13 @@ Service and development keys are one-time reveal credentials. Logs, build output
 browser bundles, traces, and error envelopes must redact them. An IdP private key and any secret
 configuration remain server-side.
 
+Environment secret values are write-only through authenticated Management and are stored in
+AES-256-GCM envelopes bound to Project, Environment, name, and revision. Administrative snapshots,
+idempotent results, history, audit, and Debug output contain only secret-reference metadata. A
+Function receives a value only through an exact `secret:NAME` Action capability; the host checks
+kind and name again for both Safe V8 and Full Node. The external encryption key is not stored in the
+registry and must be recovered and rotated under the installation secret procedure.
+
 Logical Object Storage access keys additionally support AWS Signature Version 4, where the request
 does not carry the secret itself. Their SQL generation stores both the normal domain-separated HMAC
 verifier and a fixed-size AES-256-GCM envelope bound to Project, Environment, bucket, key, and

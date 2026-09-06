@@ -522,6 +522,10 @@ impl FileObjectStore {
     ///
     /// This namespace is physically disjoint from Application Files. Repeating the same digest is
     /// safe; the caller must commit logical key/version metadata separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation, limit, availability, or corruption error.
     pub async fn put_logical_object(
         &self,
         scope: EnvironmentScope,
@@ -568,6 +572,10 @@ impl FileObjectStore {
     }
 
     /// Reads and verifies one immutable content-addressed logical object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation, limit, not-found, availability, or corruption error.
     pub async fn get_logical_object(
         &self,
         scope: EnvironmentScope,

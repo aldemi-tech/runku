@@ -93,6 +93,19 @@ fn duplicate_function_ids_and_capabilities_are_rejected() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn version_three_requires_canonical_configuration_names() -> Result<(), Box<dyn Error>> {
+    let mut manifest = sample_manifest()?;
+    manifest.runtime_version = "runku-js-3".parse()?;
+    manifest.functions[0].capabilities = vec![Capability::Variable("FEATURE_V3".to_owned())];
+    manifest.functions[1].capabilities = vec![Capability::Secret("PAYMENTS_API_KEY".to_owned())];
+    manifest.validate()?;
+
+    manifest.functions[1].capabilities = vec![Capability::Secret("payments-api-key".to_owned())];
+    assert_eq!(manifest.validate(), Err(ReleaseError::InvalidManifest));
+    Ok(())
+}
+
+#[test]
 fn cron_definitions_are_canonical_ordered_and_internal_mutation_or_action()
 -> Result<(), Box<dyn Error>> {
     let mut manifest = sample_manifest()?;

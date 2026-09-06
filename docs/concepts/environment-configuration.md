@@ -1,0 +1,91 @@
+# Environment variables and secrets
+
+Each Environment owns one durable, exact-scope configuration registry. It stores readable
+variables and encrypted secret material independently from Release artifacts. A configuration
+change never mutates an immutable Release: Functions opt in by declaring exact names in their
+manifest, and the runtime resolves the current Environment value when the Function asks for it.
+
+## Function contract
+
+Declare `variable:NAME` for non-secret values and `secret:NAME` for secrets. Names begin with an
+uppercase ASCII letter and contain only uppercase letters, digits, and `_`, up to 64 bytes.
+Variables are available to Query, Mutation, and Action; secrets are available only to Action.
+
+```ts
+import { action, query, v } from "@runku/server"
+
+export const checkoutEnabled = query({
+  auth: "none",
+  visibility: "public",
+  capabilities: ["variable:FEATURE_CHECKOUT_V3"],
+  args: v.null(),
+  returns: v.string(),
+  handler: (ctx) => ctx.env.get("FEATURE_CHECKOUT_V3"),
+})
+
+export const sendPayment = action({
+  auth: "service",
+  visibility: "internal",
+  capabilities: ["variable:STRIPE_WEBHOOK_URL", "secret:PAYMENTS_API_KEY"],
+  args: v.null(),
+  returns: v.null(),
+  async handler(ctx) {
+    const endpoint = await ctx.env.get("STRIPE_WEBHOOK_URL")
+    const key = await ctx.secrets.get("PAYMENTS_API_KEY")
+    // Use values without logging or returning secret material.
+    void endpoint
+    void key
+    return null
+  },
+})
+```
+
+`ctx.env` and `ctx.secrets` are absent unless the Function declares a matching capability. Their
+`get(name)` methods recheck the exact kind and name in the host, so casting TypeScript or forging a
+Full Node platform message cannot broaden access. Nested calls keep the exact Environment and
+attach only the child Function's declared names. Configuration capabilities select runtime contract
+version `runku-js-3`, `runku-node-3`, or `runku-hybrid-3`.
+
+Safe V8 and the local Full Node runner implement version 3. The production OCI/distributed Full
+Node agent remains on version 1; promotion of a Node or hybrid configuration manifest to that
+profile fails closed until the mediated agent protocol is upgraded and qualified.
+
+## Management API
+
+All routes use the explicit Project/Environment path and a current `rk_at_*` operator session.
+
+| Method and path | Capability | Result |
+|---|---|---|
+| `GET .../configuration` | `configuration:read` | current global revision and name-ordered safe entries |
+| `GET .../configuration/history?limit=50&beforeSequence=...` | `configuration:read` | newest-first immutable value-free audit page |
+| `PUT .../configuration/{NAME}` | `configuration:manage` + `Idempotency-Key: opn_*` | create/update/rotate under global revision CAS |
+| `DELETE .../configuration/{NAME}` | `configuration:manage` + `Idempotency-Key: opn_*` | delete under global revision CAS |
+
+A PUT body contains `expectedRevision`, `kind`, `value`, and caller-pinned
+`changedAtMicros`. DELETE contains `expectedRevision` and `changedAtMicros`. Every real mutation
+increments the Environment configuration revision exactly once. An identical operation replay
+returns the original safe result even if later mutations changed the same name; reusing its
+operation ID for different intent fails closed.
+
+Variable values are present in authorized list and mutation responses. Secret values are accepted
+only in PUT and never appear in snapshots, mutation responses, history, Debug output, logs, or
+audit. Secret values are encrypted with AES-256-GCM using an external, domain-separated deployment
+key and authenticated with Project, Environment, name, and revision. The current compact/server
+composition derives that key from protected Product key material and stores registry rows in the
+Product identity SQLite database.
+
+Limits are 512 entries per Environment, 16 KiB per variable, 64 KiB per secret, and 100 history
+events per page. The HTTP configuration body limit is 72 KiB. Unknown kinds, malformed names,
+wrong revisions, kind-confused reads, corrupt ciphertext, and unknown schema checksums fail closed.
+
+## Recovery and rollout
+
+The registry, operation journal, audit, and encrypted secret envelopes live in Product persistent
+state and are included by the compact coordinated backup. The external root key/pepper must be
+backed up through its separate protected secret procedure; SQL/SQLite bytes alone cannot decrypt
+secrets. Restore the persistent state and matching key material together, then verify snapshot,
+history, a declared variable read, and a declared secret read without printing either secret.
+
+The registry is currently composed through the compact/server SQLite authority. A generic
+PostgreSQL repository for this configuration domain is not claimed. Cloud routes the public
+Management contract and does not copy values into Cloud control metadata.

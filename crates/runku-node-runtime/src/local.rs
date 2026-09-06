@@ -10,8 +10,9 @@ use runku_releases::{
     decode_node_esm_bundle,
 };
 use runku_runtime::{
-    FileDownloadGrantRequest, FileStoreRequest, FileUploadGrantRequest, FunctionCallKind,
-    FunctionCallRequest, InvocationRequest, RuntimeError, ScheduleRequest, ScheduleTime,
+    ConfigurationValueKind, FileDownloadGrantRequest, FileStoreRequest, FileUploadGrantRequest,
+    FunctionCallKind, FunctionCallRequest, InvocationRequest, RuntimeError, ScheduleRequest,
+    ScheduleTime,
 };
 use runku_value::{TimestampMicros, encode_stored_value};
 use serde::{Deserialize, Serialize};
@@ -454,6 +455,14 @@ impl LocalNodeRuntime {
                     let result = handle_storage_delete(request, file_id, deadline).await;
                     write_json_result(&mut stdin, call_id, result, limit).await?;
                 }
+                NodeMessageV1::ConfigurationRead {
+                    call_id,
+                    kind,
+                    name,
+                } => {
+                    let result = handle_configuration_read(request, kind, name, deadline).await;
+                    write_text_result(&mut stdin, call_id, result, limit).await?;
+                }
             }
         };
         stdin
@@ -527,13 +536,25 @@ fn prepare_request(request: &InvocationRequest) -> Result<PreparedInvocation, Ru
     let result_contract = contract(&bundle, function.result_contract_hash)?;
     let arguments = WireValueV1::from_canonical(request.arguments())
         .map_err(|_| RuntimeError::InvalidArguments)?;
+    let configuration_runtime = matches!(
+        request.manifest().runtime_version.as_str(),
+        "runku-node-3" | "runku-hybrid-3"
+    );
     let input = serde_json::to_vec(&NodeRequestV1 {
         protocol_version: 1,
         collect_performance: request.performance().is_some(),
         release_id: request.release_id().to_string(),
         invocation_id: request.invocation_id().to_string(),
         function: function.name.as_str().to_owned(),
-        capabilities: function.capabilities.iter().map(capability_name).collect(),
+        capabilities: function
+            .capabilities
+            .iter()
+            .filter(|capability| {
+                configuration_runtime
+                    || !matches!(capability, Capability::Secret(_) | Capability::Variable(_))
+            })
+            .map(capability_name)
+            .collect(),
         arguments,
     })
     .map_err(|_| RuntimeError::Internal)?;
@@ -569,6 +590,7 @@ fn capability_name(capability: &runku_releases::Capability) -> String {
         runku_releases::Capability::FileRead => "storage:read".to_owned(),
         runku_releases::Capability::FileWrite => "storage:write".to_owned(),
         runku_releases::Capability::Secret(name) => format!("secret:{name}"),
+        runku_releases::Capability::Variable(name) => format!("variable:{name}"),
     }
 }
 
@@ -857,6 +879,40 @@ async fn handle_storage_delete(
     Ok(serde_json::Value::Null)
 }
 
+async fn handle_configuration_read(
+    request: &InvocationRequest,
+    kind: String,
+    name: String,
+    deadline: tokio::time::Instant,
+) -> Result<String, String> {
+    let (kind, required) = match kind.as_str() {
+        "variable" => (
+            ConfigurationValueKind::Variable,
+            Capability::Variable(name.clone()),
+        ),
+        "secret" => (
+            ConfigurationValueKind::Secret,
+            Capability::Secret(name.clone()),
+        ),
+        _ => return Err("CONFIGURATION_REQUEST_INVALID".to_owned()),
+    };
+    request
+        .manifest()
+        .functions
+        .iter()
+        .find(|function| function.id == request.function_id())
+        .is_some_and(|function| function.capabilities.contains(&required))
+        .then_some(())
+        .ok_or_else(|| "CONFIGURATION_CAPABILITY_DENIED".to_owned())?;
+    request
+        .configuration()
+        .ok_or_else(|| "CONFIGURATION_BROKER_UNAVAILABLE".to_owned())?
+        .read(kind, &name, deadline.into_std(), request.cancellation())
+        .await
+        .map(|value| value.to_string())
+        .map_err(|error| error.code().to_owned())
+}
+
 fn require_storage_capability(
     request: &InvocationRequest,
     required: &Capability,
@@ -1030,6 +1086,11 @@ enum NodeMessageV1 {
     StorageDelete {
         call_id: u64,
         file_id: String,
+    },
+    ConfigurationRead {
+        call_id: u64,
+        kind: String,
+        name: String,
     },
 }
 

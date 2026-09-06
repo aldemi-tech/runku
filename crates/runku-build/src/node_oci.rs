@@ -212,7 +212,10 @@ impl RemoteNodePublisher {
             .with_egress_policy(self.config.egress_policy.clone());
         let descriptor_bytes = encode_node_oci_descriptor(&descriptor)
             .map_err(|_| NodeOciPublishError::InvalidBuild)?;
-        let remote_artifact = if manifest.runtime_version.as_str() == "runku-hybrid-1" {
+        let remote_artifact = if matches!(
+            manifest.runtime_version.as_str(),
+            "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3"
+        ) {
             let artifact = encode_hybrid_oci_artifact(&local_artifact, &descriptor_bytes)
                 .map_err(|_| NodeOciPublishError::InvalidBuild)?;
             manifest.artifact =

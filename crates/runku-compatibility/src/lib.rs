@@ -13,7 +13,6 @@ use runku_releases::{
 use runku_schema::decode_schema_catalog;
 use thiserror::Error;
 
-const RUNKU_JS_V1: &str = "runku-js-1";
 const MAX_RELATION_STEPS: usize = 200_000;
 const MAX_DIAGNOSTICS: usize = 4_096;
 
@@ -47,7 +46,10 @@ impl ReleasePackage {
             .map_err(|_| CompatibilityError::InvalidArtifact)?;
 
         let mut contracts = BTreeMap::new();
-        let schema = if manifest.runtime_version.as_str() == RUNKU_JS_V1 {
+        let schema = if matches!(
+            manifest.runtime_version.as_str(),
+            "runku-js-1" | "runku-js-2" | "runku-js-3"
+        ) {
             for function in &manifest.functions {
                 load_contract(&bundle, function.arguments_contract_hash, &mut contracts)?;
                 load_contract(&bundle, function.result_contract_hash, &mut contracts)?;

@@ -301,6 +301,7 @@ struct StoredOperation {
     operation: EnvironmentOperation,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn apply(
     pool: &AnyPool,
     backend: EnvironmentRepositoryBackend,

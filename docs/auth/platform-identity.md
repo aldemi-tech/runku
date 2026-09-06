@@ -278,10 +278,10 @@ checks capabilities and scope, not the role label.
 
 | Role | Capabilities |
 |---|---|
-| `owner` | installation, Project, Environment, operator, Release, Channel, Function invocation, credential, Data Admin, log, usage, and backup management |
-| `operator` | Environment, Release, Channel, Function invocation, credential, Data Admin, log, usage, and backup operations; no installation/operator ownership |
-| `developer` | read/publish Releases, promote Channels, invoke Functions, read/write Data Admin, read credential metadata, read/follow logs |
-| `observer` | read Releases, Data Admin, credential metadata, logs, and usage |
+| `owner` | installation, Project, Environment, operator, Release, Channel, Function invocation, configuration, credential, Data Admin, log, usage, and backup management |
+| `operator` | Environment, Release, Channel, Function invocation, configuration, credential, Data Admin, log, usage, and backup operations; no installation/operator ownership |
+| `developer` | read/publish Releases, promote Channels, invoke Functions, read configuration, read/write Data Admin, read credential metadata, read/follow logs |
+| `observer` | read Releases, configuration, Data Admin, credential metadata, logs, and usage |
 
 An installation grant contains every Project and Environment. A Project grant contains that Project
 and its Environments. An Environment grant contains only the exact Project/Environment pair. A
@@ -523,6 +523,8 @@ plus Runku's stricter verifier rules above.
 | `GET .../serving-policy` and `GET .../serving-policy-operations/{opn_*}` | `releases:read` | reads desired/observed rollout state or reconciles an uncertain operation |
 | `GET .../schemas/compatibility` | `releases:read` | reads the shared canonical schema/index/Cron evidence for the desired serving set without source or customer data |
 | `PUT .../serving-policy` | `channels:promote` + `Idempotency-Key: opn_*` | replaces the complete compatible desired policy using exact CAS and materializes it for `environment:default` serving |
+| `GET .../configuration` and `GET .../configuration/history` | `configuration:read` | reads variables, secret-reference metadata, revision, and value-free audit history; never secret values |
+| `PUT` or `DELETE .../configuration/{NAME}` | `configuration:manage` + `Idempotency-Key: opn_*` | creates, updates, rotates, or deletes one exact name through global revision CAS |
 | `GET .../application-clients` and credential lists/reveal | `credentials:read` | reads non-secret identity metadata or re-derives a verified publishable key |
 | Application Client/credential create, rotate, revoke, and delete routes | `credentials:manage` | manages exact-scope Product credentials; confidential material is returned once |
 | Bucket/key lists, bucket get, and storage-operation lookup | `storage:read` | reads provider-independent logical storage metadata only |

@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::Arc,
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -24,6 +25,10 @@ use runku_data::{
 use runku_data_postgres::{PostgresStore, PostgresStoreConfig};
 use runku_data_sqlite::{SqliteStore, SqliteStoreConfig};
 use runku_development::DevelopmentActor;
+use runku_environment_configuration::{
+    ConfigurationAuditEntry, ConfigurationEncryptionKey, ConfigurationEntry, ConfigurationError,
+    ConfigurationKind, ConfigurationMutationResult, EnvironmentConfigurationRegistry,
+};
 use runku_environment_repository::{EnvironmentRepositoryConfig, SqlEnvironmentRepository};
 use runku_environments::{
     Environment, EnvironmentConfiguration, EnvironmentDesiredState, EnvironmentError,
@@ -32,7 +37,10 @@ use runku_environments::{
 };
 use runku_execution::{document_write_set_payload, plan_document_index_mutations};
 use runku_file_storage::{FileObjectStore, FileStorageError, FileStorageLimits, FileUsageSink};
-use runku_gateway::{CorsOrigin, EnvironmentServingPercentile, EnvironmentServingResolver};
+use runku_gateway::{
+    ArtifactCacheTelemetrySnapshot, CorsOrigin, EnvironmentServingPercentile,
+    EnvironmentServingResolver,
+};
 use runku_identity::{
     ApplicationClient, ApplicationClientName, ApplicationClientStatus, ApplicationScope,
     ClientKind, CredentialKind, CredentialLabel, CredentialLifecycleResult, CredentialStatus,
@@ -40,9 +48,9 @@ use runku_identity::{
 use runku_local::{
     LocalChannelExpectation, LocalCodeResolution, LocalCreatedCredential, LocalCredentialMetadata,
     LocalIdentityError, LocalIdentityManager, LocalLogError, LocalLogManager, LocalProcess,
-    LocalProcessConfig, LocalPublishError, LocalReleaseError, LocalReleaseManager,
-    LocalReleaseOutcome, LocalReleaseStatusReport, S3ProductConfig, build_s3_router,
-    derive_local_object_storage_digest_key, load_local, publish_local_if_head,
+    LocalProcessConfig, LocalProcessTelemetrySnapshot, LocalPublishError, LocalReleaseError,
+    LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatusReport, S3ProductConfig,
+    build_s3_router, derive_local_object_storage_digest_key, load_local, publish_local_if_head,
 };
 use runku_management_service::{
     ManagementApplicationClient, ManagementApplicationClientCreate,
@@ -52,6 +60,9 @@ use runku_management_service::{
     ManagementBucketArchive, ManagementBucketConfiguration, ManagementBucketCorsRule,
     ManagementBucketCreate, ManagementBucketLifecycle, ManagementBucketPage, ManagementBucketQuota,
     ManagementBucketResult, ManagementBucketUpdate, ManagementCatalogQuery,
+    ManagementConfigurationAuditEntry, ManagementConfigurationDelete, ManagementConfigurationEntry,
+    ManagementConfigurationHistory, ManagementConfigurationHistoryQuery,
+    ManagementConfigurationResult, ManagementConfigurationSet, ManagementConfigurationSnapshot,
     ManagementCreatedApplicationClient, ManagementCreatedApplicationCredential,
     ManagementCronActivationResult, ManagementCronActivationSet, ManagementCronCatalog,
     ManagementCronEntry, ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataDocument,
@@ -91,6 +102,10 @@ use runku_releases::{
     RuntimeClass, Sha256Digest, decode_node_esm_bundle, decode_safe_esm_bundle,
     encode_release_manifest,
 };
+use runku_runtime::{
+    CancellationToken, ConfigurationRead, ConfigurationReadError, ConfigurationValueKind,
+    RuntimeTelemetrySnapshot,
+};
 use runku_schema::{SchemaCatalog, decode_schema_catalog};
 use runku_serving::{
     ServingCommandKind, ServingMode, ServingOperation, ServingPolicy, ServingPolicyError,
@@ -99,6 +114,7 @@ use runku_serving::{
 use runku_serving_repository::{ServingRepositoryConfig, SqlServingPolicyRepository};
 use runku_value::{CanonicalValue, IndexKey, IndexValue, TimestampMicros};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -120,12 +136,53 @@ pub struct ProductAdapter {
     serving: ServingPolicyService,
     storage: ObjectStorageService,
     object_bytes: FileObjectStore,
+    configuration: EnvironmentConfigurationRegistry,
 }
 
 #[derive(Clone, Debug)]
 struct ProductEnvironmentServingResolver {
     scope: EnvironmentScope,
     service: ServingPolicyService,
+}
+
+#[derive(Clone, Debug)]
+struct ProductEnvironmentConfiguration {
+    scope: EnvironmentScope,
+    registry: EnvironmentConfigurationRegistry,
+}
+
+#[async_trait]
+impl ConfigurationRead for ProductEnvironmentConfiguration {
+    async fn read(
+        &self,
+        kind: ConfigurationValueKind,
+        name: &str,
+        deadline: Instant,
+        cancellation: CancellationToken,
+    ) -> Result<Zeroizing<String>, ConfigurationReadError> {
+        if cancellation.is_cancelled() {
+            return Err(ConfigurationReadError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(ConfigurationReadError::Timeout);
+        }
+        let name = name
+            .parse()
+            .map_err(|_| ConfigurationReadError::InvalidRequest)?;
+        let kind = match kind {
+            ConfigurationValueKind::Variable => ConfigurationKind::Variable,
+            ConfigurationValueKind::Secret => ConfigurationKind::Secret,
+        };
+        tokio::select! {
+            () = cancellation.cancelled() => Err(ConfigurationReadError::Cancelled),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                Err(ConfigurationReadError::Timeout)
+            }
+            result = self.registry.resolve_exact(self.scope, &name, kind) => {
+                result.map_err(map_configuration_read)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -187,6 +244,7 @@ impl std::fmt::Debug for ProductAdapter {
 }
 
 impl ProductAdapter {
+    #[allow(clippy::too_many_lines)]
     pub async fn open(root: PathBuf, config: ProductAdapterConfig) -> Result<Self, &'static str> {
         let (state, paths) = load_local(&root)
             .await
@@ -242,6 +300,21 @@ impl ProductAdapter {
         let storage_digest_key = derive_local_object_storage_digest_key(&root)
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let mut configuration_key_digest = Sha256::new();
+        configuration_key_digest.update(b"runku-environment-configuration-key-v1\0");
+        configuration_key_digest.update(storage_digest_key);
+        let configuration_key: [u8; 32] = configuration_key_digest.finalize().into();
+        let configuration = EnvironmentConfigurationRegistry::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", paths.identity_database.display()),
+            ConfigurationEncryptionKey::new(configuration_key),
+        )
+        .await
+        .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let runtime_configuration: Arc<dyn ConfigurationRead> =
+            Arc::new(ProductEnvironmentConfiguration {
+                scope: state.scope(),
+                registry: configuration.clone(),
+            });
         let object_bytes = match config.file_object_store.clone() {
             Some(value) => value,
             None => FileObjectStore::filesystem(&paths.file_storage_objects)
@@ -269,6 +342,7 @@ impl ProductAdapter {
                 file_object_store: config.file_object_store,
                 data_store: Some(Arc::clone(&data_store)),
                 environment_serving_resolver: Some(environment_serving_resolver),
+                configuration: Some(runtime_configuration),
                 file_storage_limits: config.file_storage_limits,
                 file_usage_sink: config.file_usage_sink,
                 file_usage_interval: config.file_usage_interval,
@@ -283,6 +357,7 @@ impl ProductAdapter {
             serving,
             storage,
             object_bytes,
+            configuration,
         };
         let releases = LocalReleaseManager::open(&adapter.root)
             .await
@@ -375,7 +450,7 @@ impl ProductAdapter {
                     Err(error) => return Err(map_release(error)),
                 };
                 if has_channels {
-                    self.ensure_serving().await?;
+                    Box::pin(self.ensure_serving()).await?;
                 }
             }
         }
@@ -809,6 +884,7 @@ pub async fn migrate_platform_database(
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl ManagementProduct for ProductAdapter {
     fn scope(&self) -> EnvironmentScope {
         self.scope
@@ -823,7 +899,12 @@ impl ManagementProduct for ProductAdapter {
         self.environments.health().await.map_err(map_environment)?;
         self.cron.health().await.map_err(map_cron)?;
         self.serving.health().await.map_err(map_serving)?;
-        self.storage.health().await.map_err(map_storage)
+        self.storage.health().await.map_err(map_storage)?;
+        self.configuration
+            .snapshot(self.scope)
+            .await
+            .map(|_| ())
+            .map_err(map_configuration)
     }
 
     async fn metrics(&self) -> Result<ManagementMetrics, ManagementProductError> {
@@ -835,7 +916,11 @@ impl ManagementProduct for ProductAdapter {
                 process.service().artifact_cache_telemetry(),
             )
         } else {
-            (Default::default(), Default::default(), Default::default())
+            (
+                LocalProcessTelemetrySnapshot::default(),
+                RuntimeTelemetrySnapshot::default(),
+                ArtifactCacheTelemetrySnapshot::default(),
+            )
         };
         let mut metrics = vec![
             management_metric("artifact_cache.entries", cache.entries, "entries"),
@@ -1059,11 +1144,11 @@ impl ManagementProduct for ProductAdapter {
             )
             .await
             .map_err(map_environment)?;
-        self.reconcile_environment_state(
+        Box::pin(self.reconcile_environment_state(
             EnvironmentDesiredState::Archived,
             result.operation.configuration_revision,
             changed_at,
-        )
+        ))
         .await?;
         let environment = self
             .environments
@@ -1094,11 +1179,11 @@ impl ManagementProduct for ProductAdapter {
             )
             .await
             .map_err(map_environment)?;
-        self.reconcile_environment_state(
+        Box::pin(self.reconcile_environment_state(
             EnvironmentDesiredState::Active,
             result.operation.configuration_revision,
             changed_at,
-        )
+        ))
         .await?;
         let environment = self
             .environments
@@ -1124,6 +1209,97 @@ impl ManagementProduct for ProductAdapter {
             .as_ref()
             .map(management_environment_operation)
             .ok_or(ManagementProductError::NotFound)
+    }
+
+    async fn configuration(
+        &self,
+    ) -> Result<ManagementConfigurationSnapshot, ManagementProductError> {
+        let snapshot = self
+            .configuration
+            .snapshot(self.scope)
+            .await
+            .map_err(map_configuration)?;
+        Ok(ManagementConfigurationSnapshot {
+            version: 1,
+            configuration_revision: snapshot.configuration_revision,
+            entries: snapshot
+                .entries
+                .iter()
+                .map(management_configuration_entry)
+                .collect(),
+        })
+    }
+
+    async fn configuration_history(
+        &self,
+        query: &ManagementConfigurationHistoryQuery,
+    ) -> Result<ManagementConfigurationHistory, ManagementProductError> {
+        let history = self
+            .configuration
+            .history(self.scope, query.before_sequence, query.limit.unwrap_or(50))
+            .await
+            .map_err(map_configuration)?;
+        Ok(ManagementConfigurationHistory {
+            version: 1,
+            entries: history
+                .entries
+                .iter()
+                .map(management_configuration_audit_entry)
+                .collect(),
+            next_before_sequence: history.next_before_sequence,
+        })
+    }
+
+    async fn configuration_set(
+        &self,
+        name: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementConfigurationSet,
+    ) -> Result<ManagementConfigurationResult, ManagementProductError> {
+        let name = name.parse().map_err(map_configuration)?;
+        let kind = match request.kind.as_str() {
+            "variable" => ConfigurationKind::Variable,
+            "secret" => ConfigurationKind::Secret,
+            _ => return Err(ManagementProductError::Invalid),
+        };
+        let result = self
+            .configuration
+            .set(
+                self.scope,
+                operation_id,
+                actor,
+                request.expected_revision,
+                name,
+                kind,
+                Zeroizing::new(request.value.clone()),
+                parse_timestamp(&request.changed_at_micros)?,
+            )
+            .await
+            .map_err(map_configuration)?;
+        Ok(management_configuration_result(operation_id, &result))
+    }
+
+    async fn configuration_delete(
+        &self,
+        name: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementConfigurationDelete,
+    ) -> Result<ManagementConfigurationResult, ManagementProductError> {
+        let result = self
+            .configuration
+            .delete(
+                self.scope,
+                operation_id,
+                actor,
+                request.expected_revision,
+                name.parse().map_err(map_configuration)?,
+                parse_timestamp(&request.changed_at_micros)?,
+            )
+            .await
+            .map_err(map_configuration)?;
+        Ok(management_configuration_result(operation_id, &result))
     }
 
     async fn crons(
@@ -2602,6 +2778,45 @@ fn management_environment(environment: &Environment) -> ManagementEnvironment {
     }
 }
 
+fn management_configuration_entry(entry: &ConfigurationEntry) -> ManagementConfigurationEntry {
+    ManagementConfigurationEntry {
+        name: entry.name.to_string(),
+        kind: entry.kind.as_str().to_owned(),
+        value: entry.variable_value.clone(),
+        revision: entry.revision,
+        created_at_micros: entry.created_at.get().to_string(),
+        updated_at_micros: entry.updated_at.get().to_string(),
+    }
+}
+
+fn management_configuration_audit_entry(
+    entry: &ConfigurationAuditEntry,
+) -> ManagementConfigurationAuditEntry {
+    ManagementConfigurationAuditEntry {
+        sequence: entry.sequence,
+        operation_id: entry.operation_id.to_string(),
+        actor: entry.actor.to_string(),
+        name: entry.name.to_string(),
+        action: entry.action.clone(),
+        kind: entry.kind.as_str().to_owned(),
+        configuration_revision: entry.configuration_revision,
+        occurred_at_micros: entry.occurred_at.get().to_string(),
+    }
+}
+
+fn management_configuration_result(
+    operation_id: OperationId,
+    result: &ConfigurationMutationResult,
+) -> ManagementConfigurationResult {
+    ManagementConfigurationResult {
+        version: 1,
+        configuration_revision: result.configuration_revision,
+        entry: result.entry.as_ref().map(management_configuration_entry),
+        operation_id: operation_id.to_string(),
+        replayed: result.replayed,
+    }
+}
+
 fn environment_configuration(
     value: &ManagementEnvironmentConfiguration,
 ) -> Result<EnvironmentConfiguration, ManagementProductError> {
@@ -3049,6 +3264,7 @@ fn capability(value: &Capability) -> String {
         Capability::FileRead => "storage:read".to_owned(),
         Capability::FileWrite => "storage:write".to_owned(),
         Capability::Secret(name) => format!("secret:{name}"),
+        Capability::Variable(name) => format!("variable:{name}"),
     }
 }
 
@@ -3358,6 +3574,39 @@ const fn map_environment(error: EnvironmentError) -> ManagementProductError {
     }
 }
 
+const fn map_configuration(error: ConfigurationError) -> ManagementProductError {
+    match error {
+        ConfigurationError::InvalidInput | ConfigurationError::LimitExceeded => {
+            ManagementProductError::Invalid
+        }
+        ConfigurationError::NotFound => ManagementProductError::NotFound,
+        ConfigurationError::Conflict => ManagementProductError::Conflict,
+        ConfigurationError::OperationIdReused => ManagementProductError::OperationIdReused,
+        ConfigurationError::Busy | ConfigurationError::Unavailable => {
+            ManagementProductError::Unavailable
+        }
+        ConfigurationError::Corruption | ConfigurationError::Internal => {
+            ManagementProductError::Corruption
+        }
+    }
+}
+
+const fn map_configuration_read(error: ConfigurationError) -> ConfigurationReadError {
+    match error {
+        ConfigurationError::InvalidInput => ConfigurationReadError::InvalidRequest,
+        ConfigurationError::NotFound => ConfigurationReadError::NotFound,
+        ConfigurationError::Busy | ConfigurationError::Unavailable => {
+            ConfigurationReadError::Unavailable
+        }
+        ConfigurationError::Corruption | ConfigurationError::Internal => {
+            ConfigurationReadError::Corruption
+        }
+        ConfigurationError::LimitExceeded
+        | ConfigurationError::Conflict
+        | ConfigurationError::OperationIdReused => ConfigurationReadError::Corruption,
+    }
+}
+
 const fn map_cron(error: CronError) -> ManagementProductError {
     match error {
         CronError::InvalidInput | CronError::InvalidManifest | CronError::LimitExceeded => {
@@ -3628,6 +3877,7 @@ export const hourly = cron({
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn console_cron_catalog_and_scheduled_history_are_authoritative_and_bounded() -> TestResult
     {
         use runku_data::ScheduledInvocationInsert;
@@ -3741,6 +3991,76 @@ export const hourly = cron({
     }
 
     #[tokio::test]
+    async fn console_environment_configuration_never_returns_secret_material() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        adapter(directory.path()).await?;
+        let product = Box::pin(open_adapter(directory.path())).await?;
+        let initial = product.configuration().await?;
+        assert_eq!(initial.configuration_revision, 0);
+        assert!(initial.entries.is_empty());
+
+        let operation_id = OperationId::generate();
+        let created = product
+            .configuration_set(
+                "PAYMENTS_API_KEY",
+                operation_id,
+                OperatorId::generate(),
+                &ManagementConfigurationSet {
+                    expected_revision: 0,
+                    kind: "secret".to_owned(),
+                    value: "private-payment-key".to_owned(),
+                    changed_at_micros: "1800000000000020".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(created.configuration_revision, 1);
+        assert_eq!(
+            created
+                .entry
+                .as_ref()
+                .and_then(|entry| entry.value.as_ref()),
+            None
+        );
+        assert!(!serde_json::to_string(&created)?.contains("private-payment-key"));
+        assert_eq!(
+            product
+                .configuration
+                .resolve(product.scope, &"PAYMENTS_API_KEY".parse()?)
+                .await?
+                .as_str(),
+            "private-payment-key"
+        );
+        let replay = product
+            .configuration_set(
+                "PAYMENTS_API_KEY",
+                operation_id,
+                OperatorId::generate(),
+                &ManagementConfigurationSet {
+                    expected_revision: 0,
+                    kind: "secret".to_owned(),
+                    value: "private-payment-key".to_owned(),
+                    changed_at_micros: "1800000000000020".to_owned(),
+                },
+            )
+            .await?;
+        assert!(replay.replayed);
+        assert_eq!(product.configuration().await?.entries[0].value, None);
+        let history = product
+            .configuration_history(&ManagementConfigurationHistoryQuery {
+                before_sequence: None,
+                limit: Some(10),
+            })
+            .await?;
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].operation_id, operation_id.to_string());
+        assert_eq!(history.entries[0].name, "PAYMENTS_API_KEY");
+        assert!(!serde_json::to_string(&history)?.contains("private-payment-key"));
+        product.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn console_environment_lifecycle_is_exact_scope_cas_and_replay_safe() -> TestResult {
         let directory = tempfile::tempdir()?;
         adapter(directory.path()).await?;
@@ -4302,7 +4622,7 @@ export const hourly = cron({
             })
             .await?;
         assert_eq!(catalog.target.requested, "environment:default");
-        assert_eq!(catalog.target.resolved, format!("release:{}", release_id));
+        assert_eq!(catalog.target.resolved, format!("release:{release_id}"));
         let replay = product
             .serving_policy_set(operation_id, actor, &request)
             .await?;

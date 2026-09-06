@@ -106,6 +106,10 @@ impl EnvironmentService {
     }
 
     /// Archives one active Environment using an exact revision precondition.
+    ///
+    /// # Errors
+    ///
+    /// Returns the repository's stable validation, conflict, availability, or corruption error.
     pub async fn archive(
         &self,
         scope: EnvironmentScope,
@@ -126,6 +130,10 @@ impl EnvironmentService {
     }
 
     /// Restores one archived Environment using an exact revision precondition.
+    ///
+    /// # Errors
+    ///
+    /// Returns the repository's stable validation, conflict, availability, or corruption error.
     pub async fn restore(
         &self,
         scope: EnvironmentScope,

@@ -31,10 +31,13 @@ Read in this order:
    identity, and code pinning.
    [Environment lifecycle](concepts/environment-lifecycle.md) documents the exact-scope Management
    authority and its remaining archive/restore/materialization limits.
-   [Serving policy](concepts/serving-policy.md) documents revisioned atomic/gradual Release weights
-   and the compatibility gate; request routing remains a separate integration slice.
+   [Serving policy](concepts/serving-policy.md) documents revisioned atomic/gradual Release weights,
+   the compatibility gate, and deterministic `environment:default` request selection.
    [Logical Object Storage](concepts/object-storage.md) documents the provider-independent bucket
-   and Product access-key Management API and its current no-object-bytes integration limit.
+   and Product access-key Management API, content-addressed filesystem/S3 bytes, console transfers,
+   and the supported S3 subset.
+   [Environment variables and secrets](concepts/environment-configuration.md) documents revisioned
+   administration, encrypted secret references, runtime capabilities, audit, and recovery.
 4. [Functions and runtimes](functions/functions-and-runtimes.md): declarations, capabilities, Safe
    V8, Full Node, nested calls, HTTPS, scheduling, and failure semantics.
 5. [Application file storage](functions/file-storage.md): Action APIs, streamed HTTP transfer,
@@ -100,7 +103,7 @@ reading order because it records the product invariants and definition of done.
   authenticated Management API/server composition, idempotency, repository conformance, and
   recovery.
 - [Serving policy](concepts/serving-policy.md): weighted Release intent, canonical compatibility
-  evidence, desired/observed state, audit, recovery, and deferred runtime selection.
+  evidence, desired/observed state, deterministic request selection, audit, and recovery.
 - [Logical Object Storage](concepts/object-storage.md): revisioned buckets, scoped Product access
   keys, authenticated Management API/server composition, SQL conformance, recovery, and the
   current provider/data-plane integration limit.

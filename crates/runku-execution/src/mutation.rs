@@ -248,7 +248,10 @@ impl MutationExecutor {
     ) -> Result<MutationOutcome, MutationExecutionError> {
         let active_schema = if let Some(schema) = &self.schema {
             Some(Arc::clone(schema))
-        } else if request.manifest().runtime_version.as_str() == "runku-js-1" {
+        } else if matches!(
+            request.manifest().runtime_version.as_str(),
+            "runku-js-1" | "runku-js-2" | "runku-js-3"
+        ) {
             let bundle = decode_safe_esm_bundle(request.artifact_bytes())
                 .map_err(|_| MutationExecutionError::Schema(SchemaError::InvalidCatalog))?;
             let resource = bundle

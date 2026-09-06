@@ -39,7 +39,8 @@ use zeroize::Zeroizing;
 use crate::{
     ManagementApplicationClientCreate, ManagementApplicationCredentialCreate,
     ManagementApplicationCredentialRotate, ManagementBucketArchive, ManagementBucketCreate,
-    ManagementBucketUpdate, ManagementCatalogQuery, ManagementCronActivationSet,
+    ManagementBucketUpdate, ManagementCatalogQuery, ManagementConfigurationDelete,
+    ManagementConfigurationHistoryQuery, ManagementConfigurationSet, ManagementCronActivationSet,
     ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataInsertRequest,
     ManagementDataQuery, ManagementDataReplaceRequest, ManagementEnvironmentCreate,
     ManagementEnvironmentLifecycleChange, ManagementEnvironmentUpdate, ManagementLogPruneRequest,
@@ -49,6 +50,7 @@ use crate::{
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
+const MAX_CONFIGURATION_BODY_BYTES: usize = 72 * 1024;
 const MAX_DATA_ADMIN_BODY_BYTES: usize = 12 * 1024 * 1024;
 const MAX_OBJECT_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
@@ -233,6 +235,20 @@ pub fn build_management_router_with_product(
             post(product_environment_restore),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/configuration",
+            get(product_configuration),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/configuration/history",
+            get(product_configuration_history),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/configuration/{name}",
+            put(product_configuration_set)
+                .delete(product_configuration_delete)
+                .layer(DefaultBodyLimit::max(MAX_CONFIGURATION_BODY_BYTES)),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{environment_id}/metrics",
             get(product_metrics),
         )
@@ -397,6 +413,127 @@ pub fn build_management_router_with_product(
         .fallback(fallback)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state))
+}
+
+async fn product_configuration(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ConfigurationRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.configuration().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_configuration_history(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Query(query): Query<ManagementConfigurationHistoryQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ConfigurationRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.configuration_history(&query).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_configuration_set(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, name)): Path<(String, String, String)>,
+    Json(request): Json<ManagementConfigurationSet>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ConfigurationManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .configuration_set(&name, operation_id, context.operator.id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_configuration_delete(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, name)): Path<(String, String, String)>,
+    Json(request): Json<ManagementConfigurationDelete>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ConfigurationManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .configuration_delete(&name, operation_id, context.operator.id, &request)
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
 }
 
 async fn product_environment(
@@ -2423,21 +2560,17 @@ fn object_put_headers(headers: &HeaderMap) -> Result<ManagementObjectPut, Platfo
 }
 
 fn object_download_response(result: ManagementObjectDownload) -> Response {
-    let content_type = match HeaderValue::from_str(&result.object.content_type) {
-        Ok(value) => value,
-        Err(_) => return product_failure(ManagementProductError::Corruption),
+    let Ok(content_type) = HeaderValue::from_str(&result.object.content_type) else {
+        return product_failure(ManagementProductError::Corruption);
     };
-    let etag = match HeaderValue::from_str(&result.object.etag) {
-        Ok(value) => value,
-        Err(_) => return product_failure(ManagementProductError::Corruption),
+    let Ok(etag) = HeaderValue::from_str(&result.object.etag) else {
+        return product_failure(ManagementProductError::Corruption);
     };
-    let version = match HeaderValue::from_str(&result.object.version_id) {
-        Ok(value) => value,
-        Err(_) => return product_failure(ManagementProductError::Corruption),
+    let Ok(version) = HeaderValue::from_str(&result.object.version_id) else {
+        return product_failure(ManagementProductError::Corruption);
     };
-    let sha256 = match HeaderValue::from_str(&result.object.sha256) {
-        Ok(value) => value,
-        Err(_) => return product_failure(ManagementProductError::Corruption),
+    let Ok(sha256) = HeaderValue::from_str(&result.object.sha256) else {
+        return product_failure(ManagementProductError::Corruption);
     };
     let mut response = Response::new(Body::from(result.bytes));
     *response.status_mut() = StatusCode::OK;

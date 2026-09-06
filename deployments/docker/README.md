@@ -268,8 +268,9 @@ cryptographic recovery material. Destroy them separately only after the backup/r
 - Pin images by version and digest; verify release checksums and provenance before promotion.
 - Backups contain application data, key digests, pending bootstrap material, and audit state. Treat
   them as sensitive even though external peppers are excluded.
-- Runku backup/restore excludes application file bytes and does not configure MinIO/S3 durability;
-  this remains an explicit operator responsibility.
+- The standalone filesystem backup includes application file bytes in the dedicated `files/`
+  directory. External S3 bytes and provider durability are excluded and remain an explicit
+  operator responsibility.
 - The small profile has one active writer and one host failure domain. Use off-host backups or S3
   history according to the required RPO. HA logs protect admitted diagnostics; they do not make the
   Product data path active-active.

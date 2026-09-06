@@ -28,17 +28,18 @@ use runku_releases::{
     RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_safe_esm_bundle,
 };
 use runku_runtime::{
-    CancellationToken, DataDocument, DataGetRequest, DataIndexEntry, DataRead, DataReadError,
-    DataScanRequest, DataWrite, FileBytes, FileDownloadGrant, FileDownloadGrantRequest,
-    FileMetadata, FileStorage, FileStorageError, FileStoreRequest, FileUploadGrant,
-    FileUploadGrantRequest, FunctionCallError, FunctionCallKind, FunctionCallRequest,
-    FunctionInvoke, HttpsEgress, HttpsError, HttpsRequest, HttpsResponse, InvocationRequest,
-    RuntimeError, RuntimeLimits, RuntimeSupervisor, ScheduleCreate, ScheduleError, ScheduleRequest,
-    ScheduleTime,
+    CancellationToken, ConfigurationRead, ConfigurationReadError, ConfigurationValueKind,
+    DataDocument, DataGetRequest, DataIndexEntry, DataRead, DataReadError, DataScanRequest,
+    DataWrite, FileBytes, FileDownloadGrant, FileDownloadGrantRequest, FileMetadata, FileStorage,
+    FileStorageError, FileStoreRequest, FileUploadGrant, FileUploadGrantRequest, FunctionCallError,
+    FunctionCallKind, FunctionCallRequest, FunctionInvoke, HttpsEgress, HttpsError, HttpsRequest,
+    HttpsResponse, InvocationRequest, RuntimeError, RuntimeLimits, RuntimeSupervisor,
+    ScheduleCreate, ScheduleError, ScheduleRequest, ScheduleTime,
 };
 use runku_schema::{SchemaCatalog, encode_schema_catalog};
 use runku_value::{CanonicalValue, FiniteF64, TimestampMicros, TypedId};
 use ulid::Ulid;
+use zeroize::Zeroizing;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sync_and_async_handlers_round_trip_every_canonical_value() -> Result<(), Box<dyn Error>> {
@@ -1256,6 +1257,97 @@ async fn action_file_storage_is_capability_scoped_and_typed() -> Result<(), Box<
     Ok(())
 }
 
+#[derive(Debug)]
+struct MockConfiguration;
+
+#[async_trait]
+impl ConfigurationRead for MockConfiguration {
+    async fn read(
+        &self,
+        kind: ConfigurationValueKind,
+        name: &str,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<Zeroizing<String>, ConfigurationReadError> {
+        match (kind, name) {
+            (ConfigurationValueKind::Variable, "FEATURE_CHECKOUT_V3") => {
+                Ok(Zeroizing::new("enabled".to_owned()))
+            }
+            (ConfigurationValueKind::Secret, "PAYMENTS_API_KEY") => {
+                Ok(Zeroizing::new("private-value".to_owned()))
+            }
+            _ => Err(ConfigurationReadError::NotFound),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environment_configuration_is_exactly_capability_scoped() -> Result<(), Box<dyn Error>> {
+    let supervisor = RuntimeSupervisor::start(RuntimeLimits::builder(1, 8).build()?)?;
+    let broker = Arc::new(MockConfiguration);
+    let source = r#"
+        export const contract = async (ctx) => {
+          const feature = await ctx.env.get("FEATURE_CHECKOUT_V3");
+          const secret = await ctx.secrets.get("PAYMENTS_API_KEY");
+          return `${feature}:${secret.length}:${Object.isFrozen(ctx.env)}:${Object.isFrozen(ctx.secrets)}`;
+        };
+    "#;
+    let output = supervisor
+        .invoke(
+            request_with_contracts(
+                source,
+                CanonicalValue::Null,
+                FunctionType::Action,
+                vec![
+                    Capability::Secret("PAYMENTS_API_KEY".to_owned()),
+                    Capability::Variable("FEATURE_CHECKOUT_V3".to_owned()),
+                ],
+                &Contract::Null,
+                &Contract::String {
+                    minimum_bytes: Some(1),
+                    maximum_bytes: Some(128),
+                },
+                &DocumentSchemaV1::new(Vec::new())?,
+            )?
+            .with_configuration(broker.clone())?,
+        )
+        .await?;
+    assert_eq!(
+        output,
+        CanonicalValue::String("enabled:13:true:true".to_owned())
+    );
+
+    let denied = request_with_contracts(
+        "export const contract = async (ctx) => ctx.env.get('UNDECLARED');",
+        CanonicalValue::Null,
+        FunctionType::Query,
+        vec![Capability::Variable("FEATURE_CHECKOUT_V3".to_owned())],
+        &Contract::Null,
+        &Contract::String {
+            minimum_bytes: Some(1),
+            maximum_bytes: Some(128),
+        },
+        &DocumentSchemaV1::new(Vec::new())?,
+    )?
+    .with_configuration(broker)?;
+    assert_eq!(
+        supervisor.invoke(denied).await,
+        Err(RuntimeError::JavaScript)
+    );
+
+    let absent = request_function(
+        "export default (ctx) => typeof ctx.env === 'undefined' && typeof ctx.secrets === 'undefined';",
+        CanonicalValue::Null,
+        FunctionType::Action,
+        vec![],
+    )?;
+    assert_eq!(
+        supervisor.invoke(absent).await?,
+        CanonicalValue::Boolean(true)
+    );
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct MockScheduler {
     requests: Mutex<Vec<ScheduleRequest>>,
@@ -2146,38 +2238,42 @@ fn request_with_contracts(
     let artifact_bytes: Arc<[u8]> = encode_safe_esm_bundle(&bundle)?.into();
     let release_id = ReleaseId::from_ulid(Ulid::from(83_u128));
     let function_id = FunctionId::from_ulid(Ulid::from(84_u128));
-    let manifest = ReleaseManifestV1 {
-        release_id,
-        project_id,
-        build_id: BuildId::from_ulid(Ulid::from(85_u128)),
-        created_at: TimestampMicros::new(1_700_000_000_000_000),
-        runtime_version: if capabilities
-            .iter()
-            .any(|capability| matches!(capability, Capability::FileRead | Capability::FileWrite))
-        {
-            "runku-js-2"
-        } else {
-            "runku-js-1"
-        }
-        .parse()?,
-        artifact: bundle.descriptor()?,
-        function_contract_hash: Sha256Digest::from_bytes([2; 32]),
-        schema_contract_hash: Sha256Digest::of(&schema_bytes),
-        index_contract_hash: Sha256Digest::of(&index_bytes),
-        functions: vec![FunctionManifest {
-            id: function_id,
-            name: "tests.contract".parse()?,
-            function_type,
-            visibility: FunctionVisibility::Public,
-            auth_policy: AuthPolicy::None,
-            runtime_class: RuntimeClass::SafeV8,
-            implementation_hash: Sha256Digest::of(source.as_bytes()),
-            arguments_contract_hash: Sha256Digest::of(&arguments_bytes),
-            result_contract_hash: Sha256Digest::of(&result_bytes),
-            capabilities,
-        }],
-        cron_definitions: Vec::new(),
-    };
+    let manifest =
+        ReleaseManifestV1 {
+            release_id,
+            project_id,
+            build_id: BuildId::from_ulid(Ulid::from(85_u128)),
+            created_at: TimestampMicros::new(1_700_000_000_000_000),
+            runtime_version: if capabilities.iter().any(|capability| {
+                matches!(capability, Capability::Variable(_) | Capability::Secret(_))
+            }) {
+                "runku-js-3"
+            } else if capabilities.iter().any(|capability| {
+                matches!(capability, Capability::FileRead | Capability::FileWrite)
+            }) {
+                "runku-js-2"
+            } else {
+                "runku-js-1"
+            }
+            .parse()?,
+            artifact: bundle.descriptor()?,
+            function_contract_hash: Sha256Digest::from_bytes([2; 32]),
+            schema_contract_hash: Sha256Digest::of(&schema_bytes),
+            index_contract_hash: Sha256Digest::of(&index_bytes),
+            functions: vec![FunctionManifest {
+                id: function_id,
+                name: "tests.contract".parse()?,
+                function_type,
+                visibility: FunctionVisibility::Public,
+                auth_policy: AuthPolicy::None,
+                runtime_class: RuntimeClass::SafeV8,
+                implementation_hash: Sha256Digest::of(source.as_bytes()),
+                arguments_contract_hash: Sha256Digest::of(&arguments_bytes),
+                result_contract_hash: Sha256Digest::of(&result_bytes),
+                capabilities,
+            }],
+            cron_definitions: Vec::new(),
+        };
     InvocationRequest::new(
         EnvironmentScope::new(project_id, EnvironmentId::from_ulid(Ulid::from(86_u128))),
         release_id,

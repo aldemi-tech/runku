@@ -1455,6 +1455,7 @@ fn decode_object(
     Ok(value)
 }
 
+#[allow(clippy::collapsible_if)]
 async fn list_objects(
     pool: &AnyPool,
     scope: EnvironmentScope,

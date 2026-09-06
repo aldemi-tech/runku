@@ -197,6 +197,66 @@ fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() 
 }
 
 #[test]
+fn named_environment_configuration_selects_v3_and_enforces_function_type() -> TestResult {
+    let directory = tempdir()?;
+    prepare(directory.path())?;
+    std::fs::remove_file(directory.path().join("runku/crons.ts"))?;
+    std::fs::write(
+        directory.path().join("runku/functions.ts"),
+        r#"
+import { action, query, v } from "@runku/server"
+export const flag = query({
+  auth: "none", visibility: "public", capabilities: ["variable:FEATURE_CHECKOUT_V3"],
+  args: v.null(), returns: v.string(), handler: (ctx) => ctx.env.get("FEATURE_CHECKOUT_V3"),
+})
+export const payment = action({
+  auth: "none", visibility: "internal", capabilities: ["secret:PAYMENTS_API_KEY"],
+  args: v.null(), returns: v.string(), handler: (ctx) => ctx.secrets.get("PAYMENTS_API_KEY"),
+})
+"#,
+    )?;
+    let output = build_project(
+        directory.path(),
+        Path::new("runku"),
+        project(),
+        metadata(120),
+    )?;
+    let manifest = decode_release_manifest(&std::fs::read(output.manifest_path)?)?;
+    assert_eq!(manifest.runtime_version.as_str(), "runku-js-3");
+    assert!(manifest.functions.iter().any(|function| {
+        function
+            .capabilities
+            .contains(&Capability::Variable("FEATURE_CHECKOUT_V3".to_owned()))
+    }));
+    assert!(manifest.functions.iter().any(|function| {
+        function
+            .capabilities
+            .contains(&Capability::Secret("PAYMENTS_API_KEY".to_owned()))
+    }));
+
+    std::fs::write(
+        directory.path().join("runku/functions.ts"),
+        r#"
+import { query, v } from "@runku/server"
+export const invalid = query({
+  auth: "none", visibility: "public", capabilities: ["secret:PAYMENTS_API_KEY"],
+  args: v.null(), returns: v.string(), handler: (ctx) => ctx.secrets.get("PAYMENTS_API_KEY"),
+})
+"#,
+    )?;
+    assert_eq!(
+        build_project(
+            directory.path(),
+            Path::new("runku"),
+            project(),
+            metadata(122),
+        ),
+        Err(BuildError::InvalidConfig)
+    );
+    Ok(())
+}
+
+#[test]
 fn fingerprint_tracks_add_change_remove_and_is_stable() -> TestResult {
     let directory = tempdir()?;
     prepare(directory.path())?;

@@ -16,7 +16,8 @@ use runku_releases::{ReleaseManifestV1, Sha256Digest};
 use runku_value::{CanonicalValue, encode_stored_value};
 
 use crate::{
-    DataRead, DataWrite, FileStorage, FunctionInvoke, HttpsEgress, RuntimeError, ScheduleCreate,
+    ConfigurationRead, DataRead, DataWrite, FileStorage, FunctionInvoke, HttpsEgress, RuntimeError,
+    ScheduleCreate,
 };
 
 const MIB: usize = 1024 * 1024;
@@ -310,6 +311,7 @@ pub struct InvocationRequest {
     pub(crate) data_write: Option<Arc<dyn DataWrite>>,
     pub(crate) scheduler: Option<Arc<dyn ScheduleCreate>>,
     pub(crate) file_storage: Option<Arc<dyn FileStorage>>,
+    pub(crate) configuration: Option<Arc<dyn ConfigurationRead>>,
     pub(crate) functions: Option<Arc<dyn FunctionInvoke>>,
     pub(crate) operational_logs: Option<Arc<dyn OperationalLogSink>>,
     pub(crate) performance: Option<InvocationPerformanceRecorder>,
@@ -371,6 +373,7 @@ impl InvocationRequest {
             data_write: None,
             scheduler: None,
             file_storage: None,
+            configuration: None,
             functions: None,
             operational_logs: None,
             performance: None,
@@ -431,6 +434,7 @@ impl InvocationRequest {
             data_write: None,
             scheduler: None,
             file_storage: None,
+            configuration: None,
             functions: None,
             operational_logs: self.operational_logs.clone(),
             performance: self.performance.clone(),
@@ -630,6 +634,40 @@ impl InvocationRequest {
         Ok(self)
     }
 
+    /// Injects the exact-Environment configuration broker for a Function declaring at least one
+    /// `variable:*` or `secret:*` capability.
+    ///
+    /// # Errors
+    ///
+    /// Rejects Functions without a configuration capability and rejects secret access outside an
+    /// Action. The worker independently checks the exact requested kind and name on every read.
+    pub fn with_configuration(
+        mut self,
+        configuration: Arc<dyn ConfigurationRead>,
+    ) -> Result<Self, RuntimeError> {
+        let authorized = self.manifest.functions.iter().any(|function| {
+            matches!(
+                self.manifest.runtime_version.as_str(),
+                "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+            ) && function.id == self.function_id
+                && function
+                    .capabilities
+                    .iter()
+                    .any(|capability| match capability {
+                        runku_releases::Capability::Variable(_) => true,
+                        runku_releases::Capability::Secret(_) => {
+                            function.function_type == runku_releases::FunctionType::Action
+                        }
+                        _ => false,
+                    })
+        });
+        if !authorized {
+            return Err(RuntimeError::InvalidInvocation);
+        }
+        self.configuration = Some(configuration);
+        Ok(self)
+    }
+
     /// Injects the trusted nested Function broker for a caller declaring at least one matching
     /// `function:*` capability.
     ///
@@ -775,6 +813,13 @@ impl InvocationRequest {
     #[must_use]
     pub fn file_storage(&self) -> Option<Arc<dyn FileStorage>> {
         self.file_storage.clone()
+    }
+
+    /// Returns the exact-Environment configuration broker attached to this invocation, when
+    /// authorized.
+    #[must_use]
+    pub fn configuration(&self) -> Option<Arc<dyn ConfigurationRead>> {
+        self.configuration.clone()
     }
 
     /// Attaches an opt-in bounded performance sink for this invocation.

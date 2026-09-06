@@ -90,8 +90,15 @@ All fields are required and statically extractable. `auth` is `none|optional|gue
 | `scheduler:create` | no | yes | yes | `ctx.scheduler.runAfter/runAt` |
 | `storage:read` | no | no | yes | `ctx.storage.getMetadata/createDownload/get` |
 | `storage:write` | no | no | yes | `ctx.storage.createUpload/store/delete` |
+| `variable:NAME` | yes | yes | yes | `ctx.env.get(NAME)` |
+| `secret:NAME` | no | no | yes | `ctx.secrets.get(NAME)` |
 
 Every context also exposes `ctx.invocation`, cooperative yield, and bounded structured `ctx.log`.
+
+Environment configuration names are exact uppercase identifiers. Declaring one or more named
+capabilities selects runtime contract version 3. Variables are visible through the authorized
+Management projection; secret values are write-only there and resolved only inside an authorized
+Action. See [Environment variables and secrets](../../docs/concepts/environment-configuration.md).
 
 ## Data operations
 

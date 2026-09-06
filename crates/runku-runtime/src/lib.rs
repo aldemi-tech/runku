@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod configuration;
 mod data;
 mod error;
 mod function;
@@ -18,6 +19,7 @@ mod supervisor;
 mod value_bridge;
 mod worker;
 
+pub use configuration::{ConfigurationRead, ConfigurationReadError, ConfigurationValueKind};
 pub use data::{
     DataBoundKind, DataDocument, DataGetRequest, DataIndexEntry, DataKeyBound, DataRead,
     DataReadError, DataScanRequest, DataWrite,
