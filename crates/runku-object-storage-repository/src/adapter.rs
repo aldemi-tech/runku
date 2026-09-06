@@ -18,11 +18,12 @@ use runku_core::{EnvironmentScope, OperationId};
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest,
     AccessKeyState, AuditEvent, AuditPage, AuditPageRequest, Bucket, BucketId, BucketPage,
-    BucketPageRequest, BucketState, DeleteObjectCommand, ObjectMetadata, ObjectOperation,
-    ObjectOperationResult, ObjectPage, ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand,
-    ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
-    ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,
-    ObjectVersionId, PutObjectCommand, object_etag,
+    BucketPageRequest, BucketState, DeleteObjectCommand, EncryptedAccessKeyGeneration,
+    EncryptedAccessKeySecret, ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage,
+    ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand, ObjectStorageError,
+    ObjectStorageOperation, ObjectStorageOperationResult, ObjectStorageRepository,
+    ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot, ObjectVersionId,
+    PutObjectCommand, object_etag,
 };
 use runku_value::TimestampMicros;
 use sha2::{Digest, Sha256};
@@ -48,7 +49,12 @@ const MIGRATION_2: &[&str] = &[
     "CREATE TABLE runku_storage_object_operations (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, operation_id TEXT NOT NULL, command_digest BYTEA NOT NULL CHECK(length(command_digest)=32), kind TEXT NOT NULL CHECK(kind IN ('put','delete')), bucket_id TEXT NOT NULL, object_key TEXT NOT NULL, version_id TEXT NOT NULL, completed_at_micros BIGINT NOT NULL CHECK(completed_at_micros >= 0), PRIMARY KEY(project_id,environment_id,operation_id))",
     "CREATE TABLE runku_storage_object_audit (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, sequence BIGINT NOT NULL CHECK(sequence > 0), operation_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('put','delete')), actor TEXT NOT NULL, bucket_id TEXT NOT NULL, object_key TEXT NOT NULL, version_id TEXT NOT NULL, size_bytes BIGINT NULL CHECK(size_bytes IS NULL OR size_bytes >= 0), occurred_at_micros BIGINT NOT NULL CHECK(occurred_at_micros >= 0), PRIMARY KEY(project_id,environment_id,sequence), UNIQUE(project_id,environment_id,operation_id))",
 ];
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, MIGRATION_1), (2, MIGRATION_2)];
+const MIGRATION_3: &[&str] = &[
+    "ALTER TABLE runku_storage_access_key_generations ADD COLUMN secret_nonce BYTEA NULL",
+    "ALTER TABLE runku_storage_access_key_generations ADD COLUMN secret_ciphertext BYTEA NULL",
+    "CREATE INDEX runku_storage_access_key_generations_by_key ON runku_storage_access_key_generations(project_id,environment_id,access_key_id,generation)",
+];
+const MIGRATIONS: &[(i64, &[&str])] = &[(1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3)];
 
 /// Operational role selected for repository composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +287,15 @@ impl ObjectStorageRepository for SqlObjectStorageRepository {
             at,
         )
         .await
+    }
+    async fn encrypted_access_key_generations(
+        &self,
+        scope: EnvironmentScope,
+        access_key_id: AccessKeyId,
+        at: TimestampMicros,
+    ) -> Result<Vec<EncryptedAccessKeyGeneration>, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        load_encrypted_key_generations(&self.pool, scope, access_key_id, at).await
     }
     async fn operation(
         &self,
@@ -530,6 +545,7 @@ async fn apply(
             access_key_id,
             configuration,
             secret_digest,
+            encrypted_secret,
             at,
             ..
         } => {
@@ -552,7 +568,13 @@ async fn apply(
                 previous_generation_valid_until: None,
             };
             metadata.validate().map_err(input_error)?;
-            insert_key(&mut tx, &metadata, secret_digest.as_bytes()).await?;
+            insert_key(
+                &mut tx,
+                &metadata,
+                secret_digest.as_bytes(),
+                encrypted_secret,
+            )
+            .await?;
             (*bucket_id, Some(*access_key_id), 1)
         }
         ObjectStorageCommand::RotateAccessKey {
@@ -560,6 +582,7 @@ async fn apply(
             access_key_id,
             expected_revision,
             secret_digest,
+            encrypted_secret,
             overlap_until,
             at,
             ..
@@ -588,6 +611,7 @@ async fn apply(
                 *expected_revision,
                 revision,
                 secret_digest.as_bytes(),
+                encrypted_secret,
                 *overlap_until,
                 *at,
             )
@@ -724,11 +748,12 @@ async fn insert_key(
     tx: &mut Transaction<'_, Any>,
     value: &AccessKeyMetadata,
     digest: &[u8; 32],
+    encrypted_secret: &EncryptedAccessKeySecret,
 ) -> Result<(), ObjectStorageError> {
     let json =
         serde_json::to_string(&value.configuration).map_err(|_| ObjectStorageError::Internal)?;
     sqlx::query("INSERT INTO runku_storage_access_keys(project_id,environment_id,bucket_id,access_key_id,configuration_json,revision,state,created_at_micros,updated_at_micros,previous_generation_valid_until_micros) VALUES($1,$2,$3,$4,$5,1,'active',$6,$6,NULL)").bind(value.scope.project_id().to_string()).bind(value.scope.environment_id().to_string()).bind(value.bucket_id.to_string()).bind(value.id.to_string()).bind(json).bind(value.created_at.get()).execute(&mut **tx).await.map_err(map_constraint_error)?;
-    sqlx::query("INSERT INTO runku_storage_access_key_generations(project_id,environment_id,bucket_id,access_key_id,generation,secret_digest,valid_from_micros,valid_until_micros,revoked_at_micros) VALUES($1,$2,$3,$4,1,$5,$6,NULL,NULL)").bind(value.scope.project_id().to_string()).bind(value.scope.environment_id().to_string()).bind(value.bucket_id.to_string()).bind(value.id.to_string()).bind(digest.as_slice()).bind(value.created_at.get()).execute(&mut **tx).await.map_err(map_constraint_error)?;
+    sqlx::query("INSERT INTO runku_storage_access_key_generations(project_id,environment_id,bucket_id,access_key_id,generation,secret_digest,valid_from_micros,valid_until_micros,revoked_at_micros,secret_nonce,secret_ciphertext) VALUES($1,$2,$3,$4,1,$5,$6,NULL,NULL,$7,$8)").bind(value.scope.project_id().to_string()).bind(value.scope.environment_id().to_string()).bind(value.bucket_id.to_string()).bind(value.id.to_string()).bind(digest.as_slice()).bind(value.created_at.get()).bind(encrypted_secret.nonce().as_slice()).bind(encrypted_secret.ciphertext()).execute(&mut **tx).await.map_err(map_constraint_error)?;
     Ok(())
 }
 
@@ -741,6 +766,7 @@ async fn rotate_key(
     expected: u64,
     revision: u64,
     digest: &[u8; 32],
+    encrypted_secret: &EncryptedAccessKeySecret,
     overlap: TimestampMicros,
     at: TimestampMicros,
 ) -> Result<(), ObjectStorageError> {
@@ -752,7 +778,7 @@ async fn rotate_key(
     if retired.rows_affected() != 1 {
         return Err(ObjectStorageError::Corruption);
     }
-    sqlx::query("INSERT INTO runku_storage_access_key_generations(project_id,environment_id,bucket_id,access_key_id,generation,secret_digest,valid_from_micros,valid_until_micros,revoked_at_micros) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,NULL)").bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket.to_string()).bind(key.to_string()).bind(to_i64(revision)?).bind(digest.as_slice()).bind(at.get()).execute(&mut **tx).await.map_err(map_constraint_error)?;
+    sqlx::query("INSERT INTO runku_storage_access_key_generations(project_id,environment_id,bucket_id,access_key_id,generation,secret_digest,valid_from_micros,valid_until_micros,revoked_at_micros,secret_nonce,secret_ciphertext) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,NULL,$8,$9)").bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket.to_string()).bind(key.to_string()).bind(to_i64(revision)?).bind(digest.as_slice()).bind(at.get()).bind(encrypted_secret.nonce().as_slice()).bind(encrypted_secret.ciphertext()).execute(&mut **tx).await.map_err(map_constraint_error)?;
     Ok(())
 }
 
@@ -908,6 +934,36 @@ async fn authenticate_key(
         .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket.to_string()).bind(key.to_string()).bind(digest.as_slice()).bind(at.get()).fetch_optional(pool).await.map_err(map_sqlx_error)?;
     row.map(|row| decode_key(scope, bucket, key, &row))
         .transpose()
+}
+
+async fn load_encrypted_key_generations(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    key: AccessKeyId,
+    at: TimestampMicros,
+) -> Result<Vec<EncryptedAccessKeyGeneration>, ObjectStorageError> {
+    let rows = sqlx::query("SELECT k.bucket_id,k.configuration_json,k.revision,k.state,k.created_at_micros,k.updated_at_micros,k.previous_generation_valid_until_micros,g.generation,g.secret_nonce,g.secret_ciphertext FROM runku_storage_access_keys k JOIN runku_storage_access_key_generations g ON g.project_id=k.project_id AND g.environment_id=k.environment_id AND g.bucket_id=k.bucket_id AND g.access_key_id=k.access_key_id WHERE k.project_id=$1 AND k.environment_id=$2 AND k.access_key_id=$3 AND k.state='active' AND g.valid_from_micros<=$4 AND g.revoked_at_micros IS NULL AND (g.valid_until_micros IS NULL OR g.valid_until_micros>$4) AND g.secret_nonce IS NOT NULL AND g.secret_ciphertext IS NOT NULL ORDER BY g.generation DESC LIMIT 3")
+        .bind(scope.project_id().to_string())
+        .bind(scope.environment_id().to_string())
+        .bind(key.to_string())
+        .bind(at.get())
+        .fetch_all(pool)
+        .await
+        .map_err(map_sqlx_error)?;
+    rows.iter()
+        .map(|row| {
+            let bucket: BucketId = parse_domain(row, "bucket_id")?;
+            let metadata = decode_key(scope, bucket, key, row)?;
+            let generation = positive_u64(row.try_get("generation").map_err(corrupt)?)?;
+            let nonce: Vec<u8> = row.try_get("secret_nonce").map_err(corrupt)?;
+            let ciphertext: Vec<u8> = row.try_get("secret_ciphertext").map_err(corrupt)?;
+            Ok(EncryptedAccessKeyGeneration {
+                metadata,
+                generation,
+                secret: EncryptedAccessKeySecret::from_parts(&nonce, ciphertext)?,
+            })
+        })
+        .collect()
 }
 
 async fn load_key_tx(

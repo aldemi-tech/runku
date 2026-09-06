@@ -18,12 +18,13 @@ pub use model::{
     AccessKeyPageRequest, AccessKeySecret, AccessKeyState, AuditEvent, AuditPage, AuditPageRequest,
     Bucket, BucketConfiguration, BucketId, BucketLifecycle, BucketName, BucketPage,
     BucketPageRequest, BucketPolicy, BucketQuota, BucketState, CorsMethod, CorsRule,
-    DeleteObjectCommand, IssuedAccessKey, ObjectMetadata, ObjectOperation, ObjectOperationResult,
-    ObjectPage, ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand,
-    ObjectStorageOperation, ObjectStorageOperationKind, ObjectStorageOperationResult,
-    ObjectVersionId, PutObjectCommand, SecretDigest, Versioning, object_etag, validate_object_key,
+    DeleteObjectCommand, EncryptedAccessKeyGeneration, EncryptedAccessKeySecret, IssuedAccessKey,
+    ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest,
+    ObjectStorageActor, ObjectStorageCommand, ObjectStorageOperation, ObjectStorageOperationKind,
+    ObjectStorageOperationResult, ObjectVersionId, PutObjectCommand, SecretDigest, Versioning,
+    object_etag, validate_object_key,
 };
 pub use repository::{
     ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,
 };
-pub use service::{ObjectStorageService, SecretDigestKey};
+pub use service::{ObjectStorageService, S3AccessKeyMaterial, S3AccessKeySecret, SecretDigestKey};

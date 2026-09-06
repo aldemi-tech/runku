@@ -270,7 +270,23 @@ async fn run_conformance(
         .ok_or("secret missing")?
         .expose()
         .to_owned();
+    let first_s3_secret = first_secret
+        .rsplit_once('.')
+        .ok_or("malformed issued secret")?
+        .1;
     let key_id = issued.metadata.id;
+    let s3_material = service
+        .s3_access_key_material(scope, key_id, TimestampMicros::new(14))
+        .await?
+        .ok_or("S3 material missing")?;
+    assert_eq!(s3_material.metadata, issued.metadata);
+    assert_eq!(s3_material.secrets.len(), 1);
+    assert_eq!(s3_material.secrets[0].expose(), first_s3_secret);
+    assert_eq!(
+        format!("{:?}", s3_material.secrets[0]),
+        "S3AccessKeySecret([REDACTED])"
+    );
+    assert!(!format!("{:?}", s3_material.secrets[0]).contains(first_s3_secret));
     assert!(
         service
             .authorize_access_key(
@@ -343,11 +359,28 @@ async fn run_conformance(
         .ok_or("rotated secret missing")?
         .expose()
         .to_owned();
+    let rotated_s3_secret = rotated_secret
+        .rsplit_once('.')
+        .ok_or("malformed rotated secret")?
+        .1;
     assert_eq!(rotated.metadata.revision, 2);
     assert_eq!(
         rotated.metadata.previous_generation_valid_until,
         Some(TimestampMicros::new(20))
     );
+    let overlap_material = service
+        .s3_access_key_material(scope, key_id, TimestampMicros::new(19))
+        .await?
+        .ok_or("overlap S3 material missing")?;
+    assert_eq!(overlap_material.secrets.len(), 2);
+    assert_eq!(overlap_material.secrets[0].expose(), rotated_s3_secret);
+    assert_eq!(overlap_material.secrets[1].expose(), first_s3_secret);
+    let current_material = service
+        .s3_access_key_material(scope, key_id, TimestampMicros::new(20))
+        .await?
+        .ok_or("current S3 material missing")?;
+    assert_eq!(current_material.secrets.len(), 1);
+    assert_eq!(current_material.secrets[0].expose(), rotated_s3_secret);
     assert!(
         service
             .authorize_access_key(
@@ -417,6 +450,12 @@ async fn run_conformance(
                 AccessKeyOperation::Read,
                 TimestampMicros::new(22)
             )
+            .await?
+            .is_none()
+    );
+    assert!(
+        service
+            .s3_access_key_material(scope, key_id, TimestampMicros::new(22))
             .await?
             .is_none()
     );

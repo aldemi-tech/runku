@@ -4,22 +4,26 @@
 
 use std::{fmt, sync::Arc};
 
+use aes_gcm::{
+    Aes256Gcm, Nonce,
+    aead::{Aead as _, KeyInit as _, Payload},
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use getrandom::fill;
 use hmac::{Hmac, KeyInit, Mac};
 use runku_core::{EnvironmentScope, OperationId};
 use runku_value::TimestampMicros;
-use sha2::Sha256;
-use zeroize::Zeroize;
+use sha2::{Digest as _, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest,
     AccessKeySecret, AuditPage, AuditPageRequest, Bucket, BucketConfiguration, BucketId,
-    BucketPage, BucketPageRequest, DeleteObjectCommand, IssuedAccessKey, ObjectMetadata,
-    ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest, ObjectStorageActor,
-    ObjectStorageCommand, ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
-    ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,
-    PutObjectCommand, SecretDigest,
+    BucketPage, BucketPageRequest, DeleteObjectCommand, EncryptedAccessKeySecret, IssuedAccessKey,
+    ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest,
+    ObjectStorageActor, ObjectStorageCommand, ObjectStorageError, ObjectStorageOperation,
+    ObjectStorageOperationResult, ObjectStorageRepository, ObjectStorageRepositoryBackend,
+    ObjectStorageTelemetrySnapshot, PutObjectCommand, SecretDigest,
 };
 
 /// Deployment-owned HMAC key used only to digest Product access-key secrets.
@@ -51,6 +55,32 @@ impl Drop for SecretDigestKey {
     fn drop(&mut self) {
         self.0.zeroize();
     }
+}
+
+/// One decrypted AWS-compatible secret-access-key candidate with redacted diagnostics.
+pub struct S3AccessKeySecret(Zeroizing<String>);
+
+impl S3AccessKeySecret {
+    /// Borrows the base64url secret for immediate signature verification.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for S3AccessKeySecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("S3AccessKeySecret([REDACTED])")
+    }
+}
+
+/// Currently valid S3 verification material and its exact Product authorization scope.
+#[derive(Debug)]
+pub struct S3AccessKeyMaterial {
+    /// Non-secret Product authorization metadata.
+    pub metadata: AccessKeyMetadata,
+    /// Current and optional overlap generation, never more than two.
+    pub secrets: Vec<S3AccessKeySecret>,
 }
 
 /// Shared provider-independent service.
@@ -198,7 +228,8 @@ impl ObjectStorageService {
         at: TimestampMicros,
     ) -> Result<IssuedAccessKey, ObjectStorageError> {
         let access_key_id = AccessKeyId::generate();
-        let (secret, digest) = self.issue_material(access_key_id)?;
+        let (secret, digest, encrypted_secret) =
+            self.issue_material(scope, bucket_id, access_key_id, 1)?;
         let result = self
             .repository
             .apply(
@@ -209,6 +240,7 @@ impl ObjectStorageService {
                     access_key_id,
                     configuration,
                     secret_digest: digest,
+                    encrypted_secret,
                     actor,
                     at,
                 },
@@ -247,7 +279,11 @@ impl ObjectStorageService {
         actor: ObjectStorageActor,
         at: TimestampMicros,
     ) -> Result<IssuedAccessKey, ObjectStorageError> {
-        let (secret, digest) = self.issue_material(access_key_id)?;
+        let generation = expected_revision
+            .checked_add(1)
+            .ok_or(ObjectStorageError::LimitExceeded)?;
+        let (secret, digest, encrypted_secret) =
+            self.issue_material(scope, bucket_id, access_key_id, generation)?;
         let result = self
             .repository
             .apply(
@@ -258,6 +294,7 @@ impl ObjectStorageService {
                     access_key_id,
                     expected_revision,
                     secret_digest: digest,
+                    encrypted_secret,
                     overlap_until,
                     actor,
                     at,
@@ -450,10 +487,65 @@ impl ObjectStorageService {
         self.repository.object_operation(scope, operation_id).await
     }
 
+    /// Loads and decrypts currently valid S3 signature candidates for one exact Environment.
+    ///
+    /// Pre-encryption generations intentionally return `None` and must be rotated before S3 use.
+    pub async fn s3_access_key_material(
+        &self,
+        scope: EnvironmentScope,
+        access_key_id: AccessKeyId,
+        at: TimestampMicros,
+    ) -> Result<Option<S3AccessKeyMaterial>, ObjectStorageError> {
+        let generations = self
+            .repository
+            .encrypted_access_key_generations(scope, access_key_id, at)
+            .await?;
+        let Some(first) = generations.first() else {
+            return Ok(None);
+        };
+        if generations.len() > 2
+            || generations
+                .iter()
+                .any(|value| value.metadata != first.metadata)
+        {
+            return Err(ObjectStorageError::Corruption);
+        }
+        let metadata = first.metadata.clone();
+        let mut secrets = Vec::with_capacity(generations.len());
+        for generation in generations {
+            let aad = access_key_aad(
+                scope,
+                generation.metadata.bucket_id,
+                access_key_id,
+                generation.generation,
+            );
+            let cipher = self.cipher()?;
+            let plaintext = cipher
+                .decrypt(
+                    Nonce::from_slice(generation.secret.nonce()),
+                    Payload {
+                        msg: generation.secret.ciphertext(),
+                        aad: aad.as_bytes(),
+                    },
+                )
+                .map_err(|_| ObjectStorageError::Corruption)?;
+            let mut raw: [u8; 32] = plaintext
+                .try_into()
+                .map_err(|_| ObjectStorageError::Corruption)?;
+            let encoded = URL_SAFE_NO_PAD.encode(raw);
+            raw.zeroize();
+            secrets.push(S3AccessKeySecret(Zeroizing::new(encoded)));
+        }
+        Ok(Some(S3AccessKeyMaterial { metadata, secrets }))
+    }
+
     fn issue_material(
         &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
         access_key_id: AccessKeyId,
-    ) -> Result<(AccessKeySecret, SecretDigest), ObjectStorageError> {
+        generation: u64,
+    ) -> Result<(AccessKeySecret, SecretDigest, EncryptedAccessKeySecret), ObjectStorageError> {
         let mut raw = [0_u8; 32];
         fill(&mut raw).map_err(|_| ObjectStorageError::Internal)?;
         let digest = match self.digest_key.digest(&raw) {
@@ -463,8 +555,50 @@ impl ObjectStorageService {
                 return Err(error);
             }
         };
+        let mut nonce = [0_u8; 12];
+        if fill(&mut nonce).is_err() {
+            raw.zeroize();
+            return Err(ObjectStorageError::Internal);
+        }
+        let aad = access_key_aad(scope, bucket_id, access_key_id, generation);
+        let encrypted = match self.cipher()?.encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &raw,
+                aad: aad.as_bytes(),
+            },
+        ) {
+            Ok(value) => EncryptedAccessKeySecret::new(nonce, value),
+            Err(_) => {
+                raw.zeroize();
+                return Err(ObjectStorageError::Internal);
+            }
+        };
         let secret = AccessKeySecret::from_parts(access_key_id, &raw);
         raw.zeroize();
-        Ok((secret, digest))
+        Ok((secret, digest, encrypted))
     }
+
+    fn cipher(&self) -> Result<Aes256Gcm, ObjectStorageError> {
+        let mut digest = Sha256::new();
+        digest.update(b"RUNKU_OBJECT_STORAGE_S3_ENCRYPTION_KEY_V1\0");
+        digest.update(self.digest_key.0);
+        let mut key: [u8; 32] = digest.finalize().into();
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| ObjectStorageError::Internal);
+        key.zeroize();
+        cipher
+    }
+}
+
+fn access_key_aad(
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    access_key_id: AccessKeyId,
+    generation: u64,
+) -> String {
+    format!(
+        "RUNKU_OBJECT_STORAGE_S3_SECRET_V1\n{}\n{}\n{bucket_id}\n{access_key_id}\n{generation}",
+        scope.project_id(),
+        scope.environment_id(),
+    )
 }

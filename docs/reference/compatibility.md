@@ -111,6 +111,11 @@ registry. PUT writes a SHA-256 content address before the metadata transaction, 
 response is reconciled by `object-operations`; DELETE is exact-version CAS. These routes do not yet
 claim S3 wire compatibility or coordinated backup semantics.
 
+Object Storage schema v3 adds nullable AES-256-GCM envelopes for access-key generations so the
+Product can verify AWS Signature Version 4 without storing plaintext. Existing bearer credentials
+continue to authenticate by digest, but generations created before v3 must be rotated before S3
+use. Once v3 is applied, older binaries must not serve the same registry.
+
 The post-0.4.5 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on
 both success and sanitized failure responses. The header is additive and CORS-exposed; the v1 JSON
 success/error envelopes remain byte-contract compatible with 0.4.5 SDK decoders. A failure before

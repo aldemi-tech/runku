@@ -69,11 +69,19 @@ non-empty subset of `list`, `read`, `write`, and `delete`. It is a Product crede
 Management API, provider, MinIO, S3, or filesystem credential.
 
 The service generates 256 random bits and returns a secret shaped as
-`rk_st_v1_sak_<ULID>.<base64url>` exactly once. The SQL repository receives and stores only a
-domain-separated HMAC-SHA256 digest using a deployment-owned 32-byte `SecretDigestKey`; debug
-formatting redacts both the key and returned secret. The digest key is not stored in registry
-tables. A successful idempotent replay or operation lookup returns metadata only. If the original
-response is lost, the secret is unrecoverable and the caller must rotate or revoke the key.
+`rk_st_v1_sak_<ULID>.<base64url>` exactly once. For bearer verification, SQL stores a
+domain-separated HMAC-SHA256 digest using a deployment-owned 32-byte `SecretDigestKey`. For AWS
+Signature Version 4 verification, schema v3 additionally stores the same generation in an
+AES-256-GCM envelope whose associated data binds the exact Project, Environment, bucket, key ID,
+and generation. The encryption key is domain-separated from the digest key; neither key is stored
+in registry tables. Nonces and ciphertext have fixed bounds, authentication failure is corruption,
+and diagnostic formatting redacts decrypted and encrypted material.
+
+A successful idempotent replay or operation lookup still returns metadata only. The encrypted
+generation is an internal verifier and no API reconstructs the one-time response. If the original
+response is lost, the caller must rotate or revoke the key. Generations created before schema v3
+remain valid for the bearer form but are intentionally unavailable to S3 verification until the
+operator rotates them.
 
 Rotation uses access-key revision CAS. It creates a new generation and keeps the prior generation
 valid until an explicit cutoff strictly after the rotation time and no more than 24 hours later.
@@ -110,6 +118,8 @@ routes are an operator-authenticated administrative surface, not the future S3 p
 SQLite uses one connection, WAL, full synchronous writes, foreign keys, and a busy timeout.
 Production composition accepts PostgreSQL 16+ only, with bounded pools, statement/lock/idle
 timeouts, and serializable writes. Migration history is append-only and checksum protected.
+Schema v3 adds nullable authenticated-encryption fields so existing registries upgrade without
+inventing secrets; every newly issued or rotated generation writes both verifier forms atomically.
 
 Successful state mutation, operation journal entry, and audit event commit in one transaction.
 Audit rows are append-only and ordered independently within each Environment. Operators should:
@@ -117,7 +127,8 @@ Audit rows are append-only and ordered independently within each Environment. Op
 1. Retry `BUSY` or `UNAVAILABLE` with bounded backoff.
 2. On `RESULT_UNCERTAIN`, query the exact `OperationId` and scope.
 3. If a key operation committed but its one-time secret response was lost, rotate or revoke it;
-   never inspect SQL or backups for plaintext because none is persisted.
+   never inspect SQL or backups for plaintext because none is persisted and the internal envelope
+   is not a recovery API.
 4. Treat migration checksum mismatch, malformed persisted configuration, or impossible key state
    as corruption and stop writes until the authoritative database is restored or repaired.
 

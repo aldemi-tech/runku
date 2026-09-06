@@ -6,9 +6,9 @@ use runku_core::{EnvironmentScope, OperationId};
 use crate::{
     AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest, AuditPage,
     AuditPageRequest, Bucket, BucketId, BucketPage, BucketPageRequest, DeleteObjectCommand,
-    ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest,
-    ObjectStorageCommand, ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
-    PutObjectCommand,
+    EncryptedAccessKeyGeneration, ObjectMetadata, ObjectOperation, ObjectOperationResult,
+    ObjectPage, ObjectPageRequest, ObjectStorageCommand, ObjectStorageError,
+    ObjectStorageOperation, ObjectStorageOperationResult, PutObjectCommand,
 };
 
 /// Physical backend selected by composition.
@@ -92,6 +92,14 @@ pub trait ObjectStorageRepository: Send + Sync {
         secret_digest: &crate::SecretDigest,
         at: runku_value::TimestampMicros,
     ) -> Result<Option<AccessKeyMetadata>, ObjectStorageError>;
+
+    /// Loads bounded currently valid encrypted generations by exact Environment and key ID.
+    async fn encrypted_access_key_generations(
+        &self,
+        scope: EnvironmentScope,
+        access_key_id: AccessKeyId,
+        at: runku_value::TimestampMicros,
+    ) -> Result<Vec<EncryptedAccessKeyGeneration>, ObjectStorageError>;
 
     /// Looks up an operation after an uncertain result.
     async fn operation(

@@ -702,6 +702,76 @@ impl fmt::Debug for SecretDigest {
     }
 }
 
+/// Authenticated encrypted access-key material safe for authoritative persistence.
+#[derive(Clone, Eq, PartialEq)]
+pub struct EncryptedAccessKeySecret {
+    nonce: [u8; 12],
+    ciphertext: Vec<u8>,
+}
+
+impl EncryptedAccessKeySecret {
+    /// Reconstructs a bounded AES-GCM envelope from storage.
+    pub fn from_parts(nonce: &[u8], ciphertext: Vec<u8>) -> Result<Self, ObjectStorageError> {
+        let nonce = nonce
+            .try_into()
+            .map_err(|_| ObjectStorageError::Corruption)?;
+        if ciphertext.len() != 48 {
+            return Err(ObjectStorageError::Corruption);
+        }
+        Ok(Self { nonce, ciphertext })
+    }
+
+    /// Creates one already-authenticated envelope.
+    #[must_use]
+    pub const fn new(nonce: [u8; 12], ciphertext: Vec<u8>) -> Self {
+        Self { nonce, ciphertext }
+    }
+
+    /// Returns the nonce for persistence.
+    #[must_use]
+    pub const fn nonce(&self) -> &[u8; 12] {
+        &self.nonce
+    }
+
+    /// Returns the ciphertext and authentication tag for persistence.
+    #[must_use]
+    pub fn ciphertext(&self) -> &[u8] {
+        &self.ciphertext
+    }
+
+    fn validate(&self) -> Result<(), ObjectStorageError> {
+        if self.ciphertext.len() == 48 {
+            Ok(())
+        } else {
+            Err(ObjectStorageError::InvalidInput)
+        }
+    }
+}
+
+impl fmt::Debug for EncryptedAccessKeySecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EncryptedAccessKeySecret([REDACTED])")
+    }
+}
+
+impl Drop for EncryptedAccessKeySecret {
+    fn drop(&mut self) {
+        self.nonce.zeroize();
+        self.ciphertext.zeroize();
+    }
+}
+
+/// One currently valid encrypted generation loaded for S3 signature verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncryptedAccessKeyGeneration {
+    /// Non-secret key metadata and authorization scope.
+    pub metadata: AccessKeyMetadata,
+    /// Positive generation number, equal to the key revision that created it.
+    pub generation: u64,
+    /// Authenticated encrypted secret.
+    pub secret: EncryptedAccessKeySecret,
+}
+
 /// Result of issuing or rotating a key. Replays never contain `secret`.
 #[derive(Debug)]
 pub struct IssuedAccessKey {
@@ -1189,6 +1259,8 @@ pub enum ObjectStorageCommand {
         configuration: AccessKeyConfiguration,
         /// Server-generated digest, excluded from intent digest.
         secret_digest: SecretDigest,
+        /// Reversible authenticated material used only for S3 signature verification.
+        encrypted_secret: EncryptedAccessKeySecret,
         /// Trusted actor.
         actor: ObjectStorageActor,
         /// Mutation time.
@@ -1204,6 +1276,8 @@ pub enum ObjectStorageCommand {
         expected_revision: u64,
         /// Server-generated digest, excluded from intent digest.
         secret_digest: SecretDigest,
+        /// Reversible authenticated material used only for S3 signature verification.
+        encrypted_secret: EncryptedAccessKeySecret,
         /// Prior generation validity cutoff.
         overlap_until: TimestampMicros,
         /// Trusted actor.
@@ -1388,9 +1462,17 @@ impl ObjectStorageCommand {
                     Ok(())
                 }
             }
-            Self::IssueAccessKey { configuration, .. } => configuration.validate(),
+            Self::IssueAccessKey {
+                configuration,
+                encrypted_secret,
+                ..
+            } => {
+                configuration.validate()?;
+                encrypted_secret.validate()
+            }
             Self::RotateAccessKey {
                 expected_revision,
+                encrypted_secret,
                 overlap_until,
                 at,
                 ..
@@ -1402,7 +1484,7 @@ impl ObjectStorageCommand {
                 {
                     Err(ObjectStorageError::InvalidInput)
                 } else {
-                    Ok(())
+                    encrypted_secret.validate()
                 }
             }
         }
@@ -1521,6 +1603,7 @@ mod tests {
             access_key_id: AccessKeyId::generate(),
             configuration: key_configuration.clone(),
             secret_digest: SecretDigest::new([1; 32]),
+            encrypted_secret: EncryptedAccessKeySecret::new([1; 12], vec![1; 48]),
             actor: actor.clone(),
             at: TimestampMicros::new(7),
         };
@@ -1529,6 +1612,7 @@ mod tests {
             access_key_id: AccessKeyId::generate(),
             configuration: key_configuration,
             secret_digest: SecretDigest::new([2; 32]),
+            encrypted_secret: EncryptedAccessKeySecret::new([2; 12], vec![2; 48]),
             actor,
             at: TimestampMicros::new(2),
         };
