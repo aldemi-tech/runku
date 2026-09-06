@@ -5,8 +5,10 @@ use runku_core::{EnvironmentScope, OperationId};
 
 use crate::{
     AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest, AuditPage,
-    AuditPageRequest, Bucket, BucketId, BucketPage, BucketPageRequest, ObjectStorageCommand,
-    ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
+    AuditPageRequest, Bucket, BucketId, BucketPage, BucketPageRequest, DeleteObjectCommand,
+    ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest,
+    ObjectStorageCommand, ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
+    PutObjectCommand,
 };
 
 /// Physical backend selected by composition.
@@ -104,6 +106,47 @@ pub trait ObjectStorageRepository: Send + Sync {
         scope: EnvironmentScope,
         request: AuditPageRequest,
     ) -> Result<AuditPage, ObjectStorageError>;
+
+    /// Atomically commits current/version metadata after immutable bytes are durable.
+    async fn put_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        operation_id: OperationId,
+        command: &PutObjectCommand,
+    ) -> Result<ObjectOperationResult, ObjectStorageError>;
+
+    /// Gets one current object without consulting the physical provider.
+    async fn get_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStorageError>;
+
+    /// Lists one stable current-object prefix/delimiter page.
+    async fn list_objects(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        request: &ObjectPageRequest,
+    ) -> Result<ObjectPage, ObjectStorageError>;
+
+    /// Removes one exact current version while retaining immutable bytes for reconciliation/GC.
+    async fn delete_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        operation_id: OperationId,
+        command: &DeleteObjectCommand,
+    ) -> Result<ObjectOperationResult, ObjectStorageError>;
+
+    /// Looks up one object mutation after an uncertain commit acknowledgement.
+    async fn object_operation(
+        &self,
+        scope: EnvironmentScope,
+        operation_id: OperationId,
+    ) -> Result<Option<ObjectOperation>, ObjectStorageError>;
 
     /// Performs a lightweight health query.
     async fn health(&self) -> Result<(), ObjectStorageError>;

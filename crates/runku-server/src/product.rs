@@ -31,7 +31,7 @@ use runku_environments::{
     EnvironmentService,
 };
 use runku_execution::{document_write_set_payload, plan_document_index_mutations};
-use runku_file_storage::{FileObjectStore, FileStorageLimits, FileUsageSink};
+use runku_file_storage::{FileObjectStore, FileStorageError, FileStorageLimits, FileUsageSink};
 use runku_gateway::{CorsOrigin, EnvironmentServingPercentile, EnvironmentServingResolver};
 use runku_identity::{
     ApplicationClient, ApplicationClientName, ApplicationClientStatus, ApplicationScope,
@@ -63,21 +63,23 @@ use runku_management_service::{
     ManagementFunctionPage, ManagementHealthComponent, ManagementInstanceHealth,
     ManagementIssuedStorageAccessKey, ManagementLogArchiveStatus, ManagementLogPage,
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementMetric,
-    ManagementMetrics, ManagementProduct, ManagementProductError, ManagementReleaseOutcome,
-    ManagementReleaseStatus, ManagementResolvedTarget, ManagementScheduledInvocation,
-    ManagementScheduledPage, ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
-    ManagementServingCompatibility, ManagementServingOperation, ManagementServingPolicy,
-    ManagementServingPolicyResult, ManagementServingPolicySet, ManagementServingRelease,
-    ManagementStorageAccessKey, ManagementStorageAccessKeyConfiguration,
-    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyPage,
-    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, ManagementStorageOperation,
-    ManagementWorkspacePublish,
+    ManagementMetrics, ManagementObject, ManagementObjectDownload, ManagementObjectPage,
+    ManagementObjectPut, ManagementObjectResult, ManagementProduct, ManagementProductError,
+    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
+    ManagementScheduledInvocation, ManagementScheduledPage, ManagementSchemaIndex,
+    ManagementSchemaPage, ManagementSchemaTable, ManagementServingCompatibility,
+    ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
+    ManagementServingPolicySet, ManagementServingRelease, ManagementStorageAccessKey,
+    ManagementStorageAccessKeyConfiguration, ManagementStorageAccessKeyIssue,
+    ManagementStorageAccessKeyPage, ManagementStorageAccessKeyRevoke,
+    ManagementStorageAccessKeyRotate, ManagementStorageOperation, ManagementWorkspacePublish,
 };
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
     BucketConfiguration, BucketId, BucketLifecycle, BucketPolicy, BucketQuota, CorsMethod,
-    CorsRule, ObjectStorageActor, ObjectStorageError, ObjectStorageOperation,
-    ObjectStorageOperationKind, ObjectStorageService, SecretDigestKey, Versioning,
+    CorsRule, DeleteObjectCommand, ObjectMetadata, ObjectOperationResult, ObjectPageRequest,
+    ObjectStorageActor, ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationKind,
+    ObjectStorageService, ObjectVersionId, PutObjectCommand, SecretDigestKey, Versioning,
 };
 use runku_object_storage_repository::{ObjectStorageRepositoryConfig, SqlObjectStorageRepository};
 use runku_observability::{
@@ -115,6 +117,7 @@ pub struct ProductAdapter {
     cron_context: CronContext,
     serving: ServingPolicyService,
     storage: ObjectStorageService,
+    object_bytes: FileObjectStore,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +240,12 @@ impl ProductAdapter {
         let storage_digest_key = derive_local_object_storage_digest_key(&root)
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
+        let object_bytes = match config.file_object_store.clone() {
+            Some(value) => value,
+            None => FileObjectStore::filesystem(&paths.file_storage_objects)
+                .await
+                .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?,
+        };
         let serving = ServingPolicyService::new(Arc::new(serving_repository));
         let environment_serving_resolver: Arc<dyn EnvironmentServingResolver> =
             Arc::new(ProductEnvironmentServingResolver {
@@ -270,6 +279,7 @@ impl ProductAdapter {
                 Arc::new(storage_repository),
                 SecretDigestKey::new(storage_digest_key),
             ),
+            object_bytes,
         };
         let releases = LocalReleaseManager::open(&adapter.root)
             .await
@@ -1608,6 +1618,171 @@ impl ManagementProduct for ProductAdapter {
             .ok_or(ManagementProductError::NotFound)
     }
 
+    async fn storage_objects(
+        &self,
+        bucket_id: &str,
+        prefix: &str,
+        delimiter: Option<char>,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementObjectPage, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let request = ObjectPageRequest {
+            prefix: prefix.to_owned(),
+            delimiter,
+            after: after.map(str::to_owned),
+            limit,
+        };
+        let page = self
+            .storage
+            .list_objects(self.scope, bucket_id, &request)
+            .await
+            .map_err(map_storage)?;
+        Ok(ManagementObjectPage {
+            version: 1,
+            prefix: page.prefix,
+            objects: page.objects.iter().map(management_object).collect(),
+            common_prefixes: page.common_prefixes,
+            next: page.next,
+        })
+    }
+
+    async fn storage_object(
+        &self,
+        bucket_id: &str,
+        key: &str,
+    ) -> Result<ManagementObjectDownload, ManagementProductError> {
+        const CONSOLE_OBJECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let object = self
+            .storage
+            .get_object(self.scope, bucket_id, key)
+            .await
+            .map_err(map_storage)?
+            .ok_or(ManagementProductError::NotFound)?;
+        let digest = Sha256Digest::from_bytes(object.sha256).to_string();
+        let bytes = self
+            .object_bytes
+            .get_logical_object(
+                self.scope,
+                &bucket_id.to_string(),
+                &digest,
+                object.size,
+                CONSOLE_OBJECT_MAX_BYTES,
+            )
+            .await
+            .map_err(map_object_bytes)?;
+        Ok(ManagementObjectDownload {
+            object: management_object(&object),
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    async fn storage_object_put(
+        &self,
+        bucket_id: &str,
+        key: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementObjectPut,
+        bytes: Vec<u8>,
+    ) -> Result<ManagementObjectResult, ManagementProductError> {
+        const CONSOLE_OBJECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        runku_object_storage::validate_object_key(key).map_err(map_storage)?;
+        let bucket = self
+            .storage
+            .get_bucket(self.scope, bucket_id)
+            .await
+            .map_err(map_storage)?
+            .ok_or(ManagementProductError::NotFound)?;
+        let size = u64::try_from(bytes.len()).map_err(|_| ManagementProductError::Invalid)?;
+        if size > bucket.configuration.quota.max_object_bytes || size > CONSOLE_OBJECT_MAX_BYTES {
+            return Err(ManagementProductError::Invalid);
+        }
+        let digest = Sha256Digest::of(&bytes);
+        self.object_bytes
+            .put_logical_object(
+                self.scope,
+                &bucket_id.to_string(),
+                &digest.to_string(),
+                bytes.into(),
+                CONSOLE_OBJECT_MAX_BYTES,
+            )
+            .await
+            .map_err(map_object_bytes)?;
+        let result = self
+            .storage
+            .put_object(
+                self.scope,
+                bucket_id,
+                operation_id,
+                &PutObjectCommand {
+                    version_id: ObjectVersionId::generate(),
+                    key: key.to_owned(),
+                    size,
+                    sha256: *digest.as_bytes(),
+                    content_type: request.content_type.clone(),
+                    metadata: request.metadata.clone(),
+                    actor: storage_actor(actor)?,
+                    at: parse_timestamp(&request.at_micros)?,
+                },
+            )
+            .await
+            .map_err(map_storage)?;
+        Ok(management_object_result(&result))
+    }
+
+    async fn storage_object_delete(
+        &self,
+        bucket_id: &str,
+        key: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        expected_version_id: &str,
+        at_micros: &str,
+    ) -> Result<ManagementObjectResult, ManagementProductError> {
+        let bucket_id = bucket_id.parse::<BucketId>().map_err(map_storage)?;
+        let expected_version_id = expected_version_id
+            .parse::<ObjectVersionId>()
+            .map_err(map_storage)?;
+        let result = self
+            .storage
+            .delete_object(
+                self.scope,
+                bucket_id,
+                operation_id,
+                &DeleteObjectCommand {
+                    key: key.to_owned(),
+                    expected_version_id,
+                    actor: storage_actor(actor)?,
+                    at: parse_timestamp(at_micros)?,
+                },
+            )
+            .await
+            .map_err(map_storage)?;
+        Ok(management_object_result(&result))
+    }
+
+    async fn storage_object_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementObjectResult, ManagementProductError> {
+        let operation = self
+            .storage
+            .object_operation(self.scope, operation_id)
+            .await
+            .map_err(map_storage)?
+            .ok_or(ManagementProductError::NotFound)?;
+        Ok(ManagementObjectResult {
+            object: None,
+            operation_id: operation.operation_id.to_string(),
+            kind: operation.kind.to_owned(),
+            version_id: operation.version_id.to_string(),
+            replayed: true,
+        })
+    }
+
     async fn application_clients(
         &self,
     ) -> Result<ManagementApplicationClientList, ManagementProductError> {
@@ -2694,6 +2869,29 @@ fn management_storage_operation(operation: &ObjectStorageOperation) -> Managemen
     }
 }
 
+fn management_object(object: &ObjectMetadata) -> ManagementObject {
+    ManagementObject {
+        key: object.key.clone(),
+        version_id: object.version_id.to_string(),
+        size_bytes: object.size.to_string(),
+        etag: object.etag.clone(),
+        sha256: Sha256Digest::from_bytes(object.sha256).to_string(),
+        content_type: object.content_type.clone(),
+        metadata: object.metadata.clone(),
+        created_at_micros: object.created_at.get().to_string(),
+    }
+}
+
+fn management_object_result(result: &ObjectOperationResult) -> ManagementObjectResult {
+    ManagementObjectResult {
+        object: result.object.as_ref().map(management_object),
+        operation_id: result.operation.operation_id.to_string(),
+        kind: result.operation.kind.to_owned(),
+        version_id: result.operation.version_id.to_string(),
+        replayed: result.replayed,
+    }
+}
+
 fn management_scheduled_invocation(
     record: &ScheduledInvocationRecord,
 ) -> Result<ManagementScheduledInvocation, ManagementProductError> {
@@ -3176,6 +3374,22 @@ const fn map_storage(error: ObjectStorageError) -> ManagementProductError {
         | ObjectStorageError::Unsupported
         | ObjectStorageError::ProductionBackendUnsupported
         | ObjectStorageError::Internal => ManagementProductError::Corruption,
+    }
+}
+
+const fn map_object_bytes(error: FileStorageError) -> ManagementProductError {
+    match error {
+        FileStorageError::InvalidRequest | FileStorageError::LimitExceeded => {
+            ManagementProductError::Invalid
+        }
+        FileStorageError::Conflict => ManagementProductError::Conflict,
+        FileStorageError::Unavailable | FileStorageError::Timeout | FileStorageError::Cancelled => {
+            ManagementProductError::Unavailable
+        }
+        FileStorageError::NotFound | FileStorageError::Corruption => {
+            ManagementProductError::Corruption
+        }
+        FileStorageError::Forbidden => ManagementProductError::Invalid,
     }
 }
 
@@ -3787,6 +4001,90 @@ export const hourly = cron({
             product.storage_operation(revoke_operation).await?.kind,
             "revokeAccessKey"
         );
+        let put_operation = OperationId::generate();
+        let put_request = ManagementObjectPut {
+            content_type: "text/plain".to_owned(),
+            metadata: BTreeMap::from([("cache-control".to_owned(), "private".to_owned())]),
+            at_micros: "1800000000000205".to_owned(),
+        };
+        let put = product
+            .storage_object_put(
+                &created.bucket.bucket_id,
+                "public/folder/readme.txt",
+                put_operation,
+                actor,
+                &put_request,
+                b"hello storage".to_vec(),
+            )
+            .await?;
+        let object = put.object.as_ref().ok_or("object result missing")?;
+        assert_eq!(object.size_bytes, "13");
+        assert_eq!(object.content_type, "text/plain");
+        assert_eq!(
+            product.storage_object_operation(put_operation).await?.kind,
+            "put"
+        );
+        assert!(
+            product
+                .storage_object_put(
+                    &created.bucket.bucket_id,
+                    "public/folder/readme.txt",
+                    put_operation,
+                    actor,
+                    &put_request,
+                    b"hello storage".to_vec(),
+                )
+                .await?
+                .replayed
+        );
+        let page = product
+            .storage_objects(&created.bucket.bucket_id, "public/", Some('/'), None, 10)
+            .await?;
+        assert_eq!(page.common_prefixes, ["public/folder/"]);
+        let downloaded = product
+            .storage_object(&created.bucket.bucket_id, "public/folder/readme.txt")
+            .await?;
+        assert_eq!(downloaded.bytes, b"hello storage");
+        assert_eq!(downloaded.object.etag, object.etag);
+        assert_eq!(
+            product
+                .storage_object_delete(
+                    &created.bucket.bucket_id,
+                    "public/folder/readme.txt",
+                    OperationId::generate(),
+                    actor,
+                    &ObjectVersionId::generate().to_string(),
+                    "1800000000000206",
+                )
+                .await,
+            Err(ManagementProductError::Conflict)
+        );
+        let delete_operation = OperationId::generate();
+        let deleted = product
+            .storage_object_delete(
+                &created.bucket.bucket_id,
+                "public/folder/readme.txt",
+                delete_operation,
+                actor,
+                &object.version_id,
+                "1800000000000206",
+            )
+            .await?;
+        assert_eq!(deleted.kind, "delete");
+        assert!(deleted.object.is_none());
+        assert_eq!(
+            product
+                .storage_object_operation(delete_operation)
+                .await?
+                .kind,
+            "delete"
+        );
+        assert_eq!(
+            product
+                .storage_object(&created.bucket.bucket_id, "public/folder/readme.txt")
+                .await,
+            Err(ManagementProductError::NotFound)
+        );
         let archived = product
             .bucket_archive(
                 &created.bucket.bucket_id,
@@ -3794,7 +4092,7 @@ export const hourly = cron({
                 actor,
                 &ManagementBucketArchive {
                     expected_revision: 2,
-                    at_micros: "1800000000000205".to_owned(),
+                    at_micros: "1800000000000207".to_owned(),
                 },
             )
             .await?;

@@ -105,6 +105,12 @@ canonical invocation still requires a separately scoped Application credential a
 functional principal. Existing grants are not backfilled; operator/developer role expansion affects
 only newly issued or source-reconciled grants, while custom grants remain exact.
 
+The later post-0.4.5 Object Storage extension adds current/version metadata schema v2 and bounded
+administrative object routes. After schema v2 is applied, an older binary must not serve the same
+registry. PUT writes a SHA-256 content address before the metadata transaction, so an uncertain
+response is reconciled by `object-operations`; DELETE is exact-version CAS. These routes do not yet
+claim S3 wire compatibility or coordinated backup semantics.
+
 The post-0.4.5 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on
 both success and sanitized failure responses. The header is additive and CORS-exposed; the v1 JSON
 success/error envelopes remain byte-contract compatible with 0.4.5 SDK decoders. A failure before

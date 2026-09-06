@@ -1,10 +1,13 @@
 # Logical Object Storage registry
 
-Status: the provider-independent bucket and Product access-key registry is implemented. SQLite
+Status: the provider-independent bucket, object metadata and Product access-key registry is implemented. SQLite
 conformance runs in the ordinary crate test; PostgreSQL 16+ runs when
 `RUNKU_TEST_POSTGRES_URL` is set. The compact server and authenticated Management API now compose
-bucket and Product access-key administration over this authority. Object bytes, an S3-compatible
-HTTP surface, provider adapters, native SDK object operations, and CLI commands remain unimplemented.
+bucket, object-browser/upload/download/delete, and Product access-key administration over this
+authority. Object bytes use the same filesystem/S3 provider boundary as Application Files under a
+physically disjoint content-addressed namespace. An S3-compatible public HTTP surface, native SDK
+object operations, multipart, signed/public URLs, lifecycle execution, and CLI commands remain
+unimplemented.
 
 This capability is distinct from [Application file storage](../functions/file-storage.md).
 Application Files are an Action-oriented upload/download facility. Logical Object Storage is a
@@ -13,21 +16,40 @@ administrative, and S3-compatible surfaces.
 
 ## Authority and scope
 
-Every bucket, access key, operation, and audit event carries an exact `ProjectId` plus
+Every bucket, current object, immutable object version, access key, operation, and audit event carries an exact `ProjectId` plus
 `EnvironmentId`. The registry never derives either value from a bucket name, credential, hostname,
 or request body. Bucket names are a conservative DNS-label subset and are unique within the exact
 Environment; an archived bucket continues to reserve its name.
 
 `runku-object-storage` is a pure domain/service crate. `runku-object-storage-repository` is the only
 crate in this capability that knows about SQL. Neither crate contains provider endpoints,
-credentials, regions, physical bucket names, or object bytes.
+credentials, regions, physical bucket names, or object bytes. `FileObjectStore` supplies only the
+physical content-addressed byte boundary; provider enumeration never becomes Product authority.
 
 ## Bucket lifecycle
 
 A create command supplies the complete initial configuration: private or public-read policy,
 bounded CORS rules, versioning, lifecycle periods, and logical quotas. Updates replace that complete
 configuration and require the current positive revision. Archive also requires the current
-revision, is irreversible in v1, and atomically revokes all active access-key generations.
+revision, is irreversible in v1, requires an empty current-object namespace, and atomically revokes
+all active access-key generations.
+
+## Object authority and transfer ordering
+
+Current keys and immutable versions persist size, SHA-256, Product ETag, content type, bounded user
+metadata, and creation time. Lists accept a bounded prefix, optional `/` delimiter, exclusive full-
+key cursor, and limit up to 100. Prefixes are a presentation over exact keys; they are never
+filesystem paths. Put and delete require an `OperationId`; delete additionally requires the exact
+current `ovr_*` version and therefore cannot remove a concurrent replacement.
+
+Upload hashes and validates the bounded bytes, writes the immutable physical content address, and
+then commits quota/current/version metadata plus operation and audit in one serializable registry
+transaction. A pre-commit conflict may leave an unreachable content-addressed blob, which is safe
+for later garbage collection. A lost commit acknowledgement is reconciled through the separate
+object operation journal. Download resolves metadata first and then verifies both physical size and
+SHA-256 before returning bytes. Delete removes logical visibility but retains immutable physical
+content and version evidence for recovery/garbage collection. The authenticated console transport
+is bounded to 64 MiB per object; bucket quota may be lower.
 
 Create, update, and archive use an `OperationId`. The repository hashes the complete canonical
 client intent and exact scope; server-generated IDs, secret material, and processing timestamps do
@@ -74,6 +96,14 @@ The implemented routes are:
 - `GET|POST .../buckets/{bkt_*}/access-keys`;
 - `POST .../access-keys/{sak_*}/rotate|revoke`;
 - `GET .../storage-operations/{opn_*}` for uncertain-result reconciliation.
+- `GET .../buckets/{bkt_*}/objects?prefix=&delimiter=/&after=&limit=`;
+- `GET|PUT|DELETE .../buckets/{bkt_*}/objects/{key}` for verified raw byte transfer and CAS delete;
+- `GET .../object-operations/{opn_*}` for uncertain object-result reconciliation.
+
+Raw PUT requires `Idempotency-Key`, `X-Runku-At-Micros`, a bounded `Content-Type`, and may include
+up to 32 bounded `X-Runku-Meta-*` headers. DELETE requires the same operation/timestamp headers plus
+`X-Runku-Object-Version`. GET returns verified bytes with ETag, SHA-256, and version headers. These
+routes are an operator-authenticated administrative surface, not the future S3 protocol.
 
 ## Persistence and recovery
 
@@ -91,6 +121,7 @@ Audit rows are append-only and ordered independently within each Environment. Op
 4. Treat migration checksum mismatch, malformed persisted configuration, or impossible key state
    as corruption and stop writes until the authoritative database is restored or repaired.
 
-The current backup, restore, and availability guarantees are those of the selected registry
-database. No object-byte durability claim exists until a provider adapter and its own conformance
-campaign are implemented.
+The current backup/restore contract still does not coordinate these bytes, so an operator must not
+claim complete Object Storage recovery yet. Filesystem byte round trips run in ordinary tests and
+the shared S3 adapter retains its opt-in MinIO conformance, but the coordinated recovery point,
+lifecycle/garbage-collection worker, and S3-facing protocol each require their own later campaign.

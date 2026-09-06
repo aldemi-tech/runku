@@ -1,5 +1,7 @@
 //! Framework-independent authenticated product-management boundary.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use runku_core::{EnvironmentScope, OperationId, OperatorId};
 use runku_protocol::WireValueV1;
@@ -723,6 +725,80 @@ pub struct ManagementStorageOperation {
     pub revision: u64,
     /// Canonical decimal completion time.
     pub completed_at_micros: String,
+}
+
+/// One current logical object projection without physical provider details.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementObject {
+    /// Exact UTF-8 key.
+    pub key: String,
+    /// Immutable logical version ID.
+    pub version_id: String,
+    /// Lossless byte length.
+    pub size_bytes: String,
+    /// Stable quoted Product ETag.
+    pub etag: String,
+    /// Lower-case SHA-256 digest.
+    pub sha256: String,
+    /// Media type.
+    pub content_type: String,
+    /// Bounded user metadata.
+    pub metadata: BTreeMap<String, String>,
+    /// Canonical decimal creation time.
+    pub created_at_micros: String,
+}
+
+/// Bounded object-browser page.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementObjectPage {
+    /// Wire version.
+    pub version: u8,
+    /// Requested prefix.
+    pub prefix: String,
+    /// Current objects at this level.
+    pub objects: Vec<ManagementObject>,
+    /// Folder-like prefixes when delimiter `/` is selected.
+    pub common_prefixes: Vec<String>,
+    /// Exclusive full-key cursor.
+    pub next: Option<String>,
+}
+
+/// Metadata supplied alongside a raw object upload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagementObjectPut {
+    /// Media type from the exact request header.
+    pub content_type: String,
+    /// Bounded `x-runku-meta-*` values.
+    pub metadata: BTreeMap<String, String>,
+    /// Caller-pinned canonical operation time.
+    pub at_micros: String,
+}
+
+/// Raw bytes plus authoritative metadata for an object download.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagementObjectDownload {
+    /// Authoritative metadata.
+    pub object: ManagementObject,
+    /// Verified immutable bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Idempotent object mutation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementObjectResult {
+    /// Current metadata after put; absent after delete.
+    pub object: Option<ManagementObject>,
+    /// Correlated operation ID.
+    pub operation_id: String,
+    /// `put` or `delete`.
+    pub kind: String,
+    /// Affected immutable version ID.
+    pub version_id: String,
+    /// Whether exact durable operation content was replayed.
+    pub replayed: bool,
 }
 
 /// Query selecting one exact code target for the Cron catalog.
@@ -1471,6 +1547,73 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         &self,
         operation_id: OperationId,
     ) -> Result<ManagementStorageOperation, ManagementProductError> {
+        let _ = operation_id;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Lists current objects and folder-like prefixes for one logical bucket.
+    async fn storage_objects(
+        &self,
+        bucket_id: &str,
+        prefix: &str,
+        delimiter: Option<char>,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<ManagementObjectPage, ManagementProductError> {
+        let _ = (bucket_id, prefix, delimiter, after, limit);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Reads and verifies one current logical object.
+    async fn storage_object(
+        &self,
+        bucket_id: &str,
+        key: &str,
+    ) -> Result<ManagementObjectDownload, ManagementProductError> {
+        let _ = (bucket_id, key);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Stores raw bytes then commits one logical current/version record.
+    async fn storage_object_put(
+        &self,
+        bucket_id: &str,
+        key: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        request: &ManagementObjectPut,
+        bytes: Vec<u8>,
+    ) -> Result<ManagementObjectResult, ManagementProductError> {
+        let _ = (bucket_id, key, operation_id, actor, request, bytes);
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Deletes one exact current object version with CAS.
+    async fn storage_object_delete(
+        &self,
+        bucket_id: &str,
+        key: &str,
+        operation_id: OperationId,
+        actor: OperatorId,
+        expected_version_id: &str,
+        at_micros: &str,
+    ) -> Result<ManagementObjectResult, ManagementProductError> {
+        let _ = (
+            bucket_id,
+            key,
+            operation_id,
+            actor,
+            expected_version_id,
+            at_micros,
+        );
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Looks up one exact-scope object operation after an uncertain result.
+    async fn storage_object_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagementObjectResult, ManagementProductError> {
         let _ = operation_id;
         Err(ManagementProductError::NotFound)
     }

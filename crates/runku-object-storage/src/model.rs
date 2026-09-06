@@ -2,7 +2,11 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use std::{collections::BTreeSet, fmt, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    str::FromStr,
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use runku_core::{EnvironmentScope, OperationId};
@@ -65,6 +69,11 @@ macro_rules! storage_id {
 }
 
 storage_id!(BucketId, "bkt_", "Identifies one logical bucket.");
+storage_id!(
+    ObjectVersionId,
+    "ovr_",
+    "Identifies one immutable logical object version."
+);
 storage_id!(
     AccessKeyId,
     "sak_",
@@ -876,6 +885,260 @@ pub struct AuditPage {
     pub events: Vec<AuditEvent>,
     /// Continuation cursor.
     pub next: Option<u64>,
+}
+
+/// One immutable logical object version projected without physical provider details.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectMetadata {
+    /// Exact Project/Environment owner.
+    pub scope: EnvironmentScope,
+    /// Owning logical bucket.
+    pub bucket_id: BucketId,
+    /// UTF-8 object key.
+    pub key: String,
+    /// Immutable version identity.
+    pub version_id: ObjectVersionId,
+    /// Byte length.
+    pub size: u64,
+    /// Lower-case SHA-256 digest.
+    pub sha256: [u8; 32],
+    /// Stable quoted Product `ETag` derived from SHA-256.
+    pub etag: String,
+    /// Bounded media type.
+    pub content_type: String,
+    /// Bounded user metadata with canonical lower-case keys.
+    pub metadata: BTreeMap<String, String>,
+    /// Creation time.
+    pub created_at: TimestampMicros,
+}
+
+impl ObjectMetadata {
+    /// Validates all public and persisted object invariants.
+    pub fn validate(&self) -> Result<(), ObjectStorageError> {
+        validate_object_key(&self.key)?;
+        validate_object_headers(&self.content_type, &self.metadata)?;
+        if self.created_at.get() < 0 || self.etag != object_etag(&self.sha256) {
+            return Err(ObjectStorageError::Corruption);
+        }
+        Ok(())
+    }
+}
+
+/// Bounded prefix/delimiter listing request ordered by full object key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectPageRequest {
+    /// Inclusive key prefix.
+    pub prefix: String,
+    /// Optional folder delimiter. v1 accepts only `/`.
+    pub delimiter: Option<char>,
+    /// Exclusive full-key cursor.
+    pub after: Option<String>,
+    /// Maximum combined objects and common prefixes.
+    pub limit: u16,
+}
+
+impl ObjectPageRequest {
+    /// Validates listing bounds and canonical values.
+    pub fn validate(&self) -> Result<(), ObjectStorageError> {
+        if self.prefix.len() > 1_024
+            || self.prefix.starts_with('/')
+            || self.prefix.chars().any(char::is_control)
+            || self.delimiter.is_some_and(|value| value != '/')
+            || self.limit == 0
+            || self.limit > MAX_PAGE_SIZE
+            || self
+                .after
+                .as_ref()
+                .is_some_and(|value| validate_object_key(value).is_err())
+        {
+            return Err(ObjectStorageError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
+/// One stable object browser page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectPage {
+    /// Exact owner scope.
+    pub scope: EnvironmentScope,
+    /// Exact logical bucket.
+    pub bucket_id: BucketId,
+    /// Requested prefix.
+    pub prefix: String,
+    /// Current objects not folded into a common prefix.
+    pub objects: Vec<ObjectMetadata>,
+    /// Canonically ordered folder-like prefixes.
+    pub common_prefixes: Vec<String>,
+    /// Exclusive full-key cursor, when more current keys remain.
+    pub next: Option<String>,
+}
+
+/// Idempotent intent for one object upload after bytes reached immutable physical storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PutObjectCommand {
+    /// Server-generated immutable version ID, excluded from the intent digest.
+    pub version_id: ObjectVersionId,
+    /// Exact logical key.
+    pub key: String,
+    /// Byte length.
+    pub size: u64,
+    /// SHA-256 content address.
+    pub sha256: [u8; 32],
+    /// Bounded media type.
+    pub content_type: String,
+    /// Bounded user metadata.
+    pub metadata: BTreeMap<String, String>,
+    /// Trusted actor.
+    pub actor: ObjectStorageActor,
+    /// Caller-pinned operation time.
+    pub at: TimestampMicros,
+}
+
+impl PutObjectCommand {
+    /// Validates a new command.
+    pub fn validate(&self) -> Result<(), ObjectStorageError> {
+        validate_object_key(&self.key)?;
+        validate_object_headers(&self.content_type, &self.metadata)?;
+        if self.at.get() < 0 {
+            return Err(ObjectStorageError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Returns the canonical client-intent digest; generated version and timestamp are excluded.
+    #[must_use]
+    pub fn digest(&self, scope: EnvironmentScope, bucket_id: BucketId) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"RUNKU_OBJECT_PUT_COMMAND_V1\0");
+        field(&mut digest, &scope.project_id().to_string());
+        field(&mut digest, &scope.environment_id().to_string());
+        field(&mut digest, &bucket_id.to_string());
+        field(&mut digest, &self.key);
+        unsigned(&mut digest, self.size);
+        digest.update(self.sha256);
+        field(&mut digest, &self.content_type);
+        unsigned(&mut digest, self.metadata.len() as u64);
+        for (key, value) in &self.metadata {
+            field(&mut digest, key);
+            field(&mut digest, value);
+        }
+        field(&mut digest, self.actor.as_str());
+        digest.finalize().into()
+    }
+}
+
+/// Idempotent exact-version delete intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeleteObjectCommand {
+    /// Exact logical key.
+    pub key: String,
+    /// Version that must still be current.
+    pub expected_version_id: ObjectVersionId,
+    /// Trusted actor.
+    pub actor: ObjectStorageActor,
+    /// Caller-pinned operation time.
+    pub at: TimestampMicros,
+}
+
+impl DeleteObjectCommand {
+    /// Validates a new command.
+    pub fn validate(&self) -> Result<(), ObjectStorageError> {
+        validate_object_key(&self.key)?;
+        if self.at.get() < 0 {
+            return Err(ObjectStorageError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Returns the canonical client-intent digest.
+    #[must_use]
+    pub fn digest(&self, scope: EnvironmentScope, bucket_id: BucketId) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"RUNKU_OBJECT_DELETE_COMMAND_V1\0");
+        field(&mut digest, &scope.project_id().to_string());
+        field(&mut digest, &scope.environment_id().to_string());
+        field(&mut digest, &bucket_id.to_string());
+        field(&mut digest, &self.key);
+        field(&mut digest, &self.expected_version_id.to_string());
+        field(&mut digest, self.actor.as_str());
+        digest.finalize().into()
+    }
+}
+
+/// Durable result used to reconcile uncertain object mutations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectOperation {
+    /// Exact owner scope.
+    pub scope: EnvironmentScope,
+    /// Idempotency identity.
+    pub operation_id: OperationId,
+    /// `put` or `delete`.
+    pub kind: &'static str,
+    /// Logical bucket.
+    pub bucket_id: BucketId,
+    /// Exact object key.
+    pub key: String,
+    /// Created or deleted version.
+    pub version_id: ObjectVersionId,
+    /// Completion time.
+    pub completed_at: TimestampMicros,
+}
+
+/// Object mutation result with exact replay evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectOperationResult {
+    /// Durable operation.
+    pub operation: ObjectOperation,
+    /// Current metadata after put; absent after delete.
+    pub object: Option<ObjectMetadata>,
+    /// Whether the durable journal supplied the result.
+    pub replayed: bool,
+}
+
+/// Validates one logical object key without interpreting it as a filesystem path.
+pub fn validate_object_key(value: &str) -> Result<(), ObjectStorageError> {
+    if value.is_empty()
+        || value.len() > 1_024
+        || value.starts_with('/')
+        || value.chars().any(char::is_control)
+        || value.split('/').any(|segment| segment == "..")
+    {
+        Err(ObjectStorageError::InvalidInput)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_object_headers(
+    content_type: &str,
+    metadata: &BTreeMap<String, String>,
+) -> Result<(), ObjectStorageError> {
+    if content_type.is_empty()
+        || content_type.len() > 255
+        || content_type.chars().any(char::is_control)
+        || metadata.len() > 32
+        || metadata.iter().any(|(key, value)| {
+            !valid_header(key) || value.len() > 1_024 || value.chars().any(char::is_control)
+        })
+    {
+        Err(ObjectStorageError::InvalidInput)
+    } else {
+        Ok(())
+    }
+}
+
+/// Returns the stable quoted SHA-256 Product `ETag`.
+#[must_use]
+pub fn object_etag(digest: &[u8; 32]) -> String {
+    let mut value = String::with_capacity(66);
+    value.push('"');
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(value, "{byte:02x}");
+    }
+    value.push('"');
+    value
 }
 
 /// Complete idempotent mutation intent consumed by repositories.

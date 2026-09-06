@@ -1,7 +1,8 @@
 //! Provider-independent logical Object Storage registry.
 //!
-//! This crate owns Product bucket configuration and scoped Product access-key contracts. It does
-//! not store object bytes and deliberately has no dependency on S3, HTTP, SQL, or a runtime.
+//! This crate owns Product bucket configuration, object metadata and scoped Product access-key
+//! contracts. Physical bytes remain behind a provider boundary and the crate deliberately has no
+//! dependency on S3, HTTP, SQL, or a runtime.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -17,8 +18,10 @@ pub use model::{
     AccessKeyPageRequest, AccessKeySecret, AccessKeyState, AuditEvent, AuditPage, AuditPageRequest,
     Bucket, BucketConfiguration, BucketId, BucketLifecycle, BucketName, BucketPage,
     BucketPageRequest, BucketPolicy, BucketQuota, BucketState, CorsMethod, CorsRule,
-    IssuedAccessKey, ObjectStorageActor, ObjectStorageCommand, ObjectStorageOperation,
-    ObjectStorageOperationKind, ObjectStorageOperationResult, SecretDigest, Versioning,
+    DeleteObjectCommand, IssuedAccessKey, ObjectMetadata, ObjectOperation, ObjectOperationResult,
+    ObjectPage, ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand,
+    ObjectStorageOperation, ObjectStorageOperationKind, ObjectStorageOperationResult,
+    ObjectVersionId, PutObjectCommand, SecretDigest, Versioning, object_etag, validate_object_key,
 };
 pub use repository::{
     ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,

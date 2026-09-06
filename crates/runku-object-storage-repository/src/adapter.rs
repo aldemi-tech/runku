@@ -3,6 +3,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::{
+    collections::BTreeSet,
     fmt::Write as _,
     str::FromStr,
     sync::{
@@ -17,9 +18,11 @@ use runku_core::{EnvironmentScope, OperationId};
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest,
     AccessKeyState, AuditEvent, AuditPage, AuditPageRequest, Bucket, BucketId, BucketPage,
-    BucketPageRequest, BucketState, ObjectStorageActor, ObjectStorageCommand, ObjectStorageError,
-    ObjectStorageOperation, ObjectStorageOperationResult, ObjectStorageRepository,
-    ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,
+    BucketPageRequest, BucketState, DeleteObjectCommand, ObjectMetadata, ObjectOperation,
+    ObjectOperationResult, ObjectPage, ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand,
+    ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
+    ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,
+    ObjectVersionId, PutObjectCommand, object_etag,
 };
 use runku_value::TimestampMicros;
 use sha2::{Digest, Sha256};
@@ -37,7 +40,15 @@ const MIGRATION_1: &[&str] = &[
     "CREATE TABLE runku_storage_operations (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, operation_id TEXT NOT NULL, command_digest BYTEA NOT NULL CHECK(length(command_digest)=32), kind TEXT NOT NULL CHECK(kind IN ('create_bucket','update_bucket','archive_bucket','issue_access_key','rotate_access_key','revoke_access_key')), bucket_id TEXT NOT NULL, access_key_id TEXT NULL, revision BIGINT NOT NULL CHECK(revision > 0), completed_at_micros BIGINT NOT NULL CHECK(completed_at_micros >= 0), PRIMARY KEY(project_id,environment_id,operation_id))",
     "CREATE TABLE runku_storage_audit (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, sequence BIGINT NOT NULL CHECK(sequence > 0), operation_id TEXT NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL, bucket_id TEXT NOT NULL, access_key_id TEXT NULL, revision BIGINT NOT NULL CHECK(revision > 0), occurred_at_micros BIGINT NOT NULL CHECK(occurred_at_micros >= 0), PRIMARY KEY(project_id,environment_id,sequence), UNIQUE(project_id,environment_id,operation_id))",
 ];
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, MIGRATION_1)];
+const MIGRATION_2: &[&str] = &[
+    "CREATE TABLE runku_storage_objects (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, bucket_id TEXT NOT NULL, object_key TEXT NOT NULL, version_id TEXT NOT NULL, size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0), sha256 BYTEA NOT NULL CHECK(length(sha256)=32), etag TEXT NOT NULL, content_type TEXT NOT NULL, metadata_json TEXT NOT NULL, created_at_micros BIGINT NOT NULL CHECK(created_at_micros >= 0), PRIMARY KEY(project_id,environment_id,bucket_id,object_key), FOREIGN KEY(project_id,environment_id,bucket_id) REFERENCES runku_storage_buckets(project_id,environment_id,bucket_id) ON DELETE RESTRICT)",
+    "CREATE INDEX runku_storage_objects_by_prefix ON runku_storage_objects(project_id,environment_id,bucket_id,object_key)",
+    "CREATE TABLE runku_storage_object_versions (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, bucket_id TEXT NOT NULL, object_key TEXT NOT NULL, version_id TEXT NOT NULL, size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0), sha256 BYTEA NOT NULL CHECK(length(sha256)=32), etag TEXT NOT NULL, content_type TEXT NOT NULL, metadata_json TEXT NOT NULL, created_at_micros BIGINT NOT NULL CHECK(created_at_micros >= 0), PRIMARY KEY(project_id,environment_id,bucket_id,object_key,version_id), FOREIGN KEY(project_id,environment_id,bucket_id) REFERENCES runku_storage_buckets(project_id,environment_id,bucket_id) ON DELETE RESTRICT)",
+    "CREATE INDEX runku_storage_object_versions_by_key ON runku_storage_object_versions(project_id,environment_id,bucket_id,object_key,created_at_micros,version_id)",
+    "CREATE TABLE runku_storage_object_operations (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, operation_id TEXT NOT NULL, command_digest BYTEA NOT NULL CHECK(length(command_digest)=32), kind TEXT NOT NULL CHECK(kind IN ('put','delete')), bucket_id TEXT NOT NULL, object_key TEXT NOT NULL, version_id TEXT NOT NULL, completed_at_micros BIGINT NOT NULL CHECK(completed_at_micros >= 0), PRIMARY KEY(project_id,environment_id,operation_id))",
+    "CREATE TABLE runku_storage_object_audit (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, sequence BIGINT NOT NULL CHECK(sequence > 0), operation_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('put','delete')), actor TEXT NOT NULL, bucket_id TEXT NOT NULL, object_key TEXT NOT NULL, version_id TEXT NOT NULL, size_bytes BIGINT NULL CHECK(size_bytes IS NULL OR size_bytes >= 0), occurred_at_micros BIGINT NOT NULL CHECK(occurred_at_micros >= 0), PRIMARY KEY(project_id,environment_id,sequence), UNIQUE(project_id,environment_id,operation_id))",
+];
+const MIGRATIONS: &[(i64, &[&str])] = &[(1, MIGRATION_1), (2, MIGRATION_2)];
 
 /// Operational role selected for repository composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,6 +301,72 @@ impl ObjectStorageRepository for SqlObjectStorageRepository {
         self.counters.reads.fetch_add(1, Ordering::Relaxed);
         list_audit(&self.pool, scope, request).await
     }
+    async fn put_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        operation_id: OperationId,
+        command: &PutObjectCommand,
+    ) -> Result<ObjectOperationResult, ObjectStorageError> {
+        let result = put_object(
+            &self.pool,
+            self.backend,
+            scope,
+            bucket_id,
+            operation_id,
+            command,
+        )
+        .await;
+        record_object_mutation(&self.counters, &result);
+        result
+    }
+    async fn get_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        load_object(&self.pool, scope, bucket_id, key).await
+    }
+    async fn list_objects(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        request: &ObjectPageRequest,
+    ) -> Result<ObjectPage, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        list_objects(&self.pool, scope, bucket_id, request).await
+    }
+    async fn delete_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        operation_id: OperationId,
+        command: &DeleteObjectCommand,
+    ) -> Result<ObjectOperationResult, ObjectStorageError> {
+        let result = delete_object(
+            &self.pool,
+            self.backend,
+            scope,
+            bucket_id,
+            operation_id,
+            command,
+        )
+        .await;
+        record_object_mutation(&self.counters, &result);
+        result
+    }
+    async fn object_operation(
+        &self,
+        scope: EnvironmentScope,
+        operation_id: OperationId,
+    ) -> Result<Option<ObjectOperation>, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        load_object_operation(&self.pool, scope, operation_id)
+            .await
+            .map(|value| value.map(|stored| stored.operation))
+    }
     async fn health(&self) -> Result<(), ObjectStorageError> {
         sqlx::query_scalar::<_, i64>("SELECT 1")
             .fetch_one(&self.pool)
@@ -309,6 +386,33 @@ impl ObjectStorageRepository for SqlObjectStorageRepository {
             pool_idle: u32::try_from(self.pool.num_idle()).unwrap_or(u32::MAX),
         }
     }
+}
+
+fn record_object_mutation(
+    counters: &Counters,
+    result: &Result<ObjectOperationResult, ObjectStorageError>,
+) {
+    match result {
+        Ok(value) if value.replayed => {
+            counters.replays.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(_) => {
+            counters.commands.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(ObjectStorageError::Conflict | ObjectStorageError::OperationIdReused) => {
+            counters.conflicts.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(error) if error.retryable() => {
+            counters.retryable_errors.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {}
+    }
+}
+
+#[derive(Debug)]
+struct StoredObjectOperation {
+    digest: Vec<u8>,
+    operation: ObjectOperation,
 }
 
 #[derive(Debug)]
@@ -398,6 +502,12 @@ async fn apply(
                 .await?
                 .is_some_and(|updated_at| *at < updated_at)
             {
+                return rollback(tx, ObjectStorageError::Conflict).await;
+            }
+            let object_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3")
+                .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+                .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
+            if object_count != 0 {
                 return rollback(tx, ObjectStorageError::Conflict).await;
             }
             let revision = expected_revision
@@ -974,6 +1084,420 @@ async fn list_audit(
         scope,
         events,
         next,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+async fn put_object(
+    pool: &AnyPool,
+    backend: ObjectStorageRepositoryBackend,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    operation_id: OperationId,
+    command: &PutObjectCommand,
+) -> Result<ObjectOperationResult, ObjectStorageError> {
+    let digest = command.digest(scope, bucket_id);
+    let mut tx = begin_write(pool, backend).await?;
+    if let Some(stored) = load_object_operation_tx(&mut tx, scope, operation_id).await? {
+        if stored.digest.as_slice() != digest {
+            return rollback(tx, ObjectStorageError::OperationIdReused).await;
+        }
+        let object = load_object_version_tx(
+            &mut tx,
+            scope,
+            stored.operation.bucket_id,
+            &stored.operation.key,
+            stored.operation.version_id,
+        )
+        .await?
+        .ok_or(ObjectStorageError::Corruption)?;
+        tx.commit().await.map_err(map_commit_error)?;
+        return Ok(ObjectOperationResult {
+            operation: stored.operation,
+            object: Some(object),
+            replayed: true,
+        });
+    }
+    command.validate()?;
+    let bucket = load_bucket_tx(&mut tx, backend, scope, bucket_id)
+        .await?
+        .ok_or(ObjectStorageError::NotFound)?;
+    if bucket.state != BucketState::Active {
+        return rollback(tx, ObjectStorageError::Conflict).await;
+    }
+    if command.size > bucket.configuration.quota.max_object_bytes {
+        return rollback(tx, ObjectStorageError::LimitExceeded).await;
+    }
+    let current = load_object_tx(&mut tx, scope, bucket_id, &command.key).await?;
+    let row = sqlx::query("SELECT COALESCE(SUM(size_bytes),0) AS total_bytes,COUNT(*) AS object_count FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+        .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
+    let total: i64 = row.try_get("total_bytes").map_err(corrupt)?;
+    let count: i64 = row.try_get("object_count").map_err(corrupt)?;
+    let prior_size = current.as_ref().map_or(0, |value| value.size);
+    let next_total = u64::try_from(total)
+        .map_err(corrupt)?
+        .checked_sub(prior_size)
+        .and_then(|value| value.checked_add(command.size))
+        .ok_or(ObjectStorageError::LimitExceeded)?;
+    let next_count = u64::try_from(count)
+        .map_err(corrupt)?
+        .checked_add(u64::from(current.is_none()))
+        .ok_or(ObjectStorageError::LimitExceeded)?;
+    if next_total > bucket.configuration.quota.max_total_bytes
+        || next_count > bucket.configuration.quota.max_objects
+    {
+        return rollback(tx, ObjectStorageError::LimitExceeded).await;
+    }
+    let object = ObjectMetadata {
+        scope,
+        bucket_id,
+        key: command.key.clone(),
+        version_id: command.version_id,
+        size: command.size,
+        sha256: command.sha256,
+        etag: object_etag(&command.sha256),
+        content_type: command.content_type.clone(),
+        metadata: command.metadata.clone(),
+        created_at: command.at,
+    };
+    object.validate().map_err(input_error)?;
+    insert_object_version(&mut tx, &object).await?;
+    upsert_current_object(&mut tx, &object).await?;
+    let operation = ObjectOperation {
+        scope,
+        operation_id,
+        kind: "put",
+        bucket_id,
+        key: command.key.clone(),
+        version_id: command.version_id,
+        completed_at: command.at,
+    };
+    insert_object_operation(&mut tx, &operation, &digest).await?;
+    insert_object_audit(
+        &mut tx,
+        &operation,
+        command.actor.as_str(),
+        Some(command.size),
+    )
+    .await?;
+    tx.commit().await.map_err(map_commit_error)?;
+    Ok(ObjectOperationResult {
+        operation,
+        object: Some(object),
+        replayed: false,
+    })
+}
+
+async fn delete_object(
+    pool: &AnyPool,
+    backend: ObjectStorageRepositoryBackend,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    operation_id: OperationId,
+    command: &DeleteObjectCommand,
+) -> Result<ObjectOperationResult, ObjectStorageError> {
+    let digest = command.digest(scope, bucket_id);
+    let mut tx = begin_write(pool, backend).await?;
+    if let Some(stored) = load_object_operation_tx(&mut tx, scope, operation_id).await? {
+        if stored.digest.as_slice() != digest {
+            return rollback(tx, ObjectStorageError::OperationIdReused).await;
+        }
+        tx.commit().await.map_err(map_commit_error)?;
+        return Ok(ObjectOperationResult {
+            operation: stored.operation,
+            object: None,
+            replayed: true,
+        });
+    }
+    command.validate()?;
+    let bucket = load_bucket_tx(&mut tx, backend, scope, bucket_id)
+        .await?
+        .ok_or(ObjectStorageError::NotFound)?;
+    if bucket.state != BucketState::Active {
+        return rollback(tx, ObjectStorageError::Conflict).await;
+    }
+    let current = load_object_tx(&mut tx, scope, bucket_id, &command.key)
+        .await?
+        .ok_or(ObjectStorageError::NotFound)?;
+    if current.version_id != command.expected_version_id {
+        return rollback(tx, ObjectStorageError::Conflict).await;
+    }
+    let deleted = sqlx::query("DELETE FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4 AND version_id=$5")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+        .bind(&command.key).bind(command.expected_version_id.to_string()).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+    if deleted.rows_affected() != 1 {
+        return rollback(tx, ObjectStorageError::Conflict).await;
+    }
+    let operation = ObjectOperation {
+        scope,
+        operation_id,
+        kind: "delete",
+        bucket_id,
+        key: command.key.clone(),
+        version_id: command.expected_version_id,
+        completed_at: command.at,
+    };
+    insert_object_operation(&mut tx, &operation, &digest).await?;
+    insert_object_audit(
+        &mut tx,
+        &operation,
+        command.actor.as_str(),
+        Some(current.size),
+    )
+    .await?;
+    tx.commit().await.map_err(map_commit_error)?;
+    Ok(ObjectOperationResult {
+        operation,
+        object: None,
+        replayed: false,
+    })
+}
+
+async fn insert_object_version(
+    tx: &mut Transaction<'_, Any>,
+    value: &ObjectMetadata,
+) -> Result<(), ObjectStorageError> {
+    let metadata =
+        serde_json::to_string(&value.metadata).map_err(|_| ObjectStorageError::Internal)?;
+    sqlx::query("INSERT INTO runku_storage_object_versions(project_id,environment_id,bucket_id,object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+        .bind(value.scope.project_id().to_string()).bind(value.scope.environment_id().to_string())
+        .bind(value.bucket_id.to_string()).bind(&value.key).bind(value.version_id.to_string())
+        .bind(to_i64(value.size)?).bind(value.sha256.as_slice()).bind(&value.etag)
+        .bind(&value.content_type).bind(metadata).bind(value.created_at.get())
+        .execute(&mut **tx).await.map_err(map_constraint_error)?;
+    Ok(())
+}
+
+async fn upsert_current_object(
+    tx: &mut Transaction<'_, Any>,
+    value: &ObjectMetadata,
+) -> Result<(), ObjectStorageError> {
+    let metadata =
+        serde_json::to_string(&value.metadata).map_err(|_| ObjectStorageError::Internal)?;
+    sqlx::query("INSERT INTO runku_storage_objects(project_id,environment_id,bucket_id,object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(project_id,environment_id,bucket_id,object_key) DO UPDATE SET version_id=excluded.version_id,size_bytes=excluded.size_bytes,sha256=excluded.sha256,etag=excluded.etag,content_type=excluded.content_type,metadata_json=excluded.metadata_json,created_at_micros=excluded.created_at_micros")
+        .bind(value.scope.project_id().to_string()).bind(value.scope.environment_id().to_string())
+        .bind(value.bucket_id.to_string()).bind(&value.key).bind(value.version_id.to_string())
+        .bind(to_i64(value.size)?).bind(value.sha256.as_slice()).bind(&value.etag)
+        .bind(&value.content_type).bind(metadata).bind(value.created_at.get())
+        .execute(&mut **tx).await.map_err(map_constraint_error)?;
+    Ok(())
+}
+
+async fn load_object(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    key: &str,
+) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+    let row = sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(key)
+        .fetch_optional(pool).await.map_err(map_sqlx_error)?;
+    row.map(|row| decode_object(scope, bucket_id, &row))
+        .transpose()
+}
+
+async fn load_object_tx(
+    tx: &mut Transaction<'_, Any>,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    key: &str,
+) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+    let row = sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(key)
+        .fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
+    row.map(|row| decode_object(scope, bucket_id, &row))
+        .transpose()
+}
+
+async fn load_object_version_tx(
+    tx: &mut Transaction<'_, Any>,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    key: &str,
+    version_id: ObjectVersionId,
+) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+    let row = sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_object_versions WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4 AND version_id=$5")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(key).bind(version_id.to_string())
+        .fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
+    row.map(|row| decode_object(scope, bucket_id, &row))
+        .transpose()
+}
+
+fn decode_object(
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    row: &sqlx::any::AnyRow,
+) -> Result<ObjectMetadata, ObjectStorageError> {
+    let digest: Vec<u8> = row.try_get("sha256").map_err(corrupt)?;
+    let sha256: [u8; 32] = digest.try_into().map_err(corrupt)?;
+    let metadata_json: String = row.try_get("metadata_json").map_err(corrupt)?;
+    let value = ObjectMetadata {
+        scope,
+        bucket_id,
+        key: row.try_get("object_key").map_err(corrupt)?,
+        version_id: parse_domain(row, "version_id")?,
+        size: u64::try_from(row.try_get::<i64, _>("size_bytes").map_err(corrupt)?)
+            .map_err(corrupt)?,
+        sha256,
+        etag: row.try_get("etag").map_err(corrupt)?,
+        content_type: row.try_get("content_type").map_err(corrupt)?,
+        metadata: serde_json::from_str(&metadata_json).map_err(corrupt)?,
+        created_at: TimestampMicros::new(row.try_get("created_at_micros").map_err(corrupt)?),
+    };
+    value.validate()?;
+    Ok(value)
+}
+
+async fn list_objects(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    request: &ObjectPageRequest,
+) -> Result<ObjectPage, ObjectStorageError> {
+    request.validate()?;
+    if load_bucket(pool, scope, bucket_id).await?.is_none() {
+        return Err(ObjectStorageError::NotFound);
+    }
+    let pattern = format!("{}%", escape_like(&request.prefix));
+    let limit = i64::from(request.limit) + 1;
+    let rows = if let Some(after) = &request.after {
+        sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' AND object_key>$5 ORDER BY object_key LIMIT $6")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+            .bind(&pattern).bind(after).bind(limit).fetch_all(pool).await.map_err(map_sqlx_error)?
+    } else {
+        sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' ORDER BY object_key LIMIT $5")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+            .bind(&pattern).bind(limit).fetch_all(pool).await.map_err(map_sqlx_error)?
+    };
+    let more = rows.len() > usize::from(request.limit);
+    let visible = &rows[..rows.len().min(usize::from(request.limit))];
+    let next = more
+        .then(|| {
+            visible
+                .last()
+                .and_then(|row| row.try_get::<String, _>("object_key").ok())
+        })
+        .flatten();
+    let mut objects = Vec::new();
+    let mut prefixes = BTreeSet::new();
+    for row in visible {
+        let object = decode_object(scope, bucket_id, row)?;
+        let suffix = object
+            .key
+            .strip_prefix(&request.prefix)
+            .ok_or(ObjectStorageError::Corruption)?;
+        if request.delimiter == Some('/') {
+            if let Some(position) = suffix.find('/') {
+                prefixes.insert(format!("{}{}/", request.prefix, &suffix[..position]));
+                continue;
+            }
+        }
+        objects.push(object);
+    }
+    Ok(ObjectPage {
+        scope,
+        bucket_id,
+        prefix: request.prefix.clone(),
+        objects,
+        common_prefixes: prefixes.into_iter().collect(),
+        next,
+    })
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+async fn insert_object_operation(
+    tx: &mut Transaction<'_, Any>,
+    operation: &ObjectOperation,
+    digest: &[u8; 32],
+) -> Result<(), ObjectStorageError> {
+    sqlx::query("INSERT INTO runku_storage_object_operations(project_id,environment_id,operation_id,command_digest,kind,bucket_id,object_key,version_id,completed_at_micros) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+        .bind(operation.scope.project_id().to_string()).bind(operation.scope.environment_id().to_string())
+        .bind(operation.operation_id.to_string()).bind(digest.as_slice()).bind(operation.kind)
+        .bind(operation.bucket_id.to_string()).bind(&operation.key).bind(operation.version_id.to_string())
+        .bind(operation.completed_at.get()).execute(&mut **tx).await.map_err(map_constraint_error)?;
+    Ok(())
+}
+
+async fn insert_object_audit(
+    tx: &mut Transaction<'_, Any>,
+    operation: &ObjectOperation,
+    actor: &str,
+    size: Option<u64>,
+) -> Result<(), ObjectStorageError> {
+    let current = sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(sequence),0) FROM runku_storage_object_audit WHERE project_id=$1 AND environment_id=$2")
+        .bind(operation.scope.project_id().to_string()).bind(operation.scope.environment_id().to_string())
+        .fetch_one(&mut **tx).await.map_err(map_sqlx_error)?;
+    let sequence = current
+        .checked_add(1)
+        .ok_or(ObjectStorageError::LimitExceeded)?;
+    sqlx::query("INSERT INTO runku_storage_object_audit(project_id,environment_id,sequence,operation_id,kind,actor,bucket_id,object_key,version_id,size_bytes,occurred_at_micros) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+        .bind(operation.scope.project_id().to_string()).bind(operation.scope.environment_id().to_string())
+        .bind(sequence).bind(operation.operation_id.to_string()).bind(operation.kind).bind(actor)
+        .bind(operation.bucket_id.to_string()).bind(&operation.key).bind(operation.version_id.to_string())
+        .bind(size.map(to_i64).transpose()?).bind(operation.completed_at.get())
+        .execute(&mut **tx).await.map_err(map_constraint_error)?;
+    Ok(())
+}
+
+async fn load_object_operation(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    operation_id: OperationId,
+) -> Result<Option<StoredObjectOperation>, ObjectStorageError> {
+    let row = sqlx::query("SELECT command_digest,kind,bucket_id,object_key,version_id,completed_at_micros FROM runku_storage_object_operations WHERE project_id=$1 AND environment_id=$2 AND operation_id=$3")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(operation_id.to_string())
+        .fetch_optional(pool).await.map_err(map_sqlx_error)?;
+    row.map(|row| decode_object_operation(scope, operation_id, &row))
+        .transpose()
+}
+
+async fn load_object_operation_tx(
+    tx: &mut Transaction<'_, Any>,
+    scope: EnvironmentScope,
+    operation_id: OperationId,
+) -> Result<Option<StoredObjectOperation>, ObjectStorageError> {
+    let row = sqlx::query("SELECT command_digest,kind,bucket_id,object_key,version_id,completed_at_micros FROM runku_storage_object_operations WHERE project_id=$1 AND environment_id=$2 AND operation_id=$3")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(operation_id.to_string())
+        .fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
+    row.map(|row| decode_object_operation(scope, operation_id, &row))
+        .transpose()
+}
+
+fn decode_object_operation(
+    scope: EnvironmentScope,
+    operation_id: OperationId,
+    row: &sqlx::any::AnyRow,
+) -> Result<StoredObjectOperation, ObjectStorageError> {
+    let digest: Vec<u8> = row.try_get("command_digest").map_err(corrupt)?;
+    if digest.len() != 32 {
+        return Err(ObjectStorageError::Corruption);
+    }
+    let kind: String = row.try_get("kind").map_err(corrupt)?;
+    let kind = match kind.as_str() {
+        "put" => "put",
+        "delete" => "delete",
+        _ => return Err(ObjectStorageError::Corruption),
+    };
+    Ok(StoredObjectOperation {
+        digest,
+        operation: ObjectOperation {
+            scope,
+            operation_id,
+            kind,
+            bucket_id: parse_domain(row, "bucket_id")?,
+            key: row.try_get("object_key").map_err(corrupt)?,
+            version_id: parse_domain(row, "version_id")?,
+            completed_at: TimestampMicros::new(
+                row.try_get("completed_at_micros").map_err(corrupt)?,
+            ),
+        },
     })
 }
 

@@ -20,8 +20,8 @@ use futures_util::{Stream, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use object_store::aws::AmazonS3ConfigKey;
 use object_store::{
-    GetOptions, GetRange, ObjectStore, ObjectStoreExt, WriteMultipart, aws::AmazonS3Builder,
-    local::LocalFileSystem, path::Path,
+    GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutMode, PutOptions, WriteMultipart,
+    aws::AmazonS3Builder, local::LocalFileSystem, path::Path,
 };
 use runku_core::EnvironmentScope;
 use runku_runtime::{
@@ -517,6 +517,134 @@ impl FileObjectStore {
             Err(error) => Err(map_object_error(error)),
         }
     }
+
+    /// Writes immutable content-addressed bytes for one logical Object Storage bucket.
+    ///
+    /// This namespace is physically disjoint from Application Files. Repeating the same digest is
+    /// safe; the caller must commit logical key/version metadata separately.
+    pub async fn put_logical_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: &str,
+        digest_hex: &str,
+        bytes: Bytes,
+        maximum: u64,
+    ) -> Result<(), FileStorageError> {
+        validate_logical_object_locator(bucket_id, digest_hex)?;
+        let size = u64::try_from(bytes.len()).map_err(|_| FileStorageError::LimitExceeded)?;
+        if size > maximum || hex_sha256(&bytes) != digest_hex {
+            return Err(FileStorageError::InvalidRequest);
+        }
+        self.ensure_filesystem_capacity(size, 0)?;
+        let path = self.logical_object_path(scope, bucket_id, digest_hex);
+        let result = tokio::time::timeout(
+            self.operation_timeout,
+            self.store.put_opts(
+                &path,
+                bytes.into(),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..PutOptions::default()
+                },
+            ),
+        )
+        .await
+        .map_err(|_| FileStorageError::Unavailable)?;
+        match result {
+            Ok(_) => Ok(()),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                let metadata = tokio::time::timeout(self.operation_timeout, self.store.head(&path))
+                    .await
+                    .map_err(|_| FileStorageError::Unavailable)?
+                    .map_err(map_object_error)?;
+                if metadata.size == size {
+                    Ok(())
+                } else {
+                    Err(FileStorageError::Corruption)
+                }
+            }
+            Err(error) => Err(map_object_error(error)),
+        }
+    }
+
+    /// Reads and verifies one immutable content-addressed logical object.
+    pub async fn get_logical_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: &str,
+        digest_hex: &str,
+        expected_size: u64,
+        maximum: u64,
+    ) -> Result<Bytes, FileStorageError> {
+        validate_logical_object_locator(bucket_id, digest_hex)?;
+        if expected_size > maximum {
+            return Err(FileStorageError::LimitExceeded);
+        }
+        let result = tokio::time::timeout(
+            self.operation_timeout,
+            self.store
+                .get(&self.logical_object_path(scope, bucket_id, digest_hex)),
+        )
+        .await
+        .map_err(|_| FileStorageError::Unavailable)?
+        .map_err(map_object_error)?;
+        if result.meta.size != expected_size {
+            return Err(FileStorageError::Corruption);
+        }
+        let bytes = tokio::time::timeout(self.operation_timeout, result.bytes())
+            .await
+            .map_err(|_| FileStorageError::Unavailable)?
+            .map_err(map_object_error)?;
+        if u64::try_from(bytes.len()).map_err(|_| FileStorageError::LimitExceeded)? != expected_size
+            || hex_sha256(&bytes) != digest_hex
+        {
+            return Err(FileStorageError::Corruption);
+        }
+        Ok(bytes)
+    }
+
+    fn logical_object_path(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: &str,
+        digest_hex: &str,
+    ) -> Path {
+        let relative = format!(
+            "v1/projects/{}/environments/{}/object-storage/{bucket_id}/{digest_hex}",
+            scope.project_id(),
+            scope.environment_id(),
+        );
+        Path::from(if self.prefix.is_empty() {
+            relative
+        } else {
+            format!("{}/{relative}", self.prefix)
+        })
+    }
+}
+
+fn validate_logical_object_locator(
+    bucket_id: &str,
+    digest_hex: &str,
+) -> Result<(), FileStorageError> {
+    if bucket_id.len() != 30
+        || !bucket_id.starts_with("bkt_")
+        || !bucket_id[4..].bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z'))
+        || digest_hex.len() != 64
+        || !digest_hex.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        Err(FileStorageError::InvalidRequest)
+    } else {
+        Ok(())
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 /// Download metadata and stream after a transfer grant has been verified.
@@ -2050,6 +2178,52 @@ mod tests {
             Err(FileStorageError::InvalidRequest)
         ));
         assert_eq!(std::fs::metadata(public)?.mode() & 0o777, 0o755);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_objects_use_a_disjoint_content_addressed_namespace()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = TempDir::new()?;
+        let root = temporary.path().join("objects");
+        let store = FileObjectStore::filesystem(&root).await?;
+        let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+        let bucket = format!("bkt_{}", Ulid::generate());
+        let bytes = Bytes::from_static(b"logical object");
+        let digest = hex_sha256(&bytes);
+        store
+            .put_logical_object(scope, &bucket, &digest, bytes.clone(), 1024)
+            .await?;
+        store
+            .put_logical_object(scope, &bucket, &digest, bytes.clone(), 1024)
+            .await?;
+        assert_eq!(
+            store
+                .get_logical_object(scope, &bucket, &digest, bytes.len() as u64, 1024)
+                .await?,
+            bytes
+        );
+        assert!(matches!(
+            store
+                .put_logical_object(
+                    scope,
+                    &bucket,
+                    &digest,
+                    Bytes::from_static(b"tampered"),
+                    1024
+                )
+                .await,
+            Err(FileStorageError::InvalidRequest)
+        ));
+        assert!(
+            !root
+                .join(format!(
+                    "v1/projects/{}/environments/{}/files/{digest}",
+                    scope.project_id(),
+                    scope.environment_id()
+                ))
+                .exists()
+        );
         Ok(())
     }
 

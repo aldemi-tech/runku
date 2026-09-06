@@ -1,13 +1,18 @@
 //! Shared SQLite/PostgreSQL registry conformance and adversarial coverage.
 
-use std::{collections::BTreeSet, error::Error, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    sync::Arc,
+};
 
 use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyOperation, AccessKeyPageRequest, AccessKeyState,
     AuditPageRequest, BucketConfiguration, BucketLifecycle, BucketPageRequest, BucketPolicy,
-    BucketQuota, BucketState, ObjectStorageActor, ObjectStorageError, ObjectStorageRepository,
-    ObjectStorageRepositoryBackend, ObjectStorageService, SecretDigestKey, Versioning,
+    BucketQuota, BucketState, DeleteObjectCommand, ObjectPageRequest, ObjectStorageActor,
+    ObjectStorageError, ObjectStorageRepository, ObjectStorageRepositoryBackend,
+    ObjectStorageService, ObjectVersionId, PutObjectCommand, SecretDigestKey, Versioning,
 };
 use runku_object_storage_repository::{
     ObjectStorageRepositoryConfig, RepositoryRole, SqlObjectStorageRepository,
@@ -427,6 +432,150 @@ async fn run_conformance(
         )
         .await?;
     let second_id = second.metadata.id;
+    let put_operation = OperationId::generate();
+    let put = service
+        .put_object(
+            scope,
+            bucket_id,
+            put_operation,
+            &PutObjectCommand {
+                version_id: ObjectVersionId::generate(),
+                key: "uploads/folder/image.png".to_owned(),
+                size: 4,
+                sha256: [5; 32],
+                content_type: "image/png".to_owned(),
+                metadata: BTreeMap::from([("cache-control".to_owned(), "private".to_owned())]),
+                actor: actor.clone(),
+                at: TimestampMicros::new(22),
+            },
+        )
+        .await?;
+    assert!(!put.replayed);
+    let object = put.object.as_ref().ok_or("put metadata missing")?;
+    let object_version = object.version_id;
+    assert_eq!(object.size, 4);
+    assert_eq!(
+        service.get_object(scope, bucket_id, &object.key).await?,
+        Some(object.clone())
+    );
+    let replay = service
+        .put_object(
+            scope,
+            bucket_id,
+            put_operation,
+            &PutObjectCommand {
+                version_id: ObjectVersionId::generate(),
+                key: object.key.clone(),
+                size: 4,
+                sha256: [5; 32],
+                content_type: "image/png".to_owned(),
+                metadata: BTreeMap::from([("cache-control".to_owned(), "private".to_owned())]),
+                actor: actor.clone(),
+                at: TimestampMicros::new(999),
+            },
+        )
+        .await?;
+    assert!(replay.replayed);
+    assert_eq!(replay.operation.version_id, object_version);
+    assert!(matches!(
+        service
+            .put_object(
+                scope,
+                bucket_id,
+                put_operation,
+                &PutObjectCommand {
+                    version_id: ObjectVersionId::generate(),
+                    key: object.key.clone(),
+                    size: 5,
+                    sha256: [6; 32],
+                    content_type: "image/png".to_owned(),
+                    metadata: BTreeMap::new(),
+                    actor: actor.clone(),
+                    at: TimestampMicros::new(23),
+                },
+            )
+            .await,
+        Err(ObjectStorageError::OperationIdReused)
+    ));
+    let page = service
+        .list_objects(
+            scope,
+            bucket_id,
+            &ObjectPageRequest {
+                prefix: "uploads/".to_owned(),
+                delimiter: Some('/'),
+                after: None,
+                limit: 10,
+            },
+        )
+        .await?;
+    assert!(page.objects.is_empty());
+    assert_eq!(page.common_prefixes, ["uploads/folder/"]);
+    assert!(
+        service
+            .get_object(other_scope, bucket_id, &object.key)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        service
+            .delete_object(
+                scope,
+                bucket_id,
+                OperationId::generate(),
+                &DeleteObjectCommand {
+                    key: object.key.clone(),
+                    expected_version_id: ObjectVersionId::generate(),
+                    actor: actor.clone(),
+                    at: TimestampMicros::new(23),
+                },
+            )
+            .await,
+        Err(ObjectStorageError::Conflict)
+    );
+    let delete_operation = OperationId::generate();
+    let deleted = service
+        .delete_object(
+            scope,
+            bucket_id,
+            delete_operation,
+            &DeleteObjectCommand {
+                key: object.key.clone(),
+                expected_version_id: object_version,
+                actor: actor.clone(),
+                at: TimestampMicros::new(23),
+            },
+        )
+        .await?;
+    assert!(!deleted.replayed);
+    assert!(
+        service
+            .get_object(scope, bucket_id, &object.key)
+            .await?
+            .is_none()
+    );
+    assert!(
+        service
+            .object_operation(scope, delete_operation)
+            .await?
+            .is_some()
+    );
+    assert!(
+        service
+            .delete_object(
+                scope,
+                bucket_id,
+                delete_operation,
+                &DeleteObjectCommand {
+                    key: object.key.clone(),
+                    expected_version_id: object_version,
+                    actor: actor.clone(),
+                    at: TimestampMicros::new(23),
+                },
+            )
+            .await?
+            .replayed
+    );
     let archived = service
         .archive_bucket(
             scope,

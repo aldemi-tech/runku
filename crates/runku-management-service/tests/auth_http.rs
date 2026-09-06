@@ -1,7 +1,7 @@
 //! Management HTTP contract coverage for bootstrap exchange and authenticated identity.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     str::FromStr as _,
     sync::{
         Arc,
@@ -24,11 +24,12 @@ use runku_management_service::{
     ManagementEnvironmentResult, ManagementHealthComponent, ManagementHttpConfig,
     ManagementHttpExposure, ManagementInstanceHealth, ManagementLogArchiveStatus,
     ManagementLogPage, ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery,
-    ManagementMetric, ManagementMetrics, ManagementProduct, ManagementProductError,
-    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
-    ManagementScheduledPage, ManagementServingCompatibility, ManagementServingRelease,
-    ManagementWorkspacePublish, OidcClientConfiguration, build_management_router,
-    build_management_router_with_product,
+    ManagementMetric, ManagementMetrics, ManagementObject, ManagementObjectDownload,
+    ManagementObjectPage, ManagementObjectPut, ManagementObjectResult, ManagementProduct,
+    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
+    ManagementResolvedTarget, ManagementScheduledPage, ManagementServingCompatibility,
+    ManagementServingRelease, ManagementWorkspacePublish, OidcClientConfiguration,
+    build_management_router, build_management_router_with_product,
 };
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, ManagedSourceAuthority,
@@ -60,6 +61,7 @@ struct DataProbeProduct {
     writes: AtomicUsize,
     credential_reads: AtomicUsize,
     storage_reads: AtomicUsize,
+    storage_writes: AtomicUsize,
     environment_reads: AtomicUsize,
     cron_reads: AtomicUsize,
     cron_writes: AtomicUsize,
@@ -287,6 +289,62 @@ impl ManagementProduct for DataProbeProduct {
         })
     }
 
+    async fn storage_objects(
+        &self,
+        _bucket_id: &str,
+        prefix: &str,
+        _delimiter: Option<char>,
+        _after: Option<&str>,
+        _limit: u16,
+    ) -> Result<ManagementObjectPage, ManagementProductError> {
+        self.storage_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementObjectPage {
+            version: 1,
+            prefix: prefix.to_owned(),
+            objects: Vec::new(),
+            common_prefixes: Vec::new(),
+            next: None,
+        })
+    }
+
+    async fn storage_object(
+        &self,
+        _bucket_id: &str,
+        key: &str,
+    ) -> Result<ManagementObjectDownload, ManagementProductError> {
+        self.storage_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementObjectDownload {
+            object: probe_object(key),
+            bytes: b"object bytes".to_vec(),
+        })
+    }
+
+    async fn storage_object_put(
+        &self,
+        _bucket_id: &str,
+        key: &str,
+        operation_id: OperationId,
+        _actor: runku_core::OperatorId,
+        request: &ManagementObjectPut,
+        bytes: Vec<u8>,
+    ) -> Result<ManagementObjectResult, ManagementProductError> {
+        assert_eq!(request.content_type, "text/plain");
+        assert_eq!(request.at_micros, "1900000000000010");
+        assert_eq!(
+            request.metadata.get("cache-control").map(String::as_str),
+            Some("private")
+        );
+        assert_eq!(bytes, b"object bytes");
+        self.storage_writes.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagementObjectResult {
+            object: Some(probe_object(key)),
+            operation_id: operation_id.to_string(),
+            kind: "put".to_owned(),
+            version_id: "ovr_00000000000000000000000001".to_owned(),
+            replayed: false,
+        })
+    }
+
     async fn publish(
         &self,
         _actor: &str,
@@ -366,6 +424,19 @@ impl ManagementProduct for DataProbeProduct {
         _request: &ManagementLogPruneRequest,
     ) -> Result<ManagementLogPruneResult, ManagementProductError> {
         Err(ManagementProductError::Invalid)
+    }
+}
+
+fn probe_object(key: &str) -> ManagementObject {
+    ManagementObject {
+        key: key.to_owned(),
+        version_id: "ovr_00000000000000000000000001".to_owned(),
+        size_bytes: "12".to_owned(),
+        etag: format!("\"{}\"", "a".repeat(64)),
+        sha256: "a".repeat(64),
+        content_type: "text/plain".to_owned(),
+        metadata: BTreeMap::from([("cache-control".to_owned(), "private".to_owned())]),
+        created_at_micros: "1900000000000010".to_owned(),
     }
 }
 
@@ -854,6 +925,26 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_003),
         )
         .await?;
+    let storage_manager = identity
+        .login_with_managed_external_identity(
+            ExternalOperatorIdentity {
+                provider_id: "test".to_owned(),
+                subject_id: "storage-manager".to_owned(),
+            },
+            OperatorName::from_str("Storage manager")?,
+            ManagedSourceAuthority::from_str("https://test.runku.example")?,
+            1,
+            vec![OperatorGrant {
+                scope: AccessScope::Environment(scope),
+                capabilities: BTreeSet::from([
+                    PlatformCapability::StorageRead,
+                    PlatformCapability::StorageManage,
+                ]),
+            }],
+            DeviceName::from_str("storage manager device")?,
+            TimestampMicros::new(1_900_000_000_000_009),
+        )
+        .await?;
     let automation_reader = identity
         .login_with_managed_external_identity(
             ExternalOperatorIdentity {
@@ -934,6 +1025,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         writes: AtomicUsize::new(0),
         credential_reads: AtomicUsize::new(0),
         storage_reads: AtomicUsize::new(0),
+        storage_writes: AtomicUsize::new(0),
         environment_reads: AtomicUsize::new(0),
         cron_reads: AtomicUsize::new(0),
         cron_writes: AtomicUsize::new(0),
@@ -974,6 +1066,16 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     );
     let storage_path = format!(
         "/v1/projects/{}/environments/{}/buckets?limit=10",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let object_list_path = format!(
+        "/v1/projects/{}/environments/{}/buckets/bkt_00000000000000000000000000/objects?prefix=docs%2F&delimiter=%2F&limit=10",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let object_path = format!(
+        "/v1/projects/{}/environments/{}/buckets/bkt_00000000000000000000000000/objects/docs/readme.txt",
         scope.project_id(),
         scope.environment_id()
     );
@@ -1142,6 +1244,75 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(product.storage_reads.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&object_list_path)
+                .header(header::AUTHORIZATION, format!("Bearer {storage_access}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.storage_reads.load(Ordering::SeqCst), 2);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::put(&object_path)
+                .header(header::AUTHORIZATION, format!("Bearer {storage_access}"))
+                .header(header::CONTENT_TYPE, "text/plain")
+                .header("idempotency-key", OperationId::generate().to_string())
+                .header("x-runku-at-micros", "1900000000000010")
+                .body(Body::from("denied"))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    assert_eq!(product.storage_writes.load(Ordering::SeqCst), 0);
+    let storage_manager_access = storage_manager.login.access_token.expose();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::put(&object_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {storage_manager_access}"),
+                )
+                .header(header::CONTENT_TYPE, "text/plain")
+                .header("idempotency-key", OperationId::generate().to_string())
+                .header("x-runku-at-micros", "1900000000000010")
+                .header("x-runku-meta-cache-control", "private")
+                .body(Body::from("object bytes"))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(product.storage_writes.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(&object_path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {storage_manager_access}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("\"{}\"", "a".repeat(64)).as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-runku-object-version")
+            .and_then(|value| value.to_str().ok()),
+        Some("ovr_00000000000000000000000001")
+    );
+    assert_eq!(to_bytes(response.into_body(), 1024).await?, "object bytes");
 
     let environment_access = environment_reader.login.access_token.expose();
     let response = router

@@ -43,13 +43,14 @@ use crate::{
     ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataInsertRequest,
     ManagementDataQuery, ManagementDataReplaceRequest, ManagementEnvironmentCreate,
     ManagementEnvironmentLifecycleChange, ManagementEnvironmentUpdate, ManagementLogPruneRequest,
-    ManagementLogQuery, ManagementProduct, ManagementProductError, ManagementServingPolicySet,
-    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
-    ManagementStorageAccessKeyRotate, OidcClientConfiguration,
+    ManagementLogQuery, ManagementObjectDownload, ManagementObjectPut, ManagementProduct,
+    ManagementProductError, ManagementServingPolicySet, ManagementStorageAccessKeyIssue,
+    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const MAX_DATA_ADMIN_BODY_BYTES: usize = 12 * 1024 * 1024;
+const MAX_OBJECT_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 const MANAGED_ENROLLMENT_HEADER: &str = "runku-managed-enrollment";
@@ -294,8 +295,23 @@ pub fn build_management_router_with_product(
             post(product_storage_access_key_revoke),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/buckets/{bucket_id}/objects",
+            get(product_storage_objects),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/buckets/{bucket_id}/objects/{*object_key}",
+            get(product_storage_object_get)
+                .put(product_storage_object_put)
+                .delete(product_storage_object_delete)
+                .layer(DefaultBodyLimit::max(MAX_OBJECT_BODY_BYTES)),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{environment_id}/storage-operations/{operation_id}",
             get(product_storage_operation),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/object-operations/{operation_id}",
+            get(product_storage_object_operation),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/application-clients",
@@ -1020,6 +1036,16 @@ struct StoragePageQuery {
     limit: u16,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ObjectPageQuery {
+    #[serde(default)]
+    prefix: String,
+    delimiter: Option<char>,
+    after: Option<String>,
+    limit: u16,
+}
+
 async fn product_buckets(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -1343,6 +1369,188 @@ async fn product_storage_operation(
         Err(response) => return *response,
     };
     match product.storage_operation(operation_id).await {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_objects(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket)): Path<(String, String, String)>,
+    Query(query): Query<ObjectPageQuery>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .storage_objects(
+            &bucket,
+            &query.prefix,
+            query.delimiter,
+            query.after.as_deref(),
+            query.limit,
+        )
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_object_operation(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, operation)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let Ok(operation_id) = operation.parse::<OperationId>() else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.storage_object_operation(operation_id).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_object_get(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket, object_key)): Path<(String, String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.storage_object(&bucket, &object_key).await {
+        Ok(result) => object_download_response(result),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_object_put(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket, object_key)): Path<(String, String, String, String)>,
+    bytes: Bytes,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let request = match object_put_headers(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .storage_object_put(
+            &bucket,
+            &object_key,
+            operation_id,
+            context.operator.id,
+            &request,
+            bytes.to_vec(),
+        )
+        .await
+    {
+        Ok(result) => json(StatusCode::OK, &result, true),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_storage_object_delete(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, bucket, object_key)): Path<(String, String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let operation_id = match required_operation(&headers) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let Some(expected_version) = exact_header(&headers, "x-runku-object-version", 64) else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let Some(at_micros) = exact_header(&headers, "x-runku-at-micros", 32) else {
+        return failure(PlatformIdentityError::InvalidInput);
+    };
+    let (product, context) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::StorageManage,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product
+        .storage_object_delete(
+            &bucket,
+            &object_key,
+            operation_id,
+            context.operator.id,
+            &expected_version,
+            &at_micros,
+        )
+        .await
+    {
         Ok(result) => json(StatusCode::OK, &result, true),
         Err(error) => product_failure(error),
     }
@@ -2160,6 +2368,89 @@ fn product_failure(error: ManagementProductError) -> Response {
         }
     };
     let mut response = json(status, &serde_json::json!({"code": code}), false);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn exact_header(headers: &HeaderMap, name: &str, maximum: usize) -> Option<String> {
+    let values = headers.get_all(name).iter().collect::<Vec<_>>();
+    let [value] = values.as_slice() else {
+        return None;
+    };
+    let value = value.to_str().ok()?;
+    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn object_put_headers(headers: &HeaderMap) -> Result<ManagementObjectPut, PlatformIdentityError> {
+    let at_micros = exact_header(headers, "x-runku-at-micros", 32)
+        .ok_or(PlatformIdentityError::InvalidInput)?;
+    let content_type = match headers
+        .get_all(header::CONTENT_TYPE)
+        .iter()
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] => "application/octet-stream".to_owned(),
+        [value] => value
+            .to_str()
+            .map_err(|_| PlatformIdentityError::InvalidInput)?
+            .to_owned(),
+        _ => return Err(PlatformIdentityError::InvalidInput),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+    for (name, value) in headers {
+        let Some(key) = name.as_str().strip_prefix("x-runku-meta-") else {
+            continue;
+        };
+        let value = value
+            .to_str()
+            .map_err(|_| PlatformIdentityError::InvalidInput)?;
+        if metadata.insert(key.to_owned(), value.to_owned()).is_some() {
+            return Err(PlatformIdentityError::InvalidInput);
+        }
+    }
+    Ok(ManagementObjectPut {
+        content_type,
+        metadata,
+        at_micros,
+    })
+}
+
+fn object_download_response(result: ManagementObjectDownload) -> Response {
+    let content_type = match HeaderValue::from_str(&result.object.content_type) {
+        Ok(value) => value,
+        Err(_) => return product_failure(ManagementProductError::Corruption),
+    };
+    let etag = match HeaderValue::from_str(&result.object.etag) {
+        Ok(value) => value,
+        Err(_) => return product_failure(ManagementProductError::Corruption),
+    };
+    let version = match HeaderValue::from_str(&result.object.version_id) {
+        Ok(value) => value,
+        Err(_) => return product_failure(ManagementProductError::Corruption),
+    };
+    let sha256 = match HeaderValue::from_str(&result.object.sha256) {
+        Ok(value) => value,
+        Err(_) => return product_failure(ManagementProductError::Corruption),
+    };
+    let mut response = Response::new(Body::from(result.bytes));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    response.headers_mut().insert(header::ETAG, etag);
+    response
+        .headers_mut()
+        .insert("x-runku-object-version", version);
+    response
+        .headers_mut()
+        .insert("x-runku-object-sha256", sha256);
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

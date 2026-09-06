@@ -15,10 +15,11 @@ use zeroize::Zeroize;
 use crate::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest,
     AccessKeySecret, AuditPage, AuditPageRequest, Bucket, BucketConfiguration, BucketId,
-    BucketPage, BucketPageRequest, IssuedAccessKey, ObjectStorageActor, ObjectStorageCommand,
-    ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
+    BucketPage, BucketPageRequest, DeleteObjectCommand, IssuedAccessKey, ObjectMetadata,
+    ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest, ObjectStorageActor,
+    ObjectStorageCommand, ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
     ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,
-    SecretDigest,
+    PutObjectCommand, SecretDigest,
 };
 
 /// Deployment-owned HMAC key used only to digest Product access-key secrets.
@@ -388,6 +389,65 @@ impl ObjectStorageService {
         request: AuditPageRequest,
     ) -> Result<AuditPage, ObjectStorageError> {
         self.repository.audit(scope, request).await
+    }
+
+    /// Commits current/version metadata after the caller durably stores content-addressed bytes.
+    pub async fn put_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        operation_id: OperationId,
+        command: &PutObjectCommand,
+    ) -> Result<ObjectOperationResult, ObjectStorageError> {
+        self.repository
+            .put_object(scope, bucket_id, operation_id, command)
+            .await
+    }
+
+    /// Gets current object metadata.
+    pub async fn get_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+    ) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+        crate::validate_object_key(key)?;
+        self.repository.get_object(scope, bucket_id, key).await
+    }
+
+    /// Lists one bounded object browser page.
+    pub async fn list_objects(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        request: &ObjectPageRequest,
+    ) -> Result<ObjectPage, ObjectStorageError> {
+        request.validate()?;
+        self.repository
+            .list_objects(scope, bucket_id, request)
+            .await
+    }
+
+    /// Deletes one exact current version from the logical namespace.
+    pub async fn delete_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        operation_id: OperationId,
+        command: &DeleteObjectCommand,
+    ) -> Result<ObjectOperationResult, ObjectStorageError> {
+        self.repository
+            .delete_object(scope, bucket_id, operation_id, command)
+            .await
+    }
+
+    /// Reconciles one uncertain object mutation.
+    pub async fn object_operation(
+        &self,
+        scope: EnvironmentScope,
+        operation_id: OperationId,
+    ) -> Result<Option<ObjectOperation>, ObjectStorageError> {
+        self.repository.object_operation(scope, operation_id).await
     }
 
     fn issue_material(
