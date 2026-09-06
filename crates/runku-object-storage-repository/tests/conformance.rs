@@ -106,6 +106,7 @@ async fn delimiter_pagination_never_repeats_a_folded_prefix() -> Result<(), Box<
         .operation
         .bucket_id;
     for (index, key) in ["folder/a", "folder/b", "z"].into_iter().enumerate() {
+        let index = u8::try_from(index)?;
         service
             .put_object(
                 scope,
@@ -115,11 +116,11 @@ async fn delimiter_pagination_never_repeats_a_folded_prefix() -> Result<(), Box<
                     version_id: ObjectVersionId::generate(),
                     key: key.to_owned(),
                     size: 1,
-                    sha256: [index as u8; 32],
+                    sha256: [index; 32],
                     content_type: "text/plain".to_owned(),
                     metadata: BTreeMap::new(),
                     actor: actor.clone(),
-                    at: TimestampMicros::new(2 + index as i64),
+                    at: TimestampMicros::new(2 + i64::from(index)),
                 },
             )
             .await?;
