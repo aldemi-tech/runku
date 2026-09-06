@@ -16,8 +16,8 @@ The following behavior is implemented and test-covered:
   bounded pools and checksum-protected append-only migrations;
 - create, get, bounded list, full-configuration update, archive, restore, and trusted materializer
   observation are available through Rust APIs;
-- the compact server composes the registry in the protected Product state database and reports its
-  health through readiness;
+- the compact server composes the registry in the protected Product state database, reports its
+  health through readiness, and acts as the trusted local materializer for creation;
 - authenticated exact-scope Management routes create, get, update, and reconcile operations using
   independent `environments:read` and `environments:manage` capabilities.
 
@@ -44,8 +44,8 @@ touching the registry:
 
 Timestamps are canonical decimal microseconds and are pinned by the caller because they participate
 in the operation digest. The response never contains provider, host, database, DNS, or placement
-details. Creation produces observed `pending`; only a trusted materializer may record `ready` or
-`failed` through the internal Rust service.
+details. The standalone registry creates an observed `pending` record; the compact server is its
+trusted local materializer and records `ready` before returning a successful create response.
 
 ## Model
 
@@ -64,7 +64,8 @@ the service.
 | observed state | `pending`, `ready`, or `failed` |
 | observed revision | Exact desired revision for `ready`/`failed`; an older revision may remain visible while a new configuration is `pending` |
 
-Creation writes desired `active`, observed `pending`, and revision 1. A configuration update
+The registry creation transition writes desired `active`, observed `pending`, and revision 1. The
+compact server immediately materializes that revision to `ready`. A configuration update
 requires the exact current revision, replaces the complete configuration, increments the revision,
 and returns observed state to `pending`. It retains the last older observed revision so an operator
 can distinguish “never materialized” from “updating a previously materialized Environment.”

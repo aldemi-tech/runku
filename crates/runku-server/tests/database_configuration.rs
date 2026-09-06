@@ -201,3 +201,46 @@ fn managed_token_and_canonical_source_authority_are_an_exact_pair()
     assert_eq!(paired.stdout, b"configuration valid\n");
     Ok(())
 }
+
+#[test]
+fn application_listener_requires_product_root_and_explicit_tls_termination()
+-> Result<(), Box<dyn std::error::Error>> {
+    let product = TempDir::new()?;
+    let product_root = product.path().to_str().ok_or("non-UTF-8 temp path")?;
+    let without_tls = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PRODUCT_ROOT", product_root),
+        ("RUNKU_APPLICATION_LISTEN", "0.0.0.0:3210"),
+    ])?;
+    assert_error(&without_tls, "SERVER_APPLICATION_TLS_REQUIRED");
+
+    let without_listener = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PRODUCT_ROOT", product_root),
+        ("RUNKU_APPLICATION_TLS_TERMINATED", "true"),
+    ])?;
+    assert_error(
+        &without_listener,
+        "SERVER_APPLICATION_LISTENER_CONFIGURATION_INCOMPLETE",
+    );
+
+    let without_product = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_APPLICATION_LISTEN", "0.0.0.0:3210"),
+        ("RUNKU_APPLICATION_TLS_TERMINATED", "true"),
+    ])?;
+    assert_error(
+        &without_product,
+        "SERVER_PRODUCT_CONFIGURATION_WITHOUT_ROOT",
+    );
+
+    let configured = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PRODUCT_ROOT", product_root),
+        ("RUNKU_APPLICATION_LISTEN", "0.0.0.0:3210"),
+        ("RUNKU_APPLICATION_TLS_TERMINATED", "true"),
+    ])?;
+    assert!(configured.status.success());
+    assert_eq!(configured.stdout, b"configuration valid\n");
+    Ok(())
+}

@@ -48,9 +48,10 @@ use runku_identity::{
 use runku_local::{
     LocalChannelExpectation, LocalCodeResolution, LocalCreatedCredential, LocalCredentialMetadata,
     LocalIdentityError, LocalIdentityManager, LocalLogError, LocalLogManager, LocalProcess,
-    LocalProcessConfig, LocalProcessTelemetrySnapshot, LocalPublishError, LocalReleaseError,
-    LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatusReport, S3ProductConfig,
-    build_s3_router, derive_local_object_storage_digest_key, load_local, publish_local_if_head,
+    LocalProcessConfig, LocalProcessListener, LocalProcessTelemetrySnapshot, LocalPublishError,
+    LocalReleaseError, LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatusReport,
+    S3ProductConfig, build_s3_router, derive_local_object_storage_digest_key, load_local,
+    publish_local_if_head,
 };
 use runku_management_service::{
     ManagementApplicationClient, ManagementApplicationClientCreate,
@@ -213,6 +214,8 @@ impl EnvironmentServingResolver for ProductEnvironmentServingResolver {
 
 /// Validated server-owned configuration for one Product adapter.
 pub struct ProductAdapterConfig {
+    /// Optional operator-owned application listener behind trusted TLS termination.
+    pub trusted_application_listen: Option<std::net::SocketAddr>,
     /// Optional secret PostgreSQL DSN for Environment-scoped Function platform data.
     pub platform_database_url: Option<Zeroizing<String>>,
     /// Optional historical Operational Log archive.
@@ -339,6 +342,11 @@ impl ProductAdapter {
             process_config: LocalProcessConfig {
                 allowed_origins: config.allowed_origins,
                 auth_config: config.auth_config,
+                listener: config
+                    .trusted_application_listen
+                    .map_or(LocalProcessListener::PersistedLoopback, |address| {
+                        LocalProcessListener::TrustedTlsTermination(address)
+                    }),
                 file_object_store: config.file_object_store,
                 data_store: Some(Arc::clone(&data_store)),
                 environment_serving_resolver: Some(environment_serving_resolver),
@@ -1076,22 +1084,40 @@ impl ManagementProduct for ProductAdapter {
         operation_id: OperationId,
         request: &ManagementEnvironmentCreate,
     ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let created_at = parse_timestamp(&request.created_at_micros)?;
         let result = self
             .environments
             .create(
                 self.scope,
                 operation_id,
                 environment_configuration(&request.configuration)?,
-                parse_timestamp(&request.created_at_micros)?,
+                created_at,
             )
             .await
             .map_err(map_environment)?;
-        let environment = self
+        let mut environment = self
             .environments
             .get(self.scope)
             .await
             .map_err(map_environment)?
             .ok_or(ManagementProductError::Corruption)?;
+        if environment.configuration_revision == 1
+            && environment.desired_state == EnvironmentDesiredState::Active
+            && !environment.is_converged()
+        {
+            Box::pin(self.reconcile_environment_state(
+                EnvironmentDesiredState::Active,
+                1,
+                created_at,
+            ))
+            .await?;
+            environment = self
+                .environments
+                .get(self.scope)
+                .await
+                .map_err(map_environment)?
+                .ok_or(ManagementProductError::Corruption)?;
+        }
         Ok(ManagementEnvironmentResult {
             environment: management_environment(&environment),
             operation_id: result.operation.operation_id.to_string(),
@@ -3761,6 +3787,7 @@ export const hourly = cron({
         Box::pin(ProductAdapter::open(
             root.to_path_buf(),
             ProductAdapterConfig {
+                trusted_application_listen: None,
                 platform_database_url: None,
                 log_archive: None,
                 log_journal: None,
@@ -4096,7 +4123,8 @@ export const hourly = cron({
             .await?;
         assert!(!created.replayed);
         assert_eq!(created.environment.configuration_revision, 1);
-        assert_eq!(created.environment.observed_state, "pending");
+        assert_eq!(created.environment.observed_state, "ready");
+        assert!(created.environment.converged);
         assert_eq!(
             created.environment.project_id,
             product.scope.project_id().to_string()
@@ -4914,6 +4942,7 @@ export const hourly = cron({
             let product = Box::pin(ProductAdapter::open(
                 directory.path().to_path_buf(),
                 ProductAdapterConfig {
+                    trusted_application_listen: None,
                     platform_database_url: Some(Zeroizing::new(database_url)),
                     log_archive: None,
                     log_journal: None,

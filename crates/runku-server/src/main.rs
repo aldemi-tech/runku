@@ -152,6 +152,7 @@ async fn run() -> Result<(), &'static str> {
             Box::pin(ProductAdapter::open(
                 root.clone(),
                 ProductAdapterConfig {
+                    trusted_application_listen: config.trusted_application_listen,
                     platform_database_url: config.platform_database_url.clone(),
                     log_archive: config.log_archive.clone(),
                     log_journal: log_journal.clone(),
@@ -224,6 +225,7 @@ struct ServerConfig {
     managed_source_authority: Option<ManagedSourceAuthority>,
     oidc: Option<OidcConfig>,
     product_root: Option<PathBuf>,
+    trusted_application_listen: Option<SocketAddr>,
     platform_database_url: Option<Zeroizing<String>>,
     product_allowed_origins: BTreeSet<CorsOrigin>,
     product_auth_config: Option<PathBuf>,
@@ -328,6 +330,31 @@ impl ServerConfig {
                 }
             })
             .transpose()?;
+        let application_listen = env::var("RUNKU_APPLICATION_LISTEN")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<SocketAddr>()
+                    .map_err(|_| "SERVER_APPLICATION_LISTEN_INVALID")
+            })
+            .transpose()?;
+        let application_tls_terminated = match env::var("RUNKU_APPLICATION_TLS_TERMINATED") {
+            Ok(value) if value == "true" => true,
+            Ok(value) if value == "false" => false,
+            Err(env::VarError::NotPresent) => false,
+            Ok(_) | Err(env::VarError::NotUnicode(_)) => {
+                return Err("SERVER_APPLICATION_TLS_CONFIGURATION_INVALID");
+            }
+        };
+        let trusted_application_listen = match (application_listen, application_tls_terminated) {
+            (None, false) => None,
+            (Some(address), true) => Some(address),
+            (Some(_), false) => return Err("SERVER_APPLICATION_TLS_REQUIRED"),
+            (None, true) => return Err("SERVER_APPLICATION_LISTENER_CONFIGURATION_INCOMPLETE"),
+        };
+        if trusted_application_listen.is_some() && product_root.is_none() {
+            return Err("SERVER_PRODUCT_CONFIGURATION_WITHOUT_ROOT");
+        }
         let platform_database_url =
             optional_secret_alias("RUNKU_PLATFORM_DATABASE_URL", "RUNKU_PRODUCT_DATABASE_URL")?
                 .map(|value| {
@@ -392,6 +419,7 @@ impl ServerConfig {
             managed_source_authority,
             oidc,
             product_root,
+            trusted_application_listen,
             platform_database_url,
             product_allowed_origins,
             product_auth_config,

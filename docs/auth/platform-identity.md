@@ -108,6 +108,8 @@ Configuration is strict:
 | `RUNKU_PLATFORM_MANAGED_ENROLLMENT_TOKEN_FILE` | alternative | absolute one-line regular non-symlink file containing the same separate gateway secret |
 | `RUNKU_PLATFORM_MANAGED_SOURCE_AUTHORITY` | paired | exact canonical HTTPS origin that owns every grant revision accepted with the managed token; configure together with that token |
 | `RUNKU_PRODUCT_ROOT` | no | absolute initialized Product Environment root exposed by authenticated lifecycle routes |
+| `RUNKU_APPLICATION_LISTEN` | paired | compact-server application listener; requires Product root and explicit trusted TLS termination |
+| `RUNKU_APPLICATION_TLS_TERMINATED` | paired | exact `true` asserts the operator-owned application ingress terminates TLS before the private listener |
 | `RUNKU_PLATFORM_DATABASE_URL` | no | optional Environment-scoped PostgreSQL URL for Function documents, indexes, outbox, and schedules; sensitive; requires Product root |
 | `RUNKU_PLATFORM_DATABASE_URL_FILE` | alternative | path to a file containing the same Function platform URL; absolute, one-line, regular, non-symlinked |
 | `RUNKU_PRODUCT_ALLOWED_ORIGINS` | no | up to 64 exact comma-separated browser origins; requires Product root |
@@ -123,6 +125,9 @@ paths, and a
 non-loopback plaintext listener fail before readiness. `RUNKU_MANAGEMENT_TLS_TERMINATED=true` is an
 assertion by the operator; Runku cannot verify the reverse proxy. Restrict the backend listener and
 configure exact trusted-proxy behavior at the deployment boundary.
+The same rule applies independently to the Product application listener: neither
+`RUNKU_APPLICATION_LISTEN` nor `RUNKU_APPLICATION_TLS_TERMINATED=true` is accepted alone, and the
+pair is invalid without `RUNKU_PRODUCT_ROOT`.
 
 The Function platform database is independent of Platform Identity and has its own exact
 Environment binding, readiness, least-privilege credential, and coordinated recovery contract. See

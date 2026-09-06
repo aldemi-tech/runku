@@ -2,6 +2,18 @@
 
 All notable changes are documented in this file.
 
+## 0.4.7 - 2026-09-06
+
+### Fixed
+
+- Added an explicit compact-server Product application listener for provider-owned private
+  networks. It requires `RUNKU_APPLICATION_LISTEN`, an attached Product root, and
+  `RUNKU_APPLICATION_TLS_TERMINATED=true`; incomplete or plaintext exposure fails closed.
+- Kept `runku init` and `runku link` loopback-only, so remote provider exposure no longer weakens
+  the local development contract or mutates persisted Product identity.
+- Made compact-server Environment creation converge through its trusted local materializer before
+  the Management API reports success.
+
 ## 0.4.6 - 2026-09-06
 
 ### Added

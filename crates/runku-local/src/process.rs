@@ -63,6 +63,16 @@ use crate::{
     state::{LocalLock, acquire_process_lock, load_file_storage_pepper, load_identity_pepper},
 };
 
+/// Explicit Product listener authority for one composed process.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LocalProcessListener {
+    /// Bind the loopback address persisted by local `init`/`link`.
+    #[default]
+    PersistedLoopback,
+    /// Bind an operator-owned address behind a trusted TLS termination boundary.
+    TrustedTlsTermination(SocketAddr),
+}
+
 /// Validated bounded local daemon policy.
 #[derive(Clone)]
 pub struct LocalProcessConfig {
@@ -70,6 +80,8 @@ pub struct LocalProcessConfig {
     pub allowed_origins: BTreeSet<CorsOrigin>,
     /// Optional strict local JWT provider descriptor relative to the project root.
     pub auth_config: Option<PathBuf>,
+    /// Listener authority; local use remains bound to the persisted loopback address.
+    pub listener: LocalProcessListener,
     /// Poll cadence for Realtime outbox, Scheduled Invocation, and Cron workers.
     pub worker_interval: Duration,
     /// Refresh cadence for immutable Release and Development serving snapshots.
@@ -106,6 +118,7 @@ impl Default for LocalProcessConfig {
         Self {
             allowed_origins: BTreeSet::new(),
             auth_config: None,
+            listener: LocalProcessListener::PersistedLoopback,
             worker_interval: Duration::from_millis(100),
             catalog_refresh_interval: Duration::from_millis(250),
             log_archive_interval: Duration::from_secs(60),
@@ -129,6 +142,7 @@ impl fmt::Debug for LocalProcessConfig {
             .debug_struct("LocalProcessConfig")
             .field("allowed_origins", &self.allowed_origins)
             .field("auth_config", &self.auth_config)
+            .field("listener", &self.listener)
             .field("worker_interval", &self.worker_interval)
             .field("catalog_refresh_interval", &self.catalog_refresh_interval)
             .field("log_archive_interval", &self.log_archive_interval)
@@ -356,8 +370,8 @@ impl fmt::Debug for LocalProcess {
 }
 
 impl LocalProcess {
-    /// Opens every local Product Base dependency, binds the explicit loopback listener, and starts
-    /// bounded refresh/Realtime/Scheduled/Cron loops.
+    /// Opens every Product Base dependency, binds the authorized listener, and starts bounded
+    /// refresh/Realtime/Scheduled/Cron loops.
     ///
     /// # Errors
     ///
@@ -397,16 +411,24 @@ impl LocalProcess {
             ),
             None => Arc::new(RejectingPrincipalVerifier),
         };
-        if !state.listen_address.ip().is_loopback() {
-            return Err(LocalProcessError::InvalidConfiguration);
-        }
-        let listener = TcpListener::bind(state.listen_address)
+        let listen_address = match config.listener {
+            LocalProcessListener::PersistedLoopback => {
+                if !state.listen_address.ip().is_loopback() {
+                    return Err(LocalProcessError::InvalidConfiguration);
+                }
+                state.listen_address
+            }
+            LocalProcessListener::TrustedTlsTermination(address) => address,
+        };
+        let listener = TcpListener::bind(listen_address)
             .await
             .map_err(|_| LocalProcessError::ListenerUnavailable)?;
         let address = listener
             .local_addr()
             .map_err(|_| LocalProcessError::ListenerUnavailable)?;
-        if !address.ip().is_loopback() {
+        if matches!(config.listener, LocalProcessListener::PersistedLoopback)
+            && !address.ip().is_loopback()
+        {
             return Err(LocalProcessError::InvalidConfiguration);
         }
 
@@ -1227,7 +1249,10 @@ mod tests {
     use tempfile::tempdir;
     use url::Url;
 
-    use super::{LocalProcess, LocalProcessConfig, LocalProcessError, acquire_local_process_lease};
+    use super::{
+        LocalProcess, LocalProcessConfig, LocalProcessError, LocalProcessListener,
+        acquire_local_process_lease,
+    };
     use crate::{LocalIdentityManager, initialize_local, publish_local};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -1477,6 +1502,20 @@ mod tests {
         assert!(telemetry.cron_polls > 0);
         assert!(telemetry.catalog_refreshes > 0);
         process.shutdown().await;
+
+        let networked = LocalProcess::start(
+            directory.path(),
+            LocalProcessConfig {
+                listener: LocalProcessListener::TrustedTlsTermination(SocketAddr::from((
+                    [0, 0, 0, 0],
+                    0,
+                ))),
+                ..test_config()
+            },
+        )
+        .await?;
+        assert!(networked.address().ip().is_unspecified());
+        networked.shutdown().await;
 
         let restarted = LocalProcess::start(directory.path(), test_config()).await?;
         assert_eq!(restarted.state(), &state);

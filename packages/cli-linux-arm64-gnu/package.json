@@ -1,6 +1,6 @@
 {
   "name": "@runku/cli-linux-arm64-gnu",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Native Runku CLI for Linux ARM64 with glibc",
   "license": "Apache-2.0",
   "repository": {

@@ -32,7 +32,7 @@ pub use lifecycle::{
 pub use logs::{LocalLogError, LocalLogManager};
 pub use otel::{LocalOtlpError, LocalOtlpExporter, LocalOtlpReport};
 pub use process::{
-    LocalProcess, LocalProcessConfig, LocalProcessError, LocalProcessLease,
+    LocalProcess, LocalProcessConfig, LocalProcessError, LocalProcessLease, LocalProcessListener,
     LocalProcessTelemetrySnapshot, acquire_local_process_lease,
 };
 pub use publish::{LocalPublishError, LocalPublishResult, publish_local, publish_local_if_head};

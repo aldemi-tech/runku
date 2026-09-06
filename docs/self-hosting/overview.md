@@ -85,7 +85,9 @@ requirement. Other separated product roles and Agent packages are not published 
 
 The compact Docker package is the supported installation path. One server container runs the `all`
 role and one PostgreSQL container stores Platform Identity. A host TLS proxy is required because
-both Product and Management listeners remain on loopback. See
+the default Product and Management listeners remain on loopback. A provider-owned private network
+may set an explicit application listener only together with its trusted TLS-termination assertion;
+local `init`/`link` state remains loopback-only. See
 [Docker standalone installation](../../deployments/docker/README.md).
 
 ## Storage and dependency profiles

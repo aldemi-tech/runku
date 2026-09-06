@@ -13,8 +13,8 @@ Runku versions contracts at every boundary that can outlive one process:
 Unknown versions fail closed. A client-selected Release is served only while its contract and
 runtime remain supported. Channel routing cannot silently replace an explicit incompatible Release.
 
-This release reports version `0.4.6` and has not established a general stable compatibility
-window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.6 supports a
+This release reports version `0.4.7` and has not established a general stable compatibility
+window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.7 supports a
 deliberate forward upgrade from that floor.
 Tagged releases coordinate the CLI, both TypeScript SDKs, Linux compact server binaries, and the
 compact server image. Agent, distributed deployment, protocol, storage, and runtime support windows
@@ -50,12 +50,18 @@ an older unversioned `managedEnrollment` body is rejected instead of being assig
 revision. Deploy the gateway first (or atomically), then migrate/start the server, and do not roll
 the server back after schema v3.
 
+Version 0.4.7 preserves the local CLI's loopback-only listener and adds a separate compact-server
+application listener for provider-owned networks. `RUNKU_APPLICATION_LISTEN` is accepted only when
+paired with `RUNKU_APPLICATION_TLS_TERMINATED=true` and an attached Product root; incomplete,
+invalid, or non-TLS configuration fails before readiness. This lets an ingress/TLS boundary reach
+the application port without weakening local development or changing persisted Product identity.
+
 ## Pre-release matrix
 
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.6` alone |
+| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.7` alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
 | TypeScript packages | `@runku/client`, `@runku/server`, and `@runku/cli` update together |
