@@ -4,6 +4,16 @@ React and Next.js bindings for `@runku/client`. The package provides typed Funct
 Realtime Query hooks, Mutation and Action hooks, file transfer helpers, and request-local server
 utilities with hydration.
 
+Install the exact frontend SDK pair together:
+
+```sh
+pnpm add @runku/react@0.4.8 @runku/client@0.4.8
+```
+
+Version 0.4.8 uses Public Protocol v1 and is compatible with the Runku 0.4.7 gateway. The published
+0.4.7 CLI predates runtime Function-reference generation; use references emitted by the current
+source CLI until a later coordinated distribution includes that codegen.
+
 ## Generated Function references
 
 `runku build` writes two runtime/type pairs below `runku/_generated`:

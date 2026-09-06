@@ -22,7 +22,8 @@ Runku is currently pre-release.
 | Capability | Current status |
 |---|---|
 | Versioned CLI for macOS, Linux GNU, and Windows on ARM64/x86_64 | Published from tagged releases through GitHub and npm |
-| `@runku/client`, `@runku/react`, and `@runku/server` TypeScript SDKs | Published together with the CLI version |
+| `@runku/client` and `@runku/react` frontend SDKs | Independently releasable as an exact-version pair; Public Protocol compatibility is documented per SDK release |
+| `@runku/server` Function SDK | Published with the coordinated product distribution |
 | Complete SQLite-backed local development process | Implemented and test-covered |
 | Safe V8, local Full Node, HTTP, WebSocket, scheduling, identity, logs | Implemented and test-covered |
 | Environment-scoped application files | Filesystem implemented/tested; S3-compatible adapter has MinIO conformance; byte-store backup remains operator-owned |
@@ -314,7 +315,7 @@ make ci-check
 ```
 
 It checks the pinned toolchain, Rust formatting, incomplete-marker policy, compilation of every
-workspace target with all features, all three public JavaScript packages, and coordinated release
+workspace target with all features, all four public JavaScript packages, and release-track
 metadata. It does not link or execute Rust tests, start Runku, build examples, use Docker or a
 database, or run benchmarks. This keeps routine automation deterministic and bounded.
 

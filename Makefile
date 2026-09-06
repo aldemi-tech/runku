@@ -28,6 +28,7 @@ ci-rust-check: toolchain-check fmt-check incomplete-check
 ci-packages-check: js-install
 	pnpm check:packages
 	pnpm check:release
+	pnpm check:sdk-release
 
 # Explicit networked advisory gate. Kept outside ci-check so the fast compile/package gate does not
 # clone RustSec or depend on a separately installed tool.
@@ -73,6 +74,7 @@ cli-package-check: js-install
 
 release-package-check:
 	node scripts/verify-release.mjs
+	node scripts/verify-sdk-release.mjs
 
 selfhost-package-check:
 	@package_root=$$(mktemp -d); \

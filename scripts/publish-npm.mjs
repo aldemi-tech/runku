@@ -7,16 +7,20 @@ import { releasePlatforms } from "./release-platforms.mjs"
 
 const directory = resolve(process.argv[2] ?? "")
 if (!process.argv[2]) throw new Error("usage: publish-npm.mjs DIRECTORY")
+const sdkOnly = process.argv.includes("--sdk")
+const dryRun = process.argv.includes("--dry-run")
 
 const tarballs = findTarballs(directory).map(describeTarball)
 
-const expectedNames = new Set([
-  ...releasePlatforms.map((platform) => platform.packageName),
-  "@runku/client",
-  "@runku/server",
-  "@runku/react",
-  "@runku/cli",
-])
+const expectedNames = new Set(sdkOnly
+  ? ["@runku/client", "@runku/react"]
+  : [
+      ...releasePlatforms.map((platform) => platform.packageName),
+      "@runku/client",
+      "@runku/server",
+      "@runku/react",
+      "@runku/cli",
+    ])
 const actualNames = new Set(tarballs.map((tarball) => tarball.name))
 if (
   tarballs.length !== expectedNames.size ||
@@ -32,7 +36,11 @@ tarballs.sort(
 
 for (const tarball of tarballs) {
   const spec = `${tarball.name}@${tarball.version}`
-  const existing = run("npm", ["view", spec, "dist.integrity", "--json"], { allowFailure: true })
+  const registryEnv = environmentForPackage(tarball.name)
+  const existing = run("npm", ["view", spec, "dist.integrity", "--json"], {
+    allowFailure: true,
+    env: registryEnv,
+  })
   if (existing.status === 0) {
     const publishedIntegrity = JSON.parse(existing.stdout.trim())
     if (publishedIntegrity !== tarball.integrity) {
@@ -44,13 +52,19 @@ for (const tarball of tarballs) {
   if (!isMissingPackage(existing)) {
     throw new Error(`could not determine whether ${spec} exists: ${existing.stderr.trim()}`)
   }
-  if (hasPublishedDistTag(tarball.name, tarball.version)) {
+  if (dryRun) {
+    process.stdout.write(`would publish ${spec}\n`)
+    continue
+  }
+  if (hasPublishedDistTag(tarball.name, tarball.version, registryEnv)) {
     process.stdout.write(`verified existing ${spec} while registry metadata propagates\n`)
     continue
   }
 
-  run("npm", ["publish", tarball.path, "--access", "public"])
-  const published = await waitForPublishedState(tarball)
+  run("npm", ["publish", tarball.path, "--access", "public", "--provenance"], {
+    env: registryEnv,
+  })
+  const published = await waitForPublishedState(tarball, registryEnv)
   if (published && published !== tarball.integrity) {
     throw new Error(`${spec} registry integrity does not match the tarball`)
   }
@@ -83,20 +97,26 @@ function isMissingPackage(result) {
   return `${result.stdout}\n${result.stderr}`.includes("E404")
 }
 
-async function waitForPublishedState(tarball) {
+async function waitForPublishedState(tarball, registryEnv) {
   const spec = `${tarball.name}@${tarball.version}`
   for (let attempt = 1; attempt <= 10; attempt += 1) {
-    const result = run("npm", ["view", spec, "dist.integrity", "--json"], { allowFailure: true })
+    const result = run("npm", ["view", spec, "dist.integrity", "--json"], {
+      allowFailure: true,
+      env: registryEnv,
+    })
     if (result.status === 0) return JSON.parse(result.stdout.trim())
     if (!isMissingPackage(result)) throw new Error(`registry verification failed for ${spec}`)
-    if (hasPublishedDistTag(tarball.name, tarball.version)) return null
+    if (hasPublishedDistTag(tarball.name, tarball.version, registryEnv)) return null
     if (attempt < 10) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000))
   }
   throw new Error(`${spec} was not acknowledged by the registry after publication`)
 }
 
-function hasPublishedDistTag(name, version) {
-  const result = run("npm", ["dist-tag", "ls", name], { allowFailure: true })
+function hasPublishedDistTag(name, version, registryEnv) {
+  const result = run("npm", ["dist-tag", "ls", name], {
+    allowFailure: true,
+    env: registryEnv,
+  })
   if (result.status !== 0) {
     if (isMissingPackage(result)) return false
     throw new Error(`could not inspect dist-tags for ${name}: ${result.stderr.trim()}`)
@@ -107,10 +127,20 @@ function hasPublishedDistTag(name, version) {
     .includes(version)
 }
 
+function environmentForPackage(name) {
+  const bootstrapToken = sdkOnly && name === "@runku/react"
+    ? process.env.NPM_REACT_BOOTSTRAP_TOKEN
+    : undefined
+  return bootstrapToken
+    ? { ...process.env, NODE_AUTH_TOKEN: bootstrapToken }
+    : process.env
+}
+
 function run(command, argumentsValue, options = {}) {
   const result = spawnSync(command, argumentsValue, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    env: options.env ?? process.env,
   })
   if (result.status !== 0 && !options.allowFailure) {
     if (result.stderr) process.stderr.write(result.stderr)

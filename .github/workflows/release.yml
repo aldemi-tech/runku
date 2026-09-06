@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "sdk-v*"
   workflow_dispatch:
     inputs:
       artifact_run_id:
@@ -33,6 +34,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.verify.outputs.version }}
+      kind: ${{ steps.verify.outputs.kind }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -40,12 +42,17 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - id: verify
-        name: Verify tag and coordinated versions
+        name: Verify tag and release-track versions
         run: |
-          if test "$GITHUB_REF_TYPE" = tag; then
+          if test "$GITHUB_REF_TYPE" = tag && [[ "$GITHUB_REF_NAME" == sdk-v* ]]; then
+            node scripts/verify-sdk-release.mjs --tag "$GITHUB_REF_NAME"
+            echo 'kind=sdk' >> "$GITHUB_OUTPUT"
+          elif test "$GITHUB_REF_TYPE" = tag; then
             node scripts/verify-release.mjs --tag "$GITHUB_REF_NAME"
+            echo 'kind=distribution' >> "$GITHUB_OUTPUT"
           else
             node scripts/verify-release.mjs
+            echo 'kind=distribution' >> "$GITHUB_OUTPUT"
           fi
 
   sdk-packages:
@@ -67,15 +74,26 @@ jobs:
       - name: Run focused package checks
         run: pnpm check:packages
       - name: Verify release metadata
-        run: pnpm check:release
+        env:
+          RELEASE_KIND: ${{ needs.metadata.outputs.kind }}
+        run: |
+          if test "$RELEASE_KIND" = sdk; then
+            pnpm check:sdk-release
+          else
+            pnpm check:release
+          fi
       - name: Pack public JavaScript packages
+        env:
+          RELEASE_KIND: ${{ needs.metadata.outputs.kind }}
         run: |
           mkdir -p out/npm
-          cp LICENSE packages/cli/LICENSE
           npm pack ./packages/client --pack-destination out/npm
-          npm pack ./packages/server --pack-destination out/npm
           npm pack ./packages/react --pack-destination out/npm
-          npm pack ./packages/cli --pack-destination out/npm
+          if test "$RELEASE_KIND" = distribution; then
+            cp LICENSE packages/cli/LICENSE
+            npm pack ./packages/server --pack-destination out/npm
+            npm pack ./packages/cli --pack-destination out/npm
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-npm-independent
@@ -84,7 +102,7 @@ jobs:
           compression-level: 0
 
   selfhost-package:
-    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
+    if: needs.metadata.outputs.kind == 'distribution' && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
     needs: metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -119,7 +137,7 @@ jobs:
           compression-level: 0
 
   cli-binaries:
-    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
+    if: needs.metadata.outputs.kind == 'distribution' && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
     needs: metadata
     strategy:
       fail-fast: false
@@ -232,7 +250,7 @@ jobs:
           compression-level: 0
 
   server-binaries:
-    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
+    if: needs.metadata.outputs.kind == 'distribution' && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
     needs: metadata
     strategy:
       fail-fast: false
@@ -284,7 +302,7 @@ jobs:
           compression-level: 0
 
   server-image:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && needs.metadata.outputs.kind == 'distribution'
     needs: [metadata, cli-binaries, server-binaries]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -355,7 +373,7 @@ jobs:
           compression-level: 0
 
   selfhost-artifact-smoke:
-    if: github.event_name == 'workflow_dispatch' && inputs.artifact_run_id == ''
+    if: needs.metadata.outputs.kind == 'distribution' && github.event_name == 'workflow_dispatch' && inputs.artifact_run_id == ''
     needs: [metadata, selfhost-package, cli-binaries, server-binaries]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -384,7 +402,7 @@ jobs:
             "$VERSION" "$server_archive" "$cli_archive" "$selfhost_archive"
 
   publish-npm:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && needs.metadata.outputs.kind == 'distribution'
     needs: [metadata, sdk-packages, cli-binaries]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -408,8 +426,34 @@ jobs:
       - name: Publish or verify the complete npm release
         run: node scripts/publish-npm.mjs out
 
+  publish-sdk-npm:
+    if: github.ref_type == 'tag' && needs.metadata.outputs.kind == 'sdk'
+    needs: [metadata, sdk-packages]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Use an OIDC-capable npm CLI
+        run: npm install --global npm@11.16.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-npm-independent
+          path: out
+      - name: Publish or verify the frontend SDK pair
+        env:
+          NPM_REACT_BOOTSTRAP_TOKEN: ${{ secrets.NPM_REACT_BOOTSTRAP_TOKEN }}
+        run: node scripts/publish-npm.mjs out --sdk
+
   github-release:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && needs.metadata.outputs.kind == 'distribution'
     needs: [metadata, publish-npm, selfhost-package, server-binaries, server-image]
     runs-on: ubuntu-24.04
     timeout-minutes: 10

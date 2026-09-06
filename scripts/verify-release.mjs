@@ -11,10 +11,12 @@ const reactPackage = readJson("packages/react/package.json")
 const version = cliPackage.version
 
 assertVersion("root package", rootPackage.version, version)
-assertVersion("@runku/client", clientPackage.version, version)
 assertVersion("@runku/server", serverPackage.version, version)
-assertVersion("@runku/react", reactPackage.version, version)
-assertVersion("@runku/react peer @runku/client", reactPackage.peerDependencies["@runku/client"], version)
+assertVersion(
+  "@runku/react peer @runku/client",
+  reactPackage.peerDependencies["@runku/client"],
+  clientPackage.version,
+)
 
 const cargoManifest = read("crates/runku-cli/Cargo.toml")
 const cargoVersion = cargoManifest.match(/^version = "([^"]+)"$/m)?.[1]
@@ -87,6 +89,8 @@ if (tagIndex !== -1) {
   if (tag !== `v${version}`) {
     throw new Error(`release tag ${tag ?? "<missing>"} must equal v${version}`)
   }
+  assertVersion("@runku/client coordinated release", clientPackage.version, version)
+  assertVersion("@runku/react coordinated release", reactPackage.version, version)
 }
 
 if (process.env.GITHUB_OUTPUT) {

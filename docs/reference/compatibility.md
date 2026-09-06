@@ -1,21 +1,27 @@
 # Compatibility and upgrade boundaries
 
 Runku is pre-release and does not promise a general long-term compatibility window yet. Operate a
-tagged distribution as one coordinated set: CLI, `@runku/server`, `@runku/client`,
-`@runku/react`, compact server, Docker package, protocol, runtime contract, and persisted schema
-versions.
+tagged product distribution as one coordinated set: CLI, `@runku/server`, compact server, Docker
+package, protocol, runtime contract, and persisted schema versions. The frontend SDK track may
+publish `@runku/client` and `@runku/react` independently as one exact-version pair when its release
+notes explicitly retain compatibility with the current Public Protocol.
 
 Unknown wire, manifest, runtime, configuration, or persisted versions fail closed. Runku never
 silently falls back to `latest`, another Release, a weaker runtime, or a different credential role.
 
 ## Current distribution matrix
 
-This release reports version `0.4.7` and has not established a general stable compatibility
-window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.7 supports a
-deliberate forward upgrade from that floor.
-Tagged releases coordinate the CLI, both TypeScript SDKs, Linux compact server binaries, and the
-compact server image. Agent, distributed deployment, protocol, storage, and runtime support windows
-remain separate distribution gates.
+The product distribution reports version `0.4.7`; the frontend SDK pair reports version `0.4.8`.
+Neither has established a general stable compatibility window. Version 0.3.0 is the first supported
+compact Docker installation floor; 0.4.7 supports a deliberate forward upgrade from that floor.
+Product tags coordinate the CLI, Function SDK, Linux compact server binaries, and compact server
+image. Frontend SDK tags coordinate client and React only. Agent, distributed deployment, protocol,
+storage, and runtime support windows remain separate distribution gates.
+
+Frontend SDK 0.4.8 adds generated Function-reference values and React/Next.js bindings without
+changing Public HTTP/WebSocket v1. It is compatible with the 0.4.7 gateway. The published 0.4.7 CLI
+predates the reference generator; applications need references produced by the current source CLI
+until a later product distribution includes that generator.
 
 Version 0.4.5 adds only additive auth response fields and endpoints. A 0.4.5 CLI can still link
 non-interactively to an older server with explicit IDs; parameterless interactive linking requires
@@ -65,7 +71,8 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.7` alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
-| TypeScript packages | `@runku/client`, `@runku/react`, `@runku/server`, and `@runku/cli` update together |
+| Frontend SDK packages | `@runku/client` and `@runku/react` update together with exact peer versions; currently 0.4.8 |
+| Distribution JavaScript packages | `@runku/server` and `@runku/cli` remain coordinated with the product distribution; currently 0.4.7 |
 | HTTP/WebSocket | v1 envelopes; unknown versions rejected |
 | Values/index keys | v1 canonical encodings; existing vectors immutable |
 | Release/artifact | Version/digest/size/runtime descriptors verified |
@@ -80,9 +87,9 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Boundary | Current contract |
 |---|---|
 | CLI | tagged macOS/Linux GNU/Windows binaries for ARM64/x86-64 plus exact-version npm launcher |
-| Application authoring | matching `@runku/server` declaration/validator contract |
-| TypeScript application client | matching `@runku/client` HTTP/Realtime/file contract |
-| React and Next.js bindings | matching `@runku/react` and exact peer `@runku/client` version |
+| Application authoring | `@runku/server@0.4.7` declaration/validator contract |
+| TypeScript application client | `@runku/client@0.4.8` HTTP/Realtime/file/reference contract |
+| React and Next.js bindings | `@runku/react@0.4.8` with exact `@runku/client@0.4.8` peer |
 | Public API | strict HTTP/WebSocket v1 envelopes and canonical values |
 | Compact server | Linux GNU ARM64/x86-64 binary and multi-platform non-root image |
 | Compact deployment | Docker Compose v2, one attached Product Environment, PostgreSQL 16 Platform Identity, Safe runtime |
@@ -109,15 +116,17 @@ durable disabled-definition intent. After that migration, an older binary must n
 Cron repository. Declaration editing and Scheduled retry/cancel remain outside this contract.
 
 - exact Runku release tag/version;
-- exact CLI/SDK package versions;
+- exact product-distribution and frontend-SDK package versions;
 - server OCI image by version and digest;
 - Docker package from the same release;
 - deployment configuration and secret-file layout;
 - current persisted schema/migration status;
 - application Release manifest/runtime versions.
 
-Do not combine a newly built SDK, CLI, or server with an older package merely because its method or
-JSON fields appear similar. Additive fields are safe only where the consuming version explicitly
+Do not combine an undocumented SDK, CLI, or server version merely because its method or JSON fields
+appear similar. The frontend SDK pair is the narrow exception to same-version coordination: its
+release notes must explicitly name a compatible Public Protocol/server range, and React must use
+its exact client peer. Additive fields are safe only where the consuming version explicitly
 documents that it ignores/accepts them.
 
 The 0.4.6 Object Storage extension adds current/version metadata schema v2 and bounded

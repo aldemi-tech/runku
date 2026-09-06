@@ -10,6 +10,7 @@
   "scripts": {
     "check:packages": "pnpm --filter @runku/client check && pnpm --filter @runku/server check && pnpm --filter @runku/react check && pnpm --filter @runku/cli check",
     "check:release": "node scripts/verify-release.mjs",
+    "check:sdk-release": "node scripts/verify-sdk-release.mjs",
     "check:examples": "pnpm --filter @runku/example-chat-next check && pnpm --filter @runku/example-field-board-next check && pnpm --filter @runku/example-node-actions check",
     "docs:dev": "pnpm --filter @runku/docs start",
     "docs:build": "pnpm --filter @runku/docs build",

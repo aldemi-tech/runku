@@ -1,15 +1,22 @@
-# Publishing a Runku distribution
+# Publishing Runku artifacts
 
-One repository tag coordinates the public CLI, TypeScript SDKs, and compact Linux server release.
-The release workflow builds six native CLI executables and two native server executables, packages
-the same CLI bytes for GitHub and npm, publishes ten npm packages, publishes one multi-platform
-server image, generates checksums/SBOM/provenance, and creates the GitHub Release only after npm and
-the image are complete. It also publishes one compact self-host installation archive.
+Runku has two explicit release tracks. A `vX.Y.Z` distribution tag coordinates the public CLI,
+`@runku/server`, frontend SDKs, compact Linux server, image, and self-host archive. An
+`sdk-vX.Y.Z` tag publishes only the exact-version `@runku/client` and `@runku/react` pair when the
+frontend bindings need to move without changing CLI, Rust, server, image, or persisted contracts.
+
+The distribution path builds six native CLI executables and two native server executables,
+packages the same CLI bytes for GitHub and npm, publishes ten npm packages, publishes one
+multi-platform server image, generates checksums/SBOM/provenance, and creates the GitHub Release
+only after npm and the image are complete. It also publishes one compact self-host installation
+archive.
 
 This procedure publishes irreversible external state. Run it only from a reviewed, clean commit on
 `main`; never from an uncommitted working tree or a fork.
 
 ## Published artifacts
+
+### Coordinated distribution
 
 Version `X.Y.Z` produces:
 
@@ -25,6 +32,18 @@ Version `X.Y.Z` produces:
 - `ghcr.io/aldemi-tech/runku-server:X.Y.Z` as a non-root ARM64/x86_64 image, plus an immutable
   `sha-COMMIT` tag and architecture assembly tags;
 - `SHA256SUMS`, GitHub artifact attestations, npm integrity, and npm provenance.
+
+### Frontend SDK pair
+
+Version `X.Y.Z` under tag `sdk-vX.Y.Z` produces only:
+
+- `@runku/client@X.Y.Z`;
+- `@runku/react@X.Y.Z` with an exact `@runku/client@X.Y.Z` peer;
+- npm integrity and provenance for both packages.
+
+It does not create a GitHub Release, CLI/native package, Rust crate, server archive/image, or
+self-host package. The SDK release notes must name the compatible Public Protocol/server range and
+whether the currently published CLI can generate every documented reference artifact.
 
 Each Windows ZIP and native npm package contains both `runku.exe` and its exact `duckdb.dll`.
 The release job downloads that runtime from the DuckDB version pinned in `Cargo.lock`, verifies the
@@ -48,10 +67,11 @@ The release owner needs:
 6. protected release tags so an unreviewed commit cannot trigger publication.
 
 The React package name must be bootstrapped once before it can use trusted publishing; all existing
-package names already use it. Use a short-lived granular token in a reviewed, temporary workflow
-change for only that package, then remove the token wiring immediately after configuring trust.
-The normal workflow contains no npm token or repository secret. Never leave `NPM_TOKEN` or
-`NODE_AUTH_TOKEN` in the normal release path.
+package names already use it. Use the short-lived `NPM_REACT_BOOTSTRAP_TOKEN` repository secret in
+the reviewed SDK workflow for only the first React publication, then configure `release.yml` as a
+trusted publisher, remove the secret and its workflow wiring, and revoke the token immediately.
+After bootstrap, the normal workflow contains no npm token or repository secret. Never leave
+`NPM_REACT_BOOTSTRAP_TOKEN`, `NPM_TOKEN`, or `NODE_AUTH_TOKEN` in the normal release path.
 
 After the first successful publication, configure every package in npm with:
 
@@ -64,10 +84,10 @@ After the first successful publication, configure every package in npm with:
 | Allowed action | `npm publish` |
 
 Then require two-factor authentication, disallow traditional write tokens for each package, delete
-the `NPM_TOKEN` GitHub secret, and revoke the bootstrap token in npm. Do not copy a personal npm
-session file into the repository or print it in Actions logs.
+the `NPM_REACT_BOOTSTRAP_TOKEN` GitHub secret, and revoke the bootstrap token in npm. Do not copy a
+personal npm session file into the repository or print it in Actions logs.
 
-## Version preparation
+## Distribution version preparation
 
 Runku uses one version for the CLI, all three SDKs, and native packages during the `0.x` line. Update:
 
@@ -92,6 +112,36 @@ git diff --check
 `scripts/verify-release.mjs` rejects divergent package/Cargo/help versions, native package metadata,
 launcher dependencies, and a tag that is not exactly `vX.Y.Z`.
 
+## Frontend SDK version preparation
+
+An SDK-only release changes only `packages/client/package.json`, `packages/react/package.json`, the
+exact React peer version, lockfile, changelog, compatibility notes, and affected SDK docs. Keep the
+root, CLI/native packages, `@runku/server`, Rust crates, compact server, and image version unchanged.
+
+Run:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm check:sdk-release
+pnpm --filter @runku/client check
+pnpm --filter @runku/react check
+pnpm --dir examples/field-board-next check
+make docs
+git diff --check
+```
+
+Pack both packages and validate the exact artifact set without publication:
+
+```sh
+package_root=$(mktemp -d)
+npm pack ./packages/client --pack-destination "$package_root"
+npm pack ./packages/react --pack-destination "$package_root"
+node scripts/publish-npm.mjs "$package_root" --sdk --dry-run
+```
+
+`scripts/verify-sdk-release.mjs` rejects mismatched client/React/peer versions and requires the tag
+to equal `sdk-vX.Y.Z`.
+
 Before the first tag or after changing the platform matrix, run the workflow manually from `main`:
 
 ```sh
@@ -114,11 +164,19 @@ git tag -s vX.Y.Z -m "Runku vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
+For the frontend-only track, create a separate signed tag instead:
+
+```sh
+git tag -s sdk-vX.Y.Z -m "Runku frontend SDK X.Y.Z"
+git push origin sdk-vX.Y.Z
+```
+
 `.github/workflows/release.yml` runs these jobs:
 
 1. `metadata` validates the immutable tag/version relationship.
-2. `sdk-packages` installs the locked JavaScript workspace, runs the four focused package checks,
-   and packs client, React, server, and CLI launcher tarballs.
+2. `sdk-packages` installs the locked JavaScript workspace and runs the four focused package
+   checks. It packs client/React for SDK tags and additionally packs server/CLI for distribution
+   tags.
 3. `selfhost-package` creates the compact installation archive and statically validates its Compose
    model without starting services.
 4. Six `cli-binaries` jobs run concurrently on native ARM64/x86_64 macOS, Linux, and Windows
@@ -132,10 +190,14 @@ git push origin vX.Y.Z
 7. `server-image` combines those server bytes with the matching native CLI bytes into a digest-
    pinned distroless image, publishes both architectures, and creates the version/commit manifests
    with BuildKit SBOM and provenance attestations.
-8. `publish-npm` verifies the complete ten-package set, publishes native packages first and the
-   launcher last, and compares registry integrity with the local tarballs.
+8. For a distribution tag, `publish-npm` verifies the complete ten-package set, publishes native
+   packages first and the launcher last, and compares registry integrity with the local tarballs.
 9. `github-release` generates checksums, attests assets, and publishes the release after npm and
    the server image pass.
+
+For `sdk-v*`, the same workflow runs metadata and focused package checks, packs only client/React,
+and runs `publish-sdk-npm`. Distribution binaries, images, archives, and GitHub Release jobs are
+skipped.
 
 The release workflow intentionally does not run `make check`, examples, databases, a server
 lifecycle, HTTP/WebSocket flows, benchmarks, Clippy, rustdoc, or the Rust test suite. Its Docker
@@ -149,7 +211,7 @@ Cargo registry, Git dependencies, and the target directory are cached per exact 
 lock/toolchain hash. Matrix jobs remain independent and `fail-fast` is disabled so one platform
 failure does not hide evidence from the other five.
 
-## Success verification
+## Distribution success verification
 
 The workflow is complete only when:
 
@@ -174,9 +236,22 @@ Confirm npm displays provenance and GitHub displays the release/asset attestatio
 Pull the server image by its reported digest on both Linux architecture families, run
 `runku-server version`, and execute the documented compact-profile smoke campaign before promotion.
 
+For an SDK-only release, verify:
+
+```sh
+npm view @runku/client@X.Y.Z version dist.integrity
+npm view @runku/react@X.Y.Z version dist.integrity peerDependencies
+```
+
+Then install both exact versions into an empty temporary project, import `@runku/react` and
+`@runku/react/server`, and run a TypeScript check. Confirm npm displays provenance. The React
+bootstrap publication is the one permitted exception; configure trusted publishing immediately
+afterward so subsequent SDK versions carry normal OIDC provenance.
+
 ## Failure and safe retry
 
-The workflow may be rerun for the same tag. `scripts/publish-npm.mjs` behaves as follows:
+The workflow may be rerun for the same tag. `scripts/publish-npm.mjs`, including `--sdk` mode,
+behaves as follows:
 
 - missing name/version: publish it;
 - existing name/version with identical SHA-512 integrity: verify and skip it;

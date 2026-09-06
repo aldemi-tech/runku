@@ -1,9 +1,19 @@
 {
   "name": "@runku/react",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "React and Next.js bindings for the Runku TypeScript client",
   "type": "module",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/aldemi-tech/runku/tree/main/packages/react#readme",
+  "bugs": {
+    "url": "https://github.com/aldemi-tech/runku/issues"
+  },
+  "keywords": ["runku", "react", "nextjs", "typescript", "realtime"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aldemi-tech/runku.git",
+    "directory": "packages/react"
+  },
   "sideEffects": false,
   "files": ["dist", "README.md", "LICENSE"],
   "exports": {
@@ -19,7 +29,7 @@
   "engines": { "node": ">=20" },
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
   "peerDependencies": {
-    "@runku/client": "0.4.7",
+    "@runku/client": "0.4.8",
     "react": ">=18.3.0 <20"
   },
   "devDependencies": {
