@@ -86,22 +86,28 @@ profile:
 ```
 
 The helper quiesces `runku-server`, dumps Platform Identity PostgreSQL in custom format, archives
-the complete Product and Platform directories, writes SHA-256 digests and the exact server version,
-and restarts only a previously running server. Verification parses the PostgreSQL catalog and
-rejects corrupt digests, unsafe archive paths, missing Product identity, unknown manifest versions,
-and a missing encryption-policy reference without changing durable state.
+the complete Product, Platform, and dedicated `files/` directories, writes SHA-256 digests and the
+exact server version, and restarts only a previously running server. Thus the standalone filesystem
+profile keeps Product metadata, Application Files, and logical Object Storage bytes in one recovery
+point. Verification parses the PostgreSQL catalog and rejects corrupt digests, unsafe archive paths,
+missing Product identity or byte directory, unknown manifest versions, and a missing
+encryption-policy reference without changing durable state.
 
 External secret files are deliberately excluded. Preserve the Platform Identity pepper under
 separate access control and the same recovery record; restore checks its SHA-256 fingerprint before
 changing the empty destination. The database connection credential may be replaced for a new
 PostgreSQL service, but the original Platform pepper and Product-root identity material are required.
 
-Restore requires empty Product/Platform directories, an empty PostgreSQL database, and an exact
+Restore requires empty Product/Platform/`files` directories, an empty PostgreSQL database, and an exact
 `restore:<backup-directory-name>` confirmation. It stages and validates filesystem data first,
 restores PostgreSQL in one transaction, moves the staged state into place, runs `runku doctor`,
 checks/migrates the schema, starts the server, and waits for readiness. Detailed commands and
 post-restore application/session checks are in the
 [Docker guide](../../deployments/docker/README.md#total-loss-restore).
+
+The packaged command fails closed for profiles using external Application File/Object Storage S3
+bytes. Those profiles need a provider-native, checksum-verified recovery point coordinated with the
+database/Product snapshot; a metadata-only archive is never reported as a complete backup.
 
 For the optional HA log overlay, this backup covers local Product hot state and Platform Identity;
 it does not copy the external S3 archive or JetStream. Protect and reconcile those systems using the

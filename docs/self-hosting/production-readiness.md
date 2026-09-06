@@ -17,7 +17,7 @@ boundary:
 | Runtime | Safe V8; no Full Node Agent |
 | Processes | one `runku-server` plus PostgreSQL; optional same-image log workers |
 | Logs | embedded filesystem Parquet/DuckDB, optional external NATS/S3 HA log overlay |
-| Application files | Environment-scoped metadata plus dedicated filesystem or external S3-compatible bytes; byte-store backup/recovery remains operator-owned |
+| Application files | Environment-scoped metadata plus dedicated filesystem or external S3-compatible bytes; compact backup includes filesystem bytes, while external-S3 recovery remains operator-owned |
 | Network | dedicated Linux host, loopback listeners, operator-owned TLS reverse proxy |
 | Lifecycle | setup, reconcilable invitation/OIDC login, publish, promote, rollback, logs, backup, verify, restore, upgrade, guarded uninstall |
 | Upgrade floor | forward upgrade from 0.3.0; no database downgrade window |
@@ -29,7 +29,7 @@ The release package and executable evidence cover:
 - [x] configuration preflight, idempotent migration, liveness/readiness, and graceful stop;
 - [x] clean initialization, initial-owner login, Product publish/release/promote/invoke/log flow;
 - [x] idempotent delegated-invitation issue/reconcile/conflict/revoke against PostgreSQL;
-- [x] offline PostgreSQL plus complete Product/Platform filesystem backup and verification;
+- [x] offline PostgreSQL plus complete Product/Platform/Application Files/Object Storage filesystem backup and verification;
 - [x] restore into empty state with secret fingerprint, `doctor`, migration, and readiness checks;
 - [x] restart with automatic serving of the persisted Channel;
 - [x] explicit image upgrade preflight and guarded data deletion;

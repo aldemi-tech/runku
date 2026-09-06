@@ -107,12 +107,20 @@ jq -e '.result == {"type":"string","value":"v1"}' "$evidence/invoke-before-backu
 RUNKU_CONFIG_HOME="$evidence/cli-session" "$runku_bin" logs --remote \
   --root "$evidence/data/product" --release "$release" >"$evidence/logs.ndjson"
 
+# Represents an immutable byte already committed by Application Files/Object Storage. The backup
+# campaign must preserve the separately mounted byte root, not only its Product metadata.
+mkdir -p "$evidence/data/files/v1/evidence"
+printf '%s' 'runku-recovery-byte-v1' >"$evidence/data/files/v1/evidence/object"
+byte_sha_before="$(openssl dgst -sha256 -r "$evidence/data/files/v1/evidence/object" | awk '{ print $1 }')"
+
 backup="$evidence/backup"
 "$package/runku-selfhost" backup "$backup" evidence-encrypted-volume
 "$package/runku-selfhost" verify-backup "$backup"
 RUNKU_UNINSTALL_CONFIRM="delete:$project" "$package/runku-selfhost" uninstall delete-data
 "$package/runku-selfhost" configure
 RUNKU_RESTORE_CONFIRM='restore:backup' "$package/runku-selfhost" restore "$backup"
+byte_sha_after="$(openssl dgst -sha256 -r "$evidence/data/files/v1/evidence/object" | awk '{ print $1 }')"
+[[ "$byte_sha_after" == "$byte_sha_before" ]]
 
 RUNKU_CONFIG_HOME="$evidence/cli-session" "$runku_bin" status --remote \
   --root "$evidence/data/product" >"$evidence/status-after-restore.json"
@@ -126,5 +134,5 @@ printf '%s\n' 'self-host release artifact evidence passed:'
 printf '%s\n' '  clean package/image setup and mounted-secret configuration: passed'
 printf '%s\n' '  invitation login and authenticated publish/release/promote: passed'
 printf '%s\n' '  Product invocation and scoped logs: passed'
-printf '%s\n' '  coordinated backup and offline verification: passed'
+printf '%s\n' '  coordinated metadata/PostgreSQL/object-byte backup and offline verification: passed'
 printf '%s\n' '  empty-install restore, persisted session, and automatic Channel serving: passed'

@@ -184,14 +184,15 @@ verifies that the reported cell is the current placement.
 
 ## Backup, restore, and residual responsibility
 
-Runku does **not** back up application file bytes, configure replication/versioning, manage S3 or
-MinIO lifecycle, or provide a disaster-recovery strategy for this feature. The compact
-`runku-selfhost backup` archives Product metadata but deliberately excludes the dedicated `files/`
-directory and any external bucket. A metadata-only restore is incomplete and may report
-`FILE_STORAGE_CORRUPT` or not-found objects.
+The compact standalone filesystem profile includes the dedicated `files/` directory in the same
+offline recovery point as Product metadata and PostgreSQL. `runku-selfhost verify-backup` checks the
+archive digest and presence of that byte root; empty restore installs it before readiness checks.
+Runku does **not** configure replication/versioning, manage S3 or MinIO lifecycle, or copy an
+external bucket. The packaged backup command fails closed for an external-S3 profile so a
+metadata-only copy cannot be mistaken for a complete recovery point.
 
-Operators must back up and restore the filesystem directory at a coordinated recovery point, or
-use separately operated MinIO/S3 storage with the required durability, versioning/replication,
+Operators using external storage must use separately operated MinIO/S3 storage with the required
+durability, versioning/replication,
 retention, encryption, lifecycle, and tested restore process. Restore object bytes before reopening
 Product traffic, then canary metadata/download/checksum/delete and compare capacity. Runku cannot
 roll an external bucket back during a binary rollback and never deletes objects outside its exact

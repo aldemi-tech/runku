@@ -260,6 +260,10 @@ backup_create() {
     none|NONE|unencrypted|UNENCRYPTED|'') fail "an external encryption or encrypted-volume reference is required" ;;
   esac
   test ! -e "$destination" || fail "backup destination already exists"
+  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  case "${deployment_profile:-standalone}" in
+    *s3-files*) fail "complete backup is unavailable for an external application-file/Object Storage bucket; create and verify the provider recovery point first" ;;
+  esac
   parent=$(dirname -- "$destination")
   mkdir -p "$parent"
   parent=$(CDPATH= cd -- "$parent" && pwd)
@@ -284,7 +288,8 @@ backup_create() {
   test -f "$secrets_directory/platform-pepper" || fail "platform pepper is missing"
   compose up -d --wait postgres
   compose exec -T postgres pg_dump -U runku -d runku --format=custom >"$temporary/platform.pgdump"
-  tar -C "$data_directory" -czf "$temporary/product-state.tar.gz" product platform
+  test -d "$data_directory/files" || fail "application-file/Object Storage byte directory is missing"
+  tar -C "$data_directory" -czf "$temporary/product-state.tar.gz" product platform files
   server_version=$(compose run --rm --no-deps server version | tr -d '\r\n')
   database_sha=$(sha256_file "$temporary/platform.pgdump")
   state_sha=$(sha256_file "$temporary/product-state.tar.gz")
@@ -297,7 +302,7 @@ backup_create() {
     --arg databaseSha256 "$database_sha" \
     --arg stateSha256 "$state_sha" \
     --arg platformPepperSha256 "$pepper_sha" \
-    '{formatVersion:1,createdAt:$createdAt,serverVersion:$serverVersion,encryptionReference:$encryptionReference,containsSensitiveState:true,externalSecretFilesIncluded:false,files:{"platform.pgdump":$databaseSha256,"product-state.tar.gz":$stateSha256},requiredSecretFingerprints:{platformPepperSha256:$platformPepperSha256}}' \
+    '{formatVersion:2,createdAt:$createdAt,serverVersion:$serverVersion,encryptionReference:$encryptionReference,containsSensitiveState:true,externalSecretFilesIncluded:false,includedPersistentDirectories:["files","platform","product"],files:{"platform.pgdump":$databaseSha256,"product-state.tar.gz":$stateSha256},requiredSecretFingerprints:{platformPepperSha256:$platformPepperSha256}}' \
     >"$temporary/manifest.json"
   chmod 0600 "$temporary"/*
   mv "$temporary" "$destination"
@@ -321,10 +326,11 @@ backup_verify() {
   backup=$1
   test -d "$backup" || fail "backup directory does not exist"
   jq -e '
-    (keys | sort) == ["containsSensitiveState","createdAt","encryptionReference","externalSecretFilesIncluded","files","formatVersion","requiredSecretFingerprints","serverVersion"] and
+    (keys | sort) == ["containsSensitiveState","createdAt","encryptionReference","externalSecretFilesIncluded","files","formatVersion","includedPersistentDirectories","requiredSecretFingerprints","serverVersion"] and
     (.files | keys | sort) == ["platform.pgdump","product-state.tar.gz"] and
     (.requiredSecretFingerprints | keys) == ["platformPepperSha256"] and
-    .formatVersion == 1 and .containsSensitiveState == true and
+    .formatVersion == 2 and .includedPersistentDirectories == ["files","platform","product"] and
+    .containsSensitiveState == true and
     .externalSecretFilesIncluded == false and (.encryptionReference | length > 0) and
     (.createdAt | type == "string") and (.serverVersion | startswith("runku-server "))
   ' "$backup/manifest.json" >/dev/null
@@ -335,6 +341,7 @@ backup_verify() {
   done
   tar -tzf "$backup/product-state.tar.gz" | awk '$0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/ { bad=1 } END { exit bad }' || fail "state archive contains an unsafe path"
   tar -tzf "$backup/product-state.tar.gz" | grep -qx 'product/.runku/local-state-v1.json' || fail "state archive does not contain Product identity"
+  tar -tzf "$backup/product-state.tar.gz" | grep -Eq '^files/?$' || fail "state archive does not contain application-file/Object Storage bytes"
   compose run --rm -T --no-deps --entrypoint pg_restore postgres --list <"$backup/platform.pgdump" >/dev/null
   printf 'backup verified: %s\n' "$backup"
 }
@@ -357,6 +364,7 @@ restore_backup() {
   compose stop -t 30 server >/dev/null 2>&1 || true
   test -z "$(find "$data_directory/product" -mindepth 1 -print -quit)" || fail "Product destination is not empty"
   test -z "$(find "$data_directory/platform" -mindepth 1 -print -quit)" || fail "Platform destination is not empty"
+  test -z "$(find "$data_directory/files" -mindepth 1 -print -quit)" || fail "application-file/Object Storage byte destination is not empty"
   compose up -d --wait postgres
   table_count=$(compose exec -T postgres psql -X -U runku -d runku -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema')")
   test "$table_count" = 0 || fail "PostgreSQL destination is not empty"
@@ -367,9 +375,10 @@ restore_backup() {
   tar -C "$stage" -xzf "$backup/product-state.tar.gz"
   test -f "$stage/product/.runku/local-state-v1.json" || fail "restored Product state is incomplete"
   compose exec -T postgres pg_restore -U runku -d runku --exit-on-error --single-transaction <"$backup/platform.pgdump"
-  rmdir "$data_directory/product" "$data_directory/platform"
+  rmdir "$data_directory/product" "$data_directory/platform" "$data_directory/files"
   mv "$stage/product" "$data_directory/product"
   mv "$stage/platform" "$data_directory/platform"
+  mv "$stage/files" "$data_directory/files"
   rmdir "$stage"
   trap - EXIT HUP INT TERM
   compose run --rm --no-deps --entrypoint /usr/local/bin/runku server doctor --root /var/lib/runku/product

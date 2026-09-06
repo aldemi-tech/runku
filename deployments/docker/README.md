@@ -157,21 +157,22 @@ external encryption/key-policy reference in the manifest and cannot be `none`:
 ./runku-selfhost verify-backup /mnt/encrypted/runku-backup-2026-09-02
 ```
 
-Backup briefly stops serving, creates a PostgreSQL custom-format dump, archives Product metadata and
-the Platform directory, records SHA-256 checksums and the server version, and restarts only if the
-server was previously running. It excludes external secret files, the dedicated `files/` directory,
-and every external bucket. Runku does not provide application-file backup or additional durability
-strategy. Coordinate a filesystem snapshot or use separately operated MinIO/S3, preserve the
-matching Platform pepper/database access material, and test one recovery point as a unit.
+Backup briefly stops serving, creates a PostgreSQL custom-format dump, archives the Product,
+Platform, and dedicated `files/` directories, records SHA-256 checksums and the server version, and
+restarts only if the server was previously running. On the standalone filesystem profile this is
+one recovery point for Product metadata, Application Files, and logical Object Storage bytes.
+External secret files remain excluded. Profiles using an external application-file/Object Storage
+bucket fail this command closed until the operator has created and verified a provider recovery
+point; the compact helper never labels a metadata-only copy complete.
 
 `verify-backup` checks the manifest, every digest, archive path safety, Product identity, and
 `pg_restore` catalog without changing the installation.
 
 ## Total-loss restore
 
-Restore only into a configured installation whose PostgreSQL database, Product directory, and
-Platform directory are empty. Supply the original Platform pepper and use the backup directory name
-in the explicit confirmation:
+Restore only into a configured installation whose PostgreSQL database and Product, Platform, and
+`files/` directories are empty. Supply the original Platform pepper and use the backup directory
+name in the explicit confirmation:
 
 ```sh
 export RUNKU_RESTORE_CONFIRM='restore:runku-backup-2026-09-02'
@@ -185,10 +186,10 @@ check, starts the server, and waits for readiness. Afterward, verify operator lo
 Environment IDs, Application Keys, Channel targets, a Query and idempotent Mutation, Realtime
 reconnect, schedules, and logs across the archive/hot boundary.
 
-Before reopening traffic, restore application file bytes from the separately coordinated
-filesystem/S3 recovery point. The helper restores their metadata only. Missing or mismatched bytes
-make the recovery incomplete and can surface as `FILE_STORAGE_NOT_FOUND` or
-`FILE_STORAGE_CORRUPT`.
+The standalone helper restores Application Files and logical Object Storage bytes before running
+post-restore checks. An external-S3 deployment requires the separately coordinated provider
+recovery point before Product traffic can reopen; missing or mismatched bytes make the recovery
+incomplete and can surface as `FILE_STORAGE_NOT_FOUND` or `FILE_STORAGE_CORRUPT`.
 
 An older recovery point can resurrect subsequently revoked sessions or invitations. Reconcile and
 revoke them before reopening public traffic.
