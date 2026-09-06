@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -20,8 +21,9 @@ use runku_core::{EnvironmentScope, OperationId, RequestId};
 use runku_file_storage::{FileObjectStore, FileStorageError};
 use runku_object_storage::{
     AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket, BucketName, BucketPolicy,
-    BucketState, CorsMethod, DeleteObjectCommand, ObjectMetadata, ObjectPageRequest,
-    ObjectStorageActor, ObjectStorageError, ObjectStorageService, ObjectVersionId,
+    BucketState, CorsMethod, DeleteObjectCommand, MultipartPart, MultipartUpload,
+    MultipartUploadId, MultipartUploadState, ObjectMetadata, ObjectPageRequest, ObjectStorageActor,
+    ObjectStorageError, ObjectStorageService, ObjectVersionId, ObjectVersionPageRequest,
     PutObjectCommand,
 };
 use runku_value::TimestampMicros;
@@ -149,7 +151,7 @@ async fn handle(
     let uri = request.uri().clone();
     let headers = request.headers().clone();
     let maximum = usize::try_from(state.0.max_object_bytes).unwrap_or(usize::MAX);
-    let body = if method == Method::PUT {
+    let body = if matches!(method, Method::PUT | Method::POST) {
         match to_bytes(request.into_body(), maximum).await {
             Ok(bytes) => bytes,
             Err(_) => return s3_error(request_id, StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge"),
@@ -163,10 +165,13 @@ async fn handle(
         Err(error) => return s3_error(request_id, error.status, error.code),
     };
     let key = key.as_deref();
+    let query = query_pairs(&uri);
+    let multipart_requested = query.iter().any(|(name, _)| name == "uploadId");
     let operation = match (&method, key, headers.get("x-amz-copy-source")) {
         (&Method::GET, None, _) => AccessKeyOperation::List,
+        (&Method::GET, Some(_), _) if multipart_requested => AccessKeyOperation::List,
         (&Method::GET | &Method::HEAD, Some(_), _) => AccessKeyOperation::Read,
-        (&Method::PUT, Some(_), _) => AccessKeyOperation::Write,
+        (&Method::POST | &Method::PUT, Some(_), _) => AccessKeyOperation::Write,
         (&Method::DELETE, Some(_), _) => AccessKeyOperation::Delete,
         _ => {
             return s3_error(
@@ -194,15 +199,61 @@ async fn handle(
     {
         return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
     }
+    if let Err(error) = state
+        .0
+        .service
+        .apply_lifecycle(state.0.scope, bucket.id, now, 100)
+        .await
+    {
+        return storage_error(request_id, error);
+    }
     let response = match (method.clone(), key) {
+        (Method::GET, None) if has_bare_query(&query, "versions") => {
+            list_object_versions(request_id, &state.0, &bucket, auth.as_ref(), &uri).await
+        }
+        (Method::GET, None) if has_bare_query(&query, "uploads") => {
+            list_multipart_uploads(request_id, &state.0, &bucket, auth.as_ref(), &uri).await
+        }
         (Method::GET, None) => {
             list_objects(request_id, &state.0, &bucket, auth.as_ref(), &uri).await
         }
         (Method::GET, Some(key)) => {
-            get_object(request_id, &state.0, &bucket, key, false, &uri, &headers).await
+            if multipart_requested {
+                list_multipart_parts(request_id, &state.0, &bucket, key, &uri).await
+            } else {
+                get_object(request_id, &state.0, &bucket, key, false, &uri, &headers).await
+            }
         }
         (Method::HEAD, Some(key)) => {
             get_object(request_id, &state.0, &bucket, key, true, &uri, &headers).await
+        }
+        (Method::POST, Some(key)) if has_bare_query(&query, "uploads") => {
+            create_multipart_upload(
+                request_id,
+                &state.0,
+                &bucket,
+                key,
+                auth.as_ref(),
+                &headers,
+                now,
+            )
+            .await
+        }
+        (Method::POST, Some(key)) if multipart_requested => {
+            complete_multipart_upload(
+                request_id,
+                &state.0,
+                &bucket,
+                key,
+                auth.as_ref(),
+                &uri,
+                &body,
+                now,
+            )
+            .await
+        }
+        (Method::PUT, Some(key)) if multipart_requested => {
+            put_multipart_part(request_id, &state.0, &bucket, key, &uri, &body, now).await
         }
         (Method::PUT, Some(key)) if headers.contains_key("x-amz-copy-source") => {
             copy_object(
@@ -230,7 +281,11 @@ async fn handle(
             .await
         }
         (Method::DELETE, Some(key)) => {
-            delete_object(request_id, &state.0, &bucket, key, auth.as_ref(), now).await
+            if multipart_requested {
+                abort_multipart_upload(request_id, &state.0, &bucket, key, &uri).await
+            } else {
+                delete_object(request_id, &state.0, &bucket, key, auth.as_ref(), &uri, now).await
+            }
         }
         _ => s3_error(
             request_id,
@@ -574,6 +629,12 @@ fn query_pairs(uri: &Uri) -> Vec<(String, String)> {
         .collect()
 }
 
+fn has_bare_query(pairs: &[(String, String)], name: &str) -> bool {
+    pairs
+        .iter()
+        .any(|(candidate, value)| candidate == name && value.is_empty())
+}
+
 fn one_query<'a>(pairs: &'a [(String, String)], name: &str) -> Result<&'a str, AuthFailure> {
     let mut values = pairs.iter().filter(|(candidate, _)| candidate == name);
     let value = values.next().ok_or_else(malformed_auth)?;
@@ -742,6 +803,21 @@ fn signature_operation_id(
     OperationId::from_ulid(Ulid::from(u128::from_be_bytes(id)))
 }
 
+fn multipart_completion_operation_id(
+    upload_id: MultipartUploadId,
+    completion_digest: &[u8; 32],
+) -> OperationId {
+    let mut hash = Sha256::new();
+    hash.update(b"RUNKU_S3_MULTIPART_COMPLETION_OPERATION_V1\0");
+    hash.update(upload_id.to_string());
+    hash.update(b"\0");
+    hash.update(completion_digest);
+    let digest: [u8; 32] = hash.finalize().into();
+    let mut id = [0_u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    OperationId::from_ulid(Ulid::from(u128::from_be_bytes(id)))
+}
+
 #[allow(clippy::format_push_string)]
 async fn list_objects(
     request_id: RequestId,
@@ -818,6 +894,323 @@ async fn list_objects(
         ));
     }
     xml.push_str("</ListBucketResult>");
+    xml_response(request_id, StatusCode::OK, xml)
+}
+
+async fn list_object_versions(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    auth: Option<&Authentication>,
+    uri: &Uri,
+) -> Response {
+    let query = query_pairs(uri);
+    let prefix = one_optional_query(&query, "prefix").unwrap_or_default();
+    if auth.is_some_and(|value| !prefix.starts_with(&value.metadata.configuration.prefix)) {
+        return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
+    }
+    let after_key = one_optional_query(&query, "key-marker").map(str::to_owned);
+    let after_version = match one_optional_query(&query, "version-id-marker") {
+        Some(value) => match value.parse() {
+            Ok(value) => Some(value),
+            Err(_) => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+        },
+        None => None,
+    };
+    let limit = match one_optional_query(&query, "max-keys") {
+        None => 100,
+        Some(value) => match value.parse::<u16>() {
+            Ok(value) if (1..=100).contains(&value) => value,
+            _ => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+        },
+    };
+    let page = match config
+        .service
+        .list_object_versions(
+            config.scope,
+            bucket.id,
+            &ObjectVersionPageRequest {
+                prefix: prefix.to_owned(),
+                after_key,
+                after_version,
+                limit,
+            },
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return storage_error(request_id, error),
+    };
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>{}</Name><Prefix>{}</Prefix><MaxKeys>{}</MaxKeys><IsTruncated>{}</IsTruncated>",
+        xml_escape(bucket.configuration.name.as_str()),
+        xml_escape(prefix),
+        limit,
+        page.next.is_some(),
+    );
+    for version in &page.versions {
+        let latest = config
+            .service
+            .get_object(config.scope, bucket.id, &version.key)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.version_id == version.version_id);
+        let _ = write!(
+            xml,
+            "<Version><Key>{}</Key><VersionId>{}</VersionId><IsLatest>{}</IsLatest><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Version>",
+            xml_escape(&version.key),
+            version.version_id,
+            latest,
+            format_micros(version.created_at),
+            xml_escape(&version.etag),
+            version.size,
+        );
+    }
+    if let Some((key, version)) = &page.next {
+        let _ = write!(
+            xml,
+            "<NextKeyMarker>{}</NextKeyMarker><NextVersionIdMarker>{}</NextVersionIdMarker>",
+            xml_escape(key),
+            version
+        );
+    }
+    xml.push_str("</ListVersionsResult>");
+    xml_response(request_id, StatusCode::OK, xml)
+}
+
+async fn create_multipart_upload(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    key: &str,
+    auth: Option<&Authentication>,
+    headers: &HeaderMap,
+    now: TimestampMicros,
+) -> Response {
+    let Some(auth) = auth else {
+        return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
+    };
+    let Ok(metadata) = object_user_metadata(headers) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
+    };
+    let upload_id = MultipartUploadId::generate();
+    let upload = MultipartUpload {
+        scope: config.scope,
+        bucket_id: bucket.id,
+        upload_id,
+        key: key.to_owned(),
+        content_type: headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned(),
+        metadata,
+        actor: match format!("storage-key:{}", auth.metadata.id).parse() {
+            Ok(value) => value,
+            Err(error) => return storage_error(request_id, error),
+        },
+        state: MultipartUploadState::Active,
+        created_at: now,
+        completed_at: None,
+        completed_version_id: None,
+    };
+    if let Err(error) = config.service.create_multipart_upload(&upload).await {
+        return storage_error(request_id, error);
+    }
+    xml_response(
+        request_id,
+        StatusCode::OK,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult><Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId></InitiateMultipartUploadResult>",
+            xml_escape(bucket.configuration.name.as_str()),
+            xml_escape(key),
+            upload_id,
+        ),
+    )
+}
+
+fn multipart_upload_id(uri: &Uri) -> Result<MultipartUploadId, ()> {
+    unique_optional_query(&query_pairs(uri), "uploadId")?
+        .ok_or(())?
+        .parse()
+        .map_err(|_| ())
+}
+
+async fn put_multipart_part(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    key: &str,
+    uri: &Uri,
+    body: &Bytes,
+    now: TimestampMicros,
+) -> Response {
+    let Ok(upload_id) = multipart_upload_id(uri) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
+    };
+    let part_number = match unique_optional_query(&query_pairs(uri), "partNumber") {
+        Ok(Some(value)) => match value.parse::<u16>() {
+            Ok(value) if (1..=10_000).contains(&value) => value,
+            _ => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+        },
+        _ => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+    };
+    let upload = match config
+        .service
+        .get_multipart_upload(config.scope, bucket.id, upload_id)
+        .await
+    {
+        Ok(Some(value)) if value.key == key && value.state == MultipartUploadState::Active => value,
+        Ok(_) => return s3_error(request_id, StatusCode::NOT_FOUND, "NoSuchUpload"),
+        Err(error) => return storage_error(request_id, error),
+    };
+    let digest: [u8; 32] = Sha256::digest(body).into();
+    if let Err(error) = config
+        .bytes
+        .put_logical_object(
+            config.scope,
+            &bucket.id.to_string(),
+            &hex_bytes(&digest),
+            body.clone(),
+            config.max_object_bytes,
+        )
+        .await
+    {
+        return file_error(request_id, error);
+    }
+    let part = MultipartPart {
+        number: part_number,
+        size: body.len() as u64,
+        sha256: digest,
+        etag: runku_object_storage::object_etag(&digest),
+        created_at: now,
+    };
+    let _ = upload;
+    if let Err(error) = config
+        .service
+        .put_multipart_part(config.scope, bucket.id, upload_id, &part)
+        .await
+    {
+        return storage_error(request_id, error);
+    }
+    let mut response = empty_response(request_id, StatusCode::OK);
+    if let Ok(value) = HeaderValue::from_str(&part.etag) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    response
+}
+
+async fn list_multipart_parts(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    key: &str,
+    uri: &Uri,
+) -> Response {
+    let Ok(upload_id) = multipart_upload_id(uri) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
+    };
+    let upload = match config
+        .service
+        .get_multipart_upload(config.scope, bucket.id, upload_id)
+        .await
+    {
+        Ok(Some(value)) if value.key == key && value.state == MultipartUploadState::Active => value,
+        Ok(_) => return s3_error(request_id, StatusCode::NOT_FOUND, "NoSuchUpload"),
+        Err(error) => return storage_error(request_id, error),
+    };
+    let parts = match config
+        .service
+        .list_multipart_parts(config.scope, bucket.id, upload_id)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return storage_error(request_id, error),
+    };
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListPartsResult><Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId><IsTruncated>false</IsTruncated>",
+        xml_escape(bucket.configuration.name.as_str()),
+        xml_escape(&upload.key),
+        upload_id
+    );
+    for part in parts {
+        let _ = write!(
+            xml,
+            "<Part><PartNumber>{}</PartNumber><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size></Part>",
+            part.number,
+            format_micros(part.created_at),
+            xml_escape(&part.etag),
+            part.size
+        );
+    }
+    xml.push_str("</ListPartsResult>");
+    xml_response(request_id, StatusCode::OK, xml)
+}
+
+async fn list_multipart_uploads(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    auth: Option<&Authentication>,
+    uri: &Uri,
+) -> Response {
+    let query = query_pairs(uri);
+    let prefix = one_optional_query(&query, "prefix").unwrap_or_default();
+    if auth.is_some_and(|value| !prefix.starts_with(&value.metadata.configuration.prefix)) {
+        return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
+    }
+    let after = match (
+        one_optional_query(&query, "key-marker"),
+        one_optional_query(&query, "upload-id-marker"),
+    ) {
+        (None, None) => None,
+        (Some(key), Some(id)) => match id.parse() {
+            Ok(id) => Some((key, id)),
+            Err(_) => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+        },
+        _ => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+    };
+    let limit = one_optional_query(&query, "max-uploads")
+        .map_or(Ok(100), str::parse::<u16>)
+        .ok()
+        .filter(|value| (1..=100).contains(value));
+    let Some(limit) = limit else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
+    };
+    let page = match config
+        .service
+        .list_multipart_uploads(config.scope, bucket.id, prefix, after, limit)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return storage_error(request_id, error),
+    };
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListMultipartUploadsResult><Bucket>{}</Bucket><Prefix>{}</Prefix><MaxUploads>{}</MaxUploads><IsTruncated>{}</IsTruncated>",
+        xml_escape(bucket.configuration.name.as_str()),
+        xml_escape(prefix),
+        limit,
+        page.next.is_some()
+    );
+    for upload in page.uploads {
+        let _ = write!(
+            xml,
+            "<Upload><Key>{}</Key><UploadId>{}</UploadId><Initiated>{}</Initiated></Upload>",
+            xml_escape(&upload.key),
+            upload.upload_id,
+            format_micros(upload.created_at)
+        );
+    }
+    if let Some((key, id)) = page.next {
+        let _ = write!(
+            xml,
+            "<NextKeyMarker>{}</NextKeyMarker><NextUploadIdMarker>{}</NextUploadIdMarker>",
+            xml_escape(&key),
+            id
+        );
+    }
+    xml.push_str("</ListMultipartUploadsResult>");
     xml_response(request_id, StatusCode::OK, xml)
 }
 
@@ -1239,17 +1632,311 @@ async fn copy_object(
     )
 }
 
+fn complete_part_list(body: &[u8]) -> Result<Vec<(u16, String)>, ()> {
+    let text = std::str::from_utf8(body).map_err(|_| ())?;
+    if !text.contains("<CompleteMultipartUpload") || !text.contains("</CompleteMultipartUpload>") {
+        return Err(());
+    }
+    let mut parts = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<Part>") {
+        rest = &rest[start + "<Part>".len()..];
+        let end = rest.find("</Part>").ok_or(())?;
+        let part = &rest[..end];
+        let number = xml_text(part, "PartNumber")?
+            .parse::<u16>()
+            .map_err(|_| ())?;
+        let etag = xml_text(part, "ETag")?;
+        if !(1..=10_000).contains(&number)
+            || !etag.starts_with('"')
+            || !etag.ends_with('"')
+            || etag.len() > 130
+            || parts
+                .last()
+                .is_some_and(|(previous, _)| *previous >= number)
+        {
+            return Err(());
+        }
+        parts.push((number, etag.to_owned()));
+        rest = &rest[end + "</Part>".len()..];
+    }
+    if parts.is_empty() || parts.len() > 10_000 {
+        return Err(());
+    }
+    Ok(parts)
+}
+
+fn xml_text<'a>(value: &'a str, tag: &str) -> Result<&'a str, ()> {
+    let start_tag = format!("<{tag}>");
+    let end_tag = format!("</{tag}>");
+    let start = value.find(&start_tag).ok_or(())? + start_tag.len();
+    let end = value[start..].find(&end_tag).ok_or(())? + start;
+    let text = &value[start..end];
+    if text.is_empty() || text.contains(['<', '>', '&']) {
+        return Err(());
+    }
+    Ok(text)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn complete_multipart_upload(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    key: &str,
+    auth: Option<&Authentication>,
+    uri: &Uri,
+    body: &[u8],
+    now: TimestampMicros,
+) -> Response {
+    let Some(auth) = auth else {
+        return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
+    };
+    let Ok(upload_id) = multipart_upload_id(uri) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
+    };
+    let upload = match config
+        .service
+        .get_multipart_upload(config.scope, bucket.id, upload_id)
+        .await
+    {
+        Ok(Some(value)) if value.key == key => value,
+        Ok(_) => return s3_error(request_id, StatusCode::NOT_FOUND, "NoSuchUpload"),
+        Err(error) => return storage_error(request_id, error),
+    };
+    if let Some(version_id) = upload.completed_version_id {
+        let Some(object) = config
+            .service
+            .get_object_version(config.scope, bucket.id, key, version_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return s3_error(
+                request_id,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+            );
+        };
+        return complete_multipart_response(request_id, bucket, &object);
+    }
+    let Ok(requested) = complete_part_list(body) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "MalformedXML");
+    };
+    let available = match config
+        .service
+        .list_multipart_parts(config.scope, bucket.id, upload_id)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return storage_error(request_id, error),
+    };
+    for (index, (number, etag)) in requested.iter().enumerate() {
+        let Some(part) = available.iter().find(|part| part.number == *number) else {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
+        };
+        if &part.etag != etag {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
+        }
+        if index + 1 != requested.len() && part.size < 5 * 1024 * 1024 {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "EntityTooSmall");
+        }
+    }
+    let completion_digest: [u8; 32] = Sha256::digest(body).into();
+    if let Err(error) = config
+        .service
+        .claim_multipart_completion(config.scope, bucket.id, upload_id, completion_digest)
+        .await
+    {
+        return match error {
+            ObjectStorageError::Conflict => {
+                s3_error(request_id, StatusCode::CONFLICT, "InvalidRequest")
+            }
+            _ => storage_error(request_id, error),
+        };
+    }
+    let mut assembled = Vec::new();
+    for (index, (number, etag)) in requested.iter().enumerate() {
+        let Some(part) = available.iter().find(|part| part.number == *number) else {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
+        };
+        if &part.etag != etag {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
+        }
+        if index + 1 != requested.len() && part.size < 5 * 1024 * 1024 {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "EntityTooSmall");
+        }
+        let Ok(part_size) = usize::try_from(part.size) else {
+            return s3_error(request_id, StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge");
+        };
+        let next = assembled.len().saturating_add(part_size);
+        if next as u64 > bucket.configuration.quota.max_object_bytes
+            || next as u64 > config.max_object_bytes
+        {
+            return s3_error(request_id, StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge");
+        }
+        let bytes = match config
+            .bytes
+            .get_logical_object(
+                config.scope,
+                &bucket.id.to_string(),
+                &hex_bytes(&part.sha256),
+                part.size,
+                config.max_object_bytes,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return file_error(request_id, error),
+        };
+        assembled.extend_from_slice(&bytes);
+    }
+    let completion_auth = Authentication {
+        metadata: auth.metadata.clone(),
+        operation_id: multipart_completion_operation_id(upload_id, &completion_digest),
+    };
+    let response = write_object(
+        request_id,
+        config,
+        bucket,
+        key,
+        &completion_auth,
+        upload.content_type,
+        upload.metadata,
+        Bytes::from(assembled),
+        now,
+    )
+    .await;
+    if !response.status().is_success() {
+        return response;
+    }
+    let version_id = response
+        .headers()
+        .get("x-amz-version-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    let Some(version_id) = version_id else {
+        return s3_error(
+            request_id,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+        );
+    };
+    if let Err(error) = config
+        .service
+        .complete_multipart_upload(config.scope, bucket.id, upload_id, version_id, now)
+        .await
+    {
+        return storage_error(request_id, error);
+    }
+    let object = match config
+        .service
+        .get_object_version(config.scope, bucket.id, key, version_id)
+        .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return s3_error(
+                request_id,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+            );
+        }
+        Err(error) => return storage_error(request_id, error),
+    };
+    complete_multipart_response(request_id, bucket, &object)
+}
+
+fn complete_multipart_response(
+    request_id: RequestId,
+    bucket: &Bucket,
+    object: &ObjectMetadata,
+) -> Response {
+    let mut response = xml_response(
+        request_id,
+        StatusCode::OK,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><Bucket>{}</Bucket><Key>{}</Key><ETag>{}</ETag></CompleteMultipartUploadResult>",
+            xml_escape(bucket.configuration.name.as_str()),
+            xml_escape(&object.key),
+            xml_escape(&object.etag),
+        ),
+    );
+    if let Ok(value) = HeaderValue::from_str(&object.etag) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&object.version_id.to_string()) {
+        response.headers_mut().insert("x-amz-version-id", value);
+    }
+    response
+}
+
+async fn abort_multipart_upload(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    key: &str,
+    uri: &Uri,
+) -> Response {
+    let Ok(upload_id) = multipart_upload_id(uri) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
+    };
+    match config
+        .service
+        .get_multipart_upload(config.scope, bucket.id, upload_id)
+        .await
+    {
+        Ok(Some(value)) if value.key != key => {
+            return s3_error(request_id, StatusCode::NOT_FOUND, "NoSuchUpload");
+        }
+        Ok(_) => {}
+        Err(error) => return storage_error(request_id, error),
+    }
+    match config
+        .service
+        .abort_multipart_upload(config.scope, bucket.id, upload_id)
+        .await
+    {
+        Ok(()) => empty_response(request_id, StatusCode::NO_CONTENT),
+        Err(ObjectStorageError::Conflict) => {
+            s3_error(request_id, StatusCode::CONFLICT, "InvalidRequest")
+        }
+        Err(error) => storage_error(request_id, error),
+    }
+}
+
 async fn delete_object(
     request_id: RequestId,
     config: &S3ProductConfig,
     bucket: &Bucket,
     key: &str,
     auth: Option<&Authentication>,
+    uri: &Uri,
     now: TimestampMicros,
 ) -> Response {
     let Some(auth) = auth else {
         return s3_error(request_id, StatusCode::FORBIDDEN, "AccessDenied");
     };
+    let Ok(version) = requested_version(uri) else {
+        return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument");
+    };
+    if let Some(version_id) = version {
+        return match config
+            .service
+            .delete_object_version(config.scope, bucket.id, key, version_id)
+            .await
+        {
+            Ok(true) => {
+                let mut response = empty_response(request_id, StatusCode::NO_CONTENT);
+                if let Ok(value) = HeaderValue::from_str(&version_id.to_string()) {
+                    response.headers_mut().insert("x-amz-version-id", value);
+                }
+                response
+            }
+            Ok(false) => empty_response(request_id, StatusCode::NO_CONTENT),
+            Err(error) => storage_error(request_id, error),
+        };
+    }
     let current = match config
         .service
         .get_object(config.scope, bucket.id, key)
@@ -1690,7 +2377,8 @@ mod tests {
 
     use super::{
         S3ProductConfig, aws_encode, build_s3_router, canonical_headers, canonical_query,
-        canonical_uri, derive_signing_key, hmac_sha256, parse_amz_date, sha256_hex,
+        canonical_uri, derive_signing_key, hmac_sha256, multipart_completion_operation_id,
+        parse_amz_date, sha256_hex,
     };
 
     #[test]
@@ -1706,6 +2394,26 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         assert!(parse_amz_date("20260230T000000Z").is_none());
+    }
+
+    #[test]
+    fn multipart_completion_identity_binds_upload_and_exact_body() {
+        let upload = runku_object_storage::MultipartUploadId::generate();
+        assert_eq!(
+            multipart_completion_operation_id(upload, &[1; 32]),
+            multipart_completion_operation_id(upload, &[1; 32])
+        );
+        assert_ne!(
+            multipart_completion_operation_id(upload, &[1; 32]),
+            multipart_completion_operation_id(upload, &[2; 32])
+        );
+        assert_ne!(
+            multipart_completion_operation_id(upload, &[1; 32]),
+            multipart_completion_operation_id(
+                runku_object_storage::MultipartUploadId::generate(),
+                &[1; 32],
+            )
+        );
     }
 
     #[tokio::test]
@@ -1929,6 +2637,106 @@ mod tests {
         let list = String::from_utf8(to_bytes(list.into_body(), 8_192).await?.to_vec())?;
         assert!(list.contains("<Key>uploads/hello.txt</Key>"));
 
+        let versions = router
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                "/s3/media?versions&prefix=uploads%2F",
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[],
+            )?)
+            .await?;
+        assert_eq!(versions.status(), StatusCode::OK);
+        let versions = String::from_utf8(to_bytes(versions.into_body(), 8_192).await?.to_vec())?;
+        assert!(versions.contains(&format!("<VersionId>{first_version}</VersionId>")));
+
+        let delete_old_uri = format!("/s3/media/uploads/hello.txt?versionId={first_version}");
+        let deleted_old = router
+            .clone()
+            .oneshot(signed_request(
+                Method::DELETE,
+                &delete_old_uri,
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[],
+            )?)
+            .await?;
+        assert_eq!(deleted_old.status(), StatusCode::NO_CONTENT);
+        assert!(
+            service
+                .get_object(scope, bucket, "uploads/hello.txt")
+                .await?
+                .is_some()
+        );
+
+        let initiated = router
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                "/s3/media/uploads/multipart.txt?uploads",
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[("content-type", "text/plain")],
+            )?)
+            .await?;
+        assert_eq!(initiated.status(), StatusCode::OK);
+        let initiated = String::from_utf8(to_bytes(initiated.into_body(), 8_192).await?.to_vec())?;
+        let upload_id = super::xml_text(&initiated, "UploadId")
+            .map_err(|()| "multipart response omitted UploadId")?
+            .to_owned();
+        let part_uri = format!("/s3/media/uploads/multipart.txt?partNumber=1&uploadId={upload_id}");
+        let part = router
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &part_uri,
+                b"multipart",
+                issued.metadata.id,
+                &secret,
+                &[],
+            )?)
+            .await?;
+        assert_eq!(part.status(), StatusCode::OK);
+        let part_etag = part
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .ok_or("multipart part etag missing")?
+            .to_owned();
+        let complete_uri = format!("/s3/media/uploads/multipart.txt?uploadId={upload_id}");
+        let complete_body = format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+        );
+        let completed = router
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &complete_uri,
+                complete_body.as_bytes(),
+                issued.metadata.id,
+                &secret,
+                &[("content-type", "application/xml")],
+            )?)
+            .await?;
+        assert_eq!(completed.status(), StatusCode::OK);
+        let multipart = router
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                "/s3/media/uploads/multipart.txt",
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[],
+            )?)
+            .await?;
+        assert_eq!(multipart.status(), StatusCode::OK);
+        assert_eq!(to_bytes(multipart.into_body(), 32).await?, "multipart");
+
         let presigned_uri =
             presigned_get_uri("/s3/media/uploads/hello.txt", issued.metadata.id, &secret)?;
         let presigned = router
@@ -2048,8 +2856,8 @@ mod tests {
                         abort_incomplete_after_days: None,
                     },
                     quota: BucketQuota {
-                        max_object_bytes: 1_048_576,
-                        max_total_bytes: 4_194_304,
+                        max_object_bytes: 16 * 1_048_576,
+                        max_total_bytes: 64 * 1_048_576,
                         max_objects: 10,
                     },
                 },
@@ -2092,7 +2900,7 @@ mod tests {
             service: service.clone(),
             bytes: FileObjectStore::filesystem(&directory.path().join("aws-cli-objects")).await?,
             logical_region: "runku".to_owned(),
-            max_object_bytes: 1_048_576,
+            max_object_bytes: 16 * 1_048_576,
         })?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("http://{}/s3", listener.local_addr()?);
@@ -2220,6 +3028,204 @@ mod tests {
             ],
         )?;
         assert_eq!(std::fs::read(output)?, b"official aws cli replaced");
+        let multipart = aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "create-multipart-upload",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/multipart.bin",
+                "--content-type",
+                "application/octet-stream",
+            ],
+        )?;
+        let upload_id = serde_json::from_str::<serde_json::Value>(&multipart)?["UploadId"]
+            .as_str()
+            .ok_or("AWS CLI multipart response omitted UploadId")?
+            .to_owned();
+        let active_uploads = aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "list-multipart-uploads",
+                "--bucket",
+                "aws-cli",
+                "--prefix",
+                "uploads/",
+            ],
+        )?;
+        assert!(active_uploads.contains(&upload_id));
+        let first_part = directory.path().join("part-one.bin");
+        std::fs::write(&first_part, vec![b'a'; 5 * 1_048_576])?;
+        let second_part = directory.path().join("part-two.bin");
+        std::fs::write(&second_part, b"final-part")?;
+        let first = aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "upload-part",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/multipart.bin",
+                "--upload-id",
+                &upload_id,
+                "--part-number",
+                "1",
+                "--body",
+                first_part.to_str().ok_or("first part path")?,
+            ],
+        )?;
+        let first_etag = serde_json::from_str::<serde_json::Value>(&first)?["ETag"]
+            .as_str()
+            .ok_or("AWS CLI first part omitted ETag")?
+            .to_owned();
+        let listed_parts = aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "list-parts",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/multipart.bin",
+                "--upload-id",
+                &upload_id,
+            ],
+        )?;
+        let listed_parts = serde_json::from_str::<serde_json::Value>(&listed_parts)?;
+        assert_eq!(listed_parts["Parts"][0]["ETag"], first_etag);
+        let second = aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "upload-part",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/multipart.bin",
+                "--upload-id",
+                &upload_id,
+                "--part-number",
+                "2",
+                "--body",
+                second_part.to_str().ok_or("second part path")?,
+            ],
+        )?;
+        let second_etag = serde_json::from_str::<serde_json::Value>(&second)?["ETag"]
+            .as_str()
+            .ok_or("AWS CLI second part omitted ETag")?
+            .to_owned();
+        let completion = directory.path().join("multipart.json");
+        std::fs::write(
+            &completion,
+            serde_json::to_vec(&serde_json::json!({
+                "Parts": [
+                    {"ETag": first_etag, "PartNumber": 1},
+                    {"ETag": second_etag, "PartNumber": 2}
+                ]
+            }))?,
+        )?;
+        aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "complete-multipart-upload",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/multipart.bin",
+                "--upload-id",
+                &upload_id,
+                "--multipart-upload",
+                &format!("file://{}", completion.display()),
+            ],
+        )?;
+        let multipart_output = directory.path().join("multipart-output.bin");
+        aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "get-object",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/multipart.bin",
+                multipart_output.to_str().ok_or("multipart output path")?,
+            ],
+        )?;
+        let multipart_bytes = std::fs::read(multipart_output)?;
+        assert_eq!(multipart_bytes.len(), 5 * 1_048_576 + 10);
+        assert_eq!(
+            &multipart_bytes[multipart_bytes.len() - 10..],
+            b"final-part"
+        );
+        let abortable = aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "create-multipart-upload",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/abort.bin",
+            ],
+        )?;
+        let abort_id = serde_json::from_str::<serde_json::Value>(&abortable)?["UploadId"]
+            .as_str()
+            .ok_or("AWS CLI abort upload omitted UploadId")?
+            .to_owned();
+        aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "abort-multipart-upload",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/abort.bin",
+                "--upload-id",
+                &abort_id,
+            ],
+        )?;
+        let versions = aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "list-object-versions",
+                "--bucket",
+                "aws-cli",
+                "--prefix",
+                "uploads/source.txt",
+            ],
+        )?;
+        assert!(versions.contains(&first_version));
+        aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "delete-object",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/source.txt",
+                "--version-id",
+                &first_version,
+            ],
+        )?;
         aws_cli(
             &endpoint,
             &access_key_id,

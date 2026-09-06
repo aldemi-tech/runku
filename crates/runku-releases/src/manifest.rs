@@ -332,14 +332,20 @@ impl ReleaseManifestV1 {
     /// # Errors
     ///
     /// Returns [`ReleaseError::Unsupported`] for any contract outside the experimental slice.
-    pub fn ensure_full_node_v1_supported(&self) -> Result<(), ReleaseError> {
+    pub fn ensure_full_node_supported(&self) -> Result<(), ReleaseError> {
         self.validate()?;
         let supported = match (self.runtime_version.as_str(), self.artifact.format) {
-            ("runku-node-1", ArtifactFormat::NodeOciDescriptorV1) => self
+            (
+                "runku-node-1" | "runku-node-2" | "runku-node-3",
+                ArtifactFormat::NodeOciDescriptorV1,
+            ) => self
                 .functions
                 .iter()
                 .all(|function| function.runtime_class == RuntimeClass::FullNode),
-            ("runku-hybrid-1", ArtifactFormat::HybridOciArtifactV1) => {
+            (
+                "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3",
+                ArtifactFormat::HybridOciArtifactV1,
+            ) => {
                 self.functions
                     .iter()
                     .any(|function| function.runtime_class == RuntimeClass::SafeV8)
@@ -808,7 +814,6 @@ fn validate_configuration_runtime(manifest: &ReleaseManifestV1) -> Result<(), Re
         manifest.runtime_version.as_str(),
         "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
     );
-    let mut configuration_requested = false;
     let mut variable_requested = false;
     for capability in manifest
         .functions
@@ -817,24 +822,20 @@ fn validate_configuration_runtime(manifest: &ReleaseManifestV1) -> Result<(), Re
     {
         match capability {
             Capability::Variable(name) => {
-                configuration_requested = true;
                 variable_requested = true;
                 if configuration_runtime && !valid_configuration_name(name) {
                     return Err(ReleaseError::InvalidManifest);
                 }
             }
-            Capability::Secret(name) => {
-                configuration_requested = true;
-                if configuration_runtime && !valid_configuration_name(name) {
-                    return Err(ReleaseError::InvalidManifest);
-                }
+            Capability::Secret(name)
+                if configuration_runtime && !valid_configuration_name(name) =>
+            {
+                return Err(ReleaseError::InvalidManifest);
             }
             _ => {}
         }
     }
-    if variable_requested && !configuration_runtime
-        || configuration_runtime && !configuration_requested
-    {
+    if variable_requested && !configuration_runtime {
         return Err(ReleaseError::InvalidManifest);
     }
     Ok(())

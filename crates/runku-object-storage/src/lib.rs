@@ -19,10 +19,12 @@ pub use model::{
     Bucket, BucketConfiguration, BucketId, BucketLifecycle, BucketName, BucketPage,
     BucketPageRequest, BucketPolicy, BucketQuota, BucketState, CorsMethod, CorsRule,
     DeleteObjectCommand, EncryptedAccessKeyGeneration, EncryptedAccessKeySecret, IssuedAccessKey,
-    ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage, ObjectPageRequest,
-    ObjectStorageActor, ObjectStorageCommand, ObjectStorageOperation, ObjectStorageOperationKind,
-    ObjectStorageOperationResult, ObjectVersionId, PutObjectCommand, SecretDigest, Versioning,
-    object_etag, validate_object_key,
+    LifecycleResult, MultipartPart, MultipartUpload, MultipartUploadId, MultipartUploadPage,
+    MultipartUploadState, ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage,
+    ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand, ObjectStorageOperation,
+    ObjectStorageOperationKind, ObjectStorageOperationResult, ObjectVersionId, ObjectVersionPage,
+    ObjectVersionPageRequest, PutObjectCommand, SecretDigest, Versioning, object_etag,
+    validate_object_key,
 };
 pub use repository::{
     ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,

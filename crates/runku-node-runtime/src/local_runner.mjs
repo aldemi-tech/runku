@@ -95,6 +95,17 @@ function encode(value, depth = 0, seen = new WeakSet()) {
 
 function platformContext(request, channel) {
   const capabilities = new Set(request.capabilities ?? []);
+  const variables = Object.freeze({ ...(request.variables ?? {}) });
+  const secrets = Object.freeze({ ...(request.secrets ?? {}) });
+  const readConfiguration = (kind, values, name) => {
+    const exact = String(name);
+    if (!capabilities.has(`${kind}:${exact}`) || !Object.hasOwn(values, exact)) {
+      return Promise.reject(Object.assign(new Error("configuration unavailable"), {
+        code: "CONFIGURATION_NOT_FOUND",
+      }));
+    }
+    return Promise.resolve(values[exact]);
+  };
   const context = {
     invocation: Object.freeze({
       releaseId: request.releaseId,
@@ -113,18 +124,16 @@ function platformContext(request, channel) {
   };
   if ([...capabilities].some((capability) => capability.startsWith("variable:"))) {
     context.env = Object.freeze({
-      get: (name) => channel.call("configurationRead", {
-        kind: "variable",
-        name: String(name),
-      }, "text"),
+      get: (name) => channel
+        ? channel.call("configurationRead", { kind: "variable", name: String(name) }, "text")
+        : readConfiguration("variable", variables, name),
     });
   }
   if ([...capabilities].some((capability) => capability.startsWith("secret:"))) {
     context.secrets = Object.freeze({
-      get: (name) => channel.call("configurationRead", {
-        kind: "secret",
-        name: String(name),
-      }, "text"),
+      get: (name) => channel
+        ? channel.call("configurationRead", { kind: "secret", name: String(name) }, "text")
+        : readConfiguration("secret", secrets, name),
     });
   }
   if (capabilities.has("function:query")) {

@@ -107,21 +107,28 @@ only newly issued or source-reconciled grants, while custom grants remain exact.
 The 0.4.6 Object Storage extension adds current/version metadata schema v2 and bounded
 administrative object routes. After schema v2 is applied, an older binary must not serve the same
 registry. PUT writes a SHA-256 content address before the metadata transaction, so an uncertain
-response is reconciled by `object-operations`; DELETE is exact-version CAS. These routes do not yet
-claim S3 wire compatibility or coordinated backup semantics.
+response is reconciled by `object-operations`; DELETE is exact-version CAS. Compact filesystem
+composition includes the registry and object bytes in its coordinated backup.
 
 Object Storage schema v3 adds nullable AES-256-GCM envelopes for access-key generations so the
 Product can verify AWS Signature Version 4 without storing plaintext. Existing bearer credentials
 continue to authenticate by digest, but generations created before v3 must be rotated before S3
 use. Once v3 is applied, older binaries must not serve the same registry.
 
+Object Storage schema v4 adds durable multipart upload/part state, a completion claim digest, and
+terminal completed/aborted state without rewriting earlier rows. Once v4 is applied, older binaries
+must not serve the same registry. Exact completion replay reconciles only the same completion body;
+part replacement and abort stop after completion is claimed.
+
 The corresponding 0.4.6 Product listener adds `/s3/{bucket}/{key}` with logical signing region
-`runku`. The currently implemented compatibility subset is ListObjectsV2, HEAD/GET, bounded PUT,
-same-bucket COPY, current DELETE, public read, bucket CORS, query-presigned SigV4, single byte
-ranges, conditional reads, and immutable version-addressed reads. It does not yet claim multipart,
-version listing/deletion, lifecycle execution, or a full AWS SDK/MinIO client matrix. Cloud must
-preserve the original signed host through its opaque
-Product route; proxying this protocol through the global Control API is not compatible.
+`runku`. The implemented Runku S3 profile is ListObjectsV2, ListObjectVersions, HEAD/GET, bounded
+PUT, same-bucket COPY, current/exact-version DELETE, multipart create/upload/list/complete/abort,
+public read, bucket CORS, query-presigned SigV4, single byte ranges, conditional reads, and immutable
+version-addressed reads. Lifecycle rules execute in bounded batches. The exact profile has an
+official AWS CLI campaign; it does not claim bucket ACL/tagging/website/replication, cross-bucket
+copy, delete-marker resources, UploadPartCopy, or every AWS SDK. Cloud must preserve the original
+signed host through its opaque Product route; proxying this protocol through the global Control API
+is not compatible.
 
 The 0.4.6 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on
 both success and sanitized failure responses. The header is additive and CORS-exposed; the v1 JSON
@@ -157,25 +164,20 @@ Identity schema v2 appends the operation mapping, revocation time, and audit cor
 reinterpreting v1 rows. Product Function/storage protocols remain unchanged; after migration,
 server rollback is unsupported.
 
-Application files are a compatible additive SDK/HTTP surface but introduce new manifest capability
-tags and runtime versions `runku-js-2`, `runku-node-2`, and `runku-hybrid-2`. Version 1 manifests
-cannot declare `storage:read`/`storage:write`; old binaries fail closed on the new version/tags.
-Safe V8 and local Full Node implement version 2. Production OCI/distributed Full Node remains on
-version 1 until its mediated Agent channel is versioned, so promotion of a Node storage manifest to
-that profile is rejected rather than silently dropping the capability. File metadata schema v1 and
-generated S3 key layout `v1/projects/{project}/environments/{environment}/files/{file}` are durable;
-future changes require expand/migrate/contract and rollback documentation.
+Application files are a compatible additive SDK/HTTP surface. The historical generation-2 wire
+identifiers introduced `storage:read`/`storage:write`, but new builds no longer select a reduced
+runtime from their capabilities. File metadata schema v1 and generated S3 key layout
+`v1/projects/{project}/environments/{environment}/files/{file}` are durable; future changes require
+expand/migrate/contract and rollback documentation.
 
 Environment variables and encrypted secrets add the `variable:NAME` capability and activate the
-previously reserved `secret:NAME` capability through runtime versions `runku-js-3`,
-`runku-node-3`, and `runku-hybrid-3`. Version 3 is a superset of the version 2 application-file
-Platform Ops. Builders select version 3 whenever either named configuration capability exists;
-older runtimes reject the new version rather than omitting configuration. Legacy manifest vectors
-that encoded an unused secret tag remain decodable, but only version 3 exposes `ctx.env` or
-`ctx.secrets`. Safe V8 and local Full Node implement version 3. Production OCI/distributed Full
-Node remains on version 1 until its mediated Agent channel carries the configuration operation, so
-promotion of a Node configuration manifest to that profile is rejected. Configuration registry
-schema v1 is additive, checksum-protected, and stores
+previously reserved `secret:NAME` capability. Every new build now emits the cumulative current wire
+identifier—`runku-js-3`, `runku-node-3`, or `runku-hybrid-3` according to artifact class—even when
+it uses only earlier capabilities. Version 3 is a superset of the base and application-file
+Platform Ops. Legacy v1/v2 manifests remain decodable as persisted compatibility inputs, not
+parallel runtime products. Safe V8 and local Full Node expose the cumulative API; OCI/dedicated-
+host/Docker/Firecracker execution pre-resolves exact declared configuration through the agent-side
+Environment broker. Configuration registry schema v1 is additive, checksum-protected, and stores
 idempotent result snapshots plus value-free audit. Older binaries must not write a registry after
 it is adopted. The authenticated Management routes and `configuration:read`/
 `configuration:manage` capabilities must be upgraded together.

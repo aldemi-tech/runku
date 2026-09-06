@@ -748,7 +748,7 @@ impl ProductInvocationService {
     ///
     /// Without this adapter the gateway continues to reject every `full-node` Release. Attaching
     /// it enables only the narrow contract validated by
-    /// [`ReleaseManifestV1::ensure_full_node_v1_supported`].
+    /// [`ReleaseManifestV1::ensure_full_node_supported`].
     #[must_use]
     pub fn with_full_node_runtime(mut self, runtime: Arc<dyn FullNodeActionRuntime>) -> Self {
         let dispatcher: Arc<dyn NodeActionExecutor> =

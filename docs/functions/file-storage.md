@@ -2,8 +2,9 @@
 
 Status: **Implemented** for Safe V8 and local Full Node Actions with filesystem storage. Status:
 **Conformance** for an S3-compatible MinIO backend. The compact Docker profile supports filesystem
-or an operator-provided S3-compatible service. The current distributed Full Node Agent protocol
-does not carry storage Platform Ops and rejects the `runku-node-2`/`runku-hybrid-2` contract.
+or an operator-provided S3-compatible service. New builds always use the cumulative current runtime
+identifier; the unpublished distributed Full Node profiles still fail closed for storage Platform
+Ops until their interactive Agent channel has its own conformance gate.
 
 Application file storage keeps large immutable bytes out of Function arguments and document rows.
 Metadata and quota reservations are authoritative Environment state; object bytes live in a

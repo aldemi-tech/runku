@@ -350,7 +350,7 @@ impl FirecrackerNodeRuntime {
                 u64::try_from(request.artifact_bytes().len()).ok(),
             )
         });
-        let prepared = prepare_request(request);
+        let prepared = prepare_request(request).await;
         let validated = prepared.and_then(|prepared| {
             if prepared.image_reference != self.config.image_reference
                 || prepared.egress != self.config.egress_policy
@@ -464,7 +464,7 @@ fn controller_is_executable(path: &std::path::Path) -> bool {
 impl FullNodeActionRuntime for FirecrackerNodeRuntime {
     fn validate_manifest(&self, manifest: &ReleaseManifestV1) -> Result<(), RuntimeError> {
         manifest
-            .ensure_full_node_v1_supported()
+            .ensure_full_node_supported()
             .map_err(|_| RuntimeError::UnsupportedRuntime)
     }
 

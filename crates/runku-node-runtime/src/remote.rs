@@ -18,8 +18,10 @@ use runku_observability::{
     PerformanceOperation, PerformanceRuntime,
 };
 use runku_protocol::WireValueV1;
-use runku_releases::{ArtifactStore, ReleaseManifestV1, ReleaseRepository, Sha256Digest};
-use runku_runtime::{CancellationToken, InvocationRequest, RuntimeError};
+use runku_releases::{
+    ArtifactStore, Capability, ReleaseManifestV1, ReleaseRepository, Sha256Digest,
+};
+use runku_runtime::{CancellationToken, ConfigurationRead, InvocationRequest, RuntimeError};
 use serde::{Deserialize, Serialize};
 
 use crate::{FullNodeActionOutcome, FullNodeActionRuntime};
@@ -262,7 +264,7 @@ impl QueuedNodeRuntime {
 impl FullNodeActionRuntime for QueuedNodeRuntime {
     fn validate_manifest(&self, manifest: &ReleaseManifestV1) -> Result<(), RuntimeError> {
         manifest
-            .ensure_full_node_v1_supported()
+            .ensure_full_node_supported()
             .map_err(|_| RuntimeError::UnsupportedRuntime)
     }
 
@@ -282,6 +284,7 @@ pub struct FullNodeExecutionHandler {
     control: Arc<dyn ExecutionControlPlane>,
     prepared_artifacts: tokio::sync::Mutex<PreparedArtifactCache>,
     performance: Option<(PerformanceRuntime, Arc<dyn InvocationPerformanceSink>)>,
+    configuration: Option<(EnvironmentScope, Arc<dyn ConfigurationRead>)>,
 }
 
 #[derive(Debug)]
@@ -356,7 +359,23 @@ impl FullNodeExecutionHandler {
                 8 * 1024 * 1024,
             )),
             performance: None,
+            configuration: None,
         }
+    }
+
+    /// Attaches the configuration broker for the one exact Environment served by this agent.
+    ///
+    /// The scope guard prevents a shared queue from resolving a different Environment through the
+    /// same encrypted registry. Agents serving more than one Environment must use separate
+    /// handlers and consumers so this boundary remains explicit.
+    #[must_use]
+    pub fn with_configuration(
+        mut self,
+        scope: EnvironmentScope,
+        configuration: Arc<dyn ConfigurationRead>,
+    ) -> Self {
+        self.configuration = Some((scope, configuration));
+        self
     }
 
     /// Replaces the bounded process-local cache of verified descriptor bytes and prepared images.
@@ -552,6 +571,15 @@ impl ExecutionHandler for FullNodeExecutionHandler {
                 .await);
         };
         let cancellation = CancellationToken::new();
+        let configuration_requested = manifest
+            .functions
+            .iter()
+            .find(|function| function.id == payload.function_id)
+            .is_some_and(|function| {
+                function.capabilities.iter().any(|capability| {
+                    matches!(capability, Capability::Variable(_) | Capability::Secret(_))
+                })
+            });
         let mut request = InvocationRequest::new(
             scope,
             job.release_id,
@@ -567,6 +595,21 @@ impl ExecutionHandler for FullNodeExecutionHandler {
         .map_err(|_| ExecutionPreparationError::Invalid)?;
         if let Some((runtime, sink)) = &self.performance {
             request = request.with_performance_sink(*runtime, Arc::clone(sink));
+        }
+        if configuration_requested {
+            let Some((configured_scope, configuration)) = &self.configuration else {
+                return Err(self
+                    .reject(job.invocation_id, RuntimeError::Unavailable)
+                    .await);
+            };
+            if *configured_scope != scope {
+                return Err(self
+                    .reject(job.invocation_id, RuntimeError::InvalidInvocation)
+                    .await);
+            }
+            request = request
+                .with_configuration(Arc::clone(configuration))
+                .map_err(|_| ExecutionPreparationError::Invalid)?;
         }
         Ok(Box::new(PreparedFullNodeExecution {
             invocation_id: job.invocation_id,

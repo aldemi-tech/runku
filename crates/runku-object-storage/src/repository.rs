@@ -6,9 +6,11 @@ use runku_core::{EnvironmentScope, OperationId};
 use crate::{
     AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest, AuditPage,
     AuditPageRequest, Bucket, BucketId, BucketName, BucketPage, BucketPageRequest,
-    DeleteObjectCommand, EncryptedAccessKeyGeneration, ObjectMetadata, ObjectOperation,
+    DeleteObjectCommand, EncryptedAccessKeyGeneration, LifecycleResult, MultipartPart,
+    MultipartUpload, MultipartUploadId, MultipartUploadPage, ObjectMetadata, ObjectOperation,
     ObjectOperationResult, ObjectPage, ObjectPageRequest, ObjectStorageCommand, ObjectStorageError,
-    ObjectStorageOperation, ObjectStorageOperationResult, PutObjectCommand,
+    ObjectStorageOperation, ObjectStorageOperationResult, ObjectVersionPage,
+    ObjectVersionPageRequest, PutObjectCommand,
 };
 
 /// Physical backend selected by composition.
@@ -155,6 +157,100 @@ pub trait ObjectStorageRepository: Send + Sync {
         bucket_id: BucketId,
         request: &ObjectPageRequest,
     ) -> Result<ObjectPage, ObjectStorageError>;
+
+    /// Lists immutable object versions, including versions that are no longer current.
+    async fn list_object_versions(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        request: &ObjectVersionPageRequest,
+    ) -> Result<ObjectVersionPage, ObjectStorageError>;
+
+    /// Deletes one exact immutable version and promotes the newest remaining version when needed.
+    async fn delete_object_version(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+        version_id: crate::ObjectVersionId,
+    ) -> Result<bool, ObjectStorageError>;
+
+    /// Creates one durable multipart upload.
+    async fn create_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+    ) -> Result<(), ObjectStorageError>;
+
+    /// Gets multipart upload metadata by exact scope and ID.
+    async fn get_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+    ) -> Result<Option<MultipartUpload>, ObjectStorageError>;
+
+    /// Upserts one immutable content-addressed part while the upload is active.
+    async fn put_multipart_part(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+        part: &MultipartPart,
+    ) -> Result<(), ObjectStorageError>;
+
+    /// Lists all parts of one upload in ascending part-number order.
+    async fn list_multipart_parts(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+    ) -> Result<Vec<MultipartPart>, ObjectStorageError>;
+
+    /// Lists active uploads by key/upload cursor.
+    async fn list_multipart_uploads(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        prefix: &str,
+        after: Option<(&str, MultipartUploadId)>,
+        limit: u16,
+    ) -> Result<MultipartUploadPage, ObjectStorageError>;
+
+    /// Claims completion with the digest of the exact ordered part request.
+    async fn claim_multipart_completion(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+        completion_digest: [u8; 32],
+    ) -> Result<(), ObjectStorageError>;
+
+    /// Marks one upload completed with its exact object version, idempotently.
+    async fn complete_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+        version_id: crate::ObjectVersionId,
+        at: runku_value::TimestampMicros,
+    ) -> Result<(), ObjectStorageError>;
+
+    /// Aborts one incomplete upload. Repeating an abort is safe.
+    async fn abort_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+    ) -> Result<(), ObjectStorageError>;
+
+    /// Applies one bounded bucket lifecycle pass at a trusted time.
+    async fn apply_lifecycle(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        at: runku_value::TimestampMicros,
+        limit: u16,
+    ) -> Result<LifecycleResult, ObjectStorageError>;
 
     /// Removes one exact current version while retaining immutable bytes for reconciliation/GC.
     async fn delete_object(

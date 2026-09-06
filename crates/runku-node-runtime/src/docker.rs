@@ -15,8 +15,12 @@ use tokio::{
     process::{Child, Command},
     sync::Semaphore,
 };
+use zeroize::Zeroize;
 
-use crate::{FullNodeActionOutcome, FullNodeActionRuntime};
+use crate::{
+    FullNodeActionOutcome, FullNodeActionRuntime,
+    protocol::{capability_name, resolve_configuration},
+};
 
 const MIB: u64 = 1024 * 1024;
 const MAX_CONCURRENCY: usize = 1_024;
@@ -223,7 +227,7 @@ impl DockerNodeRuntime {
                 u64::try_from(request.artifact_bytes().len()).ok(),
             )
         });
-        let prepared = prepare_request(&self.config, request);
+        let prepared = prepare_request(&self.config, request).await;
         let input_bytes = prepared
             .as_ref()
             .ok()
@@ -399,13 +403,13 @@ impl DockerNodeRuntime {
     }
 }
 
-fn prepare_request(
+async fn prepare_request(
     config: &DockerNodeRuntimeConfig,
     request: &InvocationRequest,
 ) -> Result<(String, Vec<u8>, String), RuntimeError> {
     request
         .manifest()
-        .ensure_full_node_v1_supported()
+        .ensure_full_node_supported()
         .map_err(|_| RuntimeError::UnsupportedRuntime)?;
     let function = request
         .manifest()
@@ -448,6 +452,7 @@ fn prepare_request(
     };
     let arguments = WireValueV1::from_canonical(request.arguments())
         .map_err(|_| RuntimeError::InvalidArguments)?;
+    let mut configuration = resolve_configuration(request, function).await?;
     let envelope = NodeRequestV1 {
         protocol_version: 1,
         collect_performance: request.performance().is_some(),
@@ -457,9 +462,13 @@ fn prepare_request(
         implementation_hash: function.implementation_hash.to_string(),
         arguments_contract_hash: function.arguments_contract_hash.to_string(),
         result_contract_hash: function.result_contract_hash.to_string(),
+        capabilities: function.capabilities.iter().map(capability_name).collect(),
+        variables: &configuration.variables,
+        secrets: &configuration.secrets,
         arguments,
     };
     let input = serde_json::to_vec(&envelope).map_err(|_| RuntimeError::Internal)?;
+    configuration.zeroize();
     Ok((descriptor.image_reference().to_owned(), input, network))
 }
 
@@ -470,7 +479,7 @@ impl FullNodeActionRuntime for DockerNodeRuntime {
         manifest: &runku_releases::ReleaseManifestV1,
     ) -> Result<(), RuntimeError> {
         manifest
-            .ensure_full_node_v1_supported()
+            .ensure_full_node_supported()
             .map_err(|_| RuntimeError::UnsupportedRuntime)
     }
 
@@ -515,7 +524,7 @@ async fn terminate(child: &mut Child, docker_binary: &str, container_name: &str)
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NodeRequestV1 {
+struct NodeRequestV1<'a> {
     protocol_version: u8,
     collect_performance: bool,
     release_id: String,
@@ -524,6 +533,9 @@ struct NodeRequestV1 {
     implementation_hash: String,
     arguments_contract_hash: String,
     result_contract_hash: String,
+    capabilities: Vec<String>,
+    variables: &'a std::collections::BTreeMap<String, String>,
+    secrets: &'a std::collections::BTreeMap<String, String>,
     arguments: WireValueV1,
 }
 

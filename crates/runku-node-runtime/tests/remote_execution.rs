@@ -27,10 +27,14 @@ use runku_releases::{
     ReleaseRepositoryBackend, ReleaseRepositoryTelemetrySnapshot, ServingSnapshot,
     decode_release_manifest, encode_node_oci_descriptor,
 };
-use runku_runtime::{CancellationToken, InvocationRequest, RuntimeError};
+use runku_runtime::{
+    CancellationToken, ConfigurationRead, ConfigurationReadError, ConfigurationValueKind,
+    InvocationRequest, RuntimeError,
+};
 use runku_value::{CanonicalValue, TimestampMicros};
 use tempfile::tempdir;
 use tokio::{sync::watch, task::JoinSet};
+use zeroize::Zeroizing;
 
 const SOURCE: &str = r#"
 "use runku node"
@@ -63,6 +67,15 @@ export const inspect = action({
   async handler(ctx, input) {
     await new Promise(resolve => setTimeout(resolve, 5 + input.charCodeAt(input.length - 1) % 3))
     return `inspected:${input}:${ctx.invocation.invocationId}:${ctx.invocation.function}`
+  },
+})
+export const configured = action({
+  auth: "none", visibility: "public", capabilities: ["secret:API_KEY", "variable:REGION"],
+  args: v.null(), returns: v.string(),
+  async handler(ctx) {
+    const region = await ctx.env.get("REGION")
+    const secret = await ctx.secrets.get("API_KEY")
+    return `${region}:${secret.length}:${Object.isFrozen(ctx.env)}:${Object.isFrozen(ctx.secrets)}`
   },
 })
 export const loop = action({
@@ -233,6 +246,30 @@ struct Vertical {
     shutdown: watch::Sender<bool>,
 }
 
+#[derive(Debug)]
+struct TestConfiguration;
+
+#[async_trait]
+impl ConfigurationRead for TestConfiguration {
+    async fn read(
+        &self,
+        kind: ConfigurationValueKind,
+        name: &str,
+        _deadline: std::time::Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<Zeroizing<String>, ConfigurationReadError> {
+        match (kind, name) {
+            (ConfigurationValueKind::Variable, "REGION") => {
+                Ok(Zeroizing::new("south-1".to_owned()))
+            }
+            (ConfigurationValueKind::Secret, "API_KEY") => {
+                Ok(Zeroizing::new("never-log-this-secret".to_owned()))
+            }
+            _ => Err(ConfigurationReadError::NotFound),
+        }
+    }
+}
+
 async fn wait_for_agent_settled(
     agent: &ExecutionAgent,
     expected_completed: u64,
@@ -266,6 +303,7 @@ fn vertical(fixture: &Fixture) -> Result<Vertical, Box<dyn Error>> {
     let performance_sink: Arc<dyn InvocationPerformanceSink> = performance.clone();
     let handler = Arc::new(
         FullNodeExecutionHandler::new(releases, artifacts, node, Arc::clone(&control))
+            .with_configuration(fixture.scope, Arc::new(TestConfiguration))
             .with_performance_sink(PerformanceRuntime::NodeHost, Arc::clone(&performance_sink)),
     );
     let class = ExecutionClass::new("node_host_v1")?;
@@ -340,6 +378,7 @@ async fn nats_vertical(fixture: &Fixture, url: &str) -> Result<Vertical, Box<dyn
     let performance_sink: Arc<dyn InvocationPerformanceSink> = performance.clone();
     let handler = Arc::new(
         FullNodeExecutionHandler::new(releases, artifacts, node, Arc::clone(&control))
+            .with_configuration(fixture.scope, Arc::new(TestConfiguration))
             .with_performance_sink(PerformanceRuntime::NodeHost, Arc::clone(&performance_sink)),
     );
     let class = ExecutionClass::new("node_host_v1")?;
@@ -423,6 +462,30 @@ async fn queued_gateway_agent_executes_real_node_and_returns_durable_result()
             .iter()
             .all(|span| span.outcome != PerformanceOutcome::Abandoned)
     );
+    vertical.shutdown.send_replace(true);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_agent_resolves_only_declared_environment_configuration()
+-> Result<(), Box<dyn Error>> {
+    let fixture = fixture()?;
+    assert_eq!(fixture.manifest.runtime_version.as_str(), "runku-node-3");
+    let vertical = vertical(&fixture)?;
+    let outcome = vertical
+        .runtime
+        .execute(fixture.request(
+            "actions.configured",
+            CanonicalValue::Null,
+            Duration::from_secs(3),
+            CancellationToken::new(),
+        )?)
+        .await?;
+    assert_eq!(
+        outcome.value,
+        CanonicalValue::String("south-1:21:true:true".to_owned())
+    );
+    assert!(!format!("{:?}", vertical.performance.snapshot()).contains("never-log-this-secret"));
     vertical.shutdown.send_replace(true);
     Ok(())
 }

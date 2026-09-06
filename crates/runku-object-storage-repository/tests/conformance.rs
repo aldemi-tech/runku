@@ -10,9 +10,10 @@ use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyOperation, AccessKeyPageRequest, AccessKeyState,
     AuditPageRequest, BucketConfiguration, BucketLifecycle, BucketPageRequest, BucketPolicy,
-    BucketQuota, BucketState, DeleteObjectCommand, ObjectPageRequest, ObjectStorageActor,
-    ObjectStorageError, ObjectStorageRepository, ObjectStorageRepositoryBackend,
-    ObjectStorageService, ObjectVersionId, PutObjectCommand, SecretDigestKey, Versioning,
+    BucketQuota, BucketState, DeleteObjectCommand, MultipartUpload, MultipartUploadId,
+    MultipartUploadState, ObjectPageRequest, ObjectStorageActor, ObjectStorageError,
+    ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageService, ObjectVersionId,
+    ObjectVersionPageRequest, PutObjectCommand, SecretDigestKey, Versioning,
 };
 use runku_object_storage_repository::{
     ObjectStorageRepositoryConfig, RepositoryRole, SqlObjectStorageRepository,
@@ -583,7 +584,7 @@ async fn run_conformance(
         .await?;
     assert!(!put.replayed);
     let object = put.object.as_ref().ok_or("put metadata missing")?;
-    let object_version = object.version_id;
+    let mut object_version = object.version_id;
     assert_eq!(object.size, 4);
     assert_eq!(
         service.get_object(scope, bucket_id, &object.key).await?,
@@ -628,6 +629,73 @@ async fn run_conformance(
             .await,
         Err(ObjectStorageError::OperationIdReused)
     ));
+    let historical_version = object_version;
+    let replacement = service
+        .put_object(
+            scope,
+            bucket_id,
+            OperationId::generate(),
+            &PutObjectCommand {
+                version_id: ObjectVersionId::generate(),
+                key: object.key.clone(),
+                size: 5,
+                sha256: [6; 32],
+                content_type: "image/png".to_owned(),
+                metadata: BTreeMap::new(),
+                actor: actor.clone(),
+                at: TimestampMicros::new(23),
+            },
+        )
+        .await?
+        .object
+        .ok_or("replacement metadata missing")?;
+    object_version = replacement.version_id;
+    let first_versions = service
+        .list_object_versions(
+            scope,
+            bucket_id,
+            &ObjectVersionPageRequest {
+                prefix: "uploads/".to_owned(),
+                after_key: None,
+                after_version: None,
+                limit: 1,
+            },
+        )
+        .await?;
+    assert_eq!(first_versions.versions.len(), 1);
+    let (after_key, after_version) = first_versions.next.ok_or("version cursor missing")?;
+    let second_versions = service
+        .list_object_versions(
+            scope,
+            bucket_id,
+            &ObjectVersionPageRequest {
+                prefix: "uploads/".to_owned(),
+                after_key: Some(after_key),
+                after_version: Some(after_version),
+                limit: 1,
+            },
+        )
+        .await?;
+    assert_eq!(second_versions.versions.len(), 1);
+    assert!(second_versions.next.is_none());
+    assert!(
+        service
+            .delete_object_version(scope, bucket_id, &object.key, historical_version)
+            .await?
+    );
+    assert!(
+        !service
+            .delete_object_version(scope, bucket_id, &object.key, historical_version)
+            .await?
+    );
+    assert_eq!(
+        service
+            .get_object(scope, bucket_id, &object.key)
+            .await?
+            .ok_or("current replacement missing")?
+            .version_id,
+        object_version
+    );
     let page = service
         .list_objects(
             scope,
@@ -706,6 +774,59 @@ async fn run_conformance(
             )
             .await?
             .replayed
+    );
+    let upload_id = MultipartUploadId::generate();
+    service
+        .create_multipart_upload(&MultipartUpload {
+            scope,
+            bucket_id,
+            upload_id,
+            key: "uploads/conformance.bin".to_owned(),
+            content_type: "application/octet-stream".to_owned(),
+            metadata: BTreeMap::new(),
+            actor: actor.clone(),
+            state: MultipartUploadState::Active,
+            created_at: TimestampMicros::new(23),
+            completed_at: None,
+            completed_version_id: None,
+        })
+        .await?;
+    let part = runku_object_storage::MultipartPart {
+        number: 1,
+        size: 4,
+        sha256: [9; 32],
+        etag: runku_object_storage::object_etag(&[9; 32]),
+        created_at: TimestampMicros::new(23),
+    };
+    service
+        .put_multipart_part(scope, bucket_id, upload_id, &part)
+        .await?;
+    assert_eq!(
+        service
+            .list_multipart_parts(scope, bucket_id, upload_id)
+            .await?,
+        [part]
+    );
+    service
+        .claim_multipart_completion(scope, bucket_id, upload_id, [11; 32])
+        .await?;
+    let multipart_version = ObjectVersionId::generate();
+    service
+        .complete_multipart_upload(
+            scope,
+            bucket_id,
+            upload_id,
+            multipart_version,
+            TimestampMicros::new(23),
+        )
+        .await?;
+    assert_eq!(
+        service
+            .get_multipart_upload(scope, bucket_id, upload_id)
+            .await?
+            .ok_or("multipart upload missing")?
+            .completed_version_id,
+        Some(multipart_version)
     );
     let archived = service
         .archive_bucket(
@@ -805,6 +926,263 @@ fn invalid_domains_fail_closed() {
         .validate()
         .is_err()
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn lifecycle_expires_current_history_and_incomplete_multipart() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempdir()?;
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("lifecycle.sqlite3").display()
+    );
+    let repository =
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::LOCAL)
+            .await?;
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let service = ObjectStorageService::new(Arc::new(repository), SecretDigestKey::new([91; 32]));
+    let actor: ObjectStorageActor = "operator:lifecycle".parse()?;
+    let bucket_id = service
+        .create_bucket(
+            scope,
+            OperationId::generate(),
+            BucketConfiguration {
+                name: "lifecycle".parse()?,
+                policy: BucketPolicy::Private,
+                cors: Vec::new(),
+                versioning: Versioning::Enabled,
+                lifecycle: BucketLifecycle {
+                    expire_current_after_days: Some(1),
+                    expire_noncurrent_after_days: Some(1),
+                    abort_incomplete_after_days: Some(1),
+                },
+                quota: BucketQuota {
+                    max_object_bytes: 1_024,
+                    max_total_bytes: 4_096,
+                    max_objects: 10,
+                },
+            },
+            actor.clone(),
+            TimestampMicros::new(1),
+        )
+        .await?
+        .operation
+        .bucket_id;
+    for (at, digest) in [(2, [1; 32]), (3, [2; 32])] {
+        service
+            .put_object(
+                scope,
+                bucket_id,
+                OperationId::generate(),
+                &PutObjectCommand {
+                    version_id: ObjectVersionId::generate(),
+                    key: "old/object.bin".to_owned(),
+                    size: 8,
+                    sha256: digest,
+                    content_type: "application/octet-stream".to_owned(),
+                    metadata: BTreeMap::new(),
+                    actor: actor.clone(),
+                    at: TimestampMicros::new(at),
+                },
+            )
+            .await?;
+    }
+    let upload_id = MultipartUploadId::generate();
+    service
+        .create_multipart_upload(&MultipartUpload {
+            scope,
+            bucket_id,
+            upload_id,
+            key: "old/incomplete.bin".to_owned(),
+            content_type: "application/octet-stream".to_owned(),
+            metadata: BTreeMap::new(),
+            actor,
+            state: MultipartUploadState::Active,
+            created_at: TimestampMicros::new(4),
+            completed_at: None,
+            completed_version_id: None,
+        })
+        .await?;
+    let result = service
+        .apply_lifecycle(scope, bucket_id, TimestampMicros::new(172_800_000_005), 100)
+        .await?;
+    assert_eq!(result.current_objects, 1);
+    assert_eq!(result.noncurrent_versions, 2);
+    assert_eq!(result.multipart_uploads, 1);
+    assert!(
+        service
+            .get_object(scope, bucket_id, "old/object.bin")
+            .await?
+            .is_none()
+    );
+    assert!(
+        service
+            .list_object_versions(
+                scope,
+                bucket_id,
+                &ObjectVersionPageRequest {
+                    prefix: "old/".to_owned(),
+                    after_key: None,
+                    after_version: None,
+                    limit: 100,
+                },
+            )
+            .await?
+            .versions
+            .is_empty()
+    );
+    assert_eq!(
+        service
+            .get_multipart_upload(scope, bucket_id, upload_id)
+            .await?
+            .ok_or("multipart upload missing")?
+            .state,
+        MultipartUploadState::Aborted
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn multipart_completion_claim_is_durable_and_exact() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("multipart.sqlite3");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let repository =
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::LOCAL)
+            .await?;
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let service =
+        ObjectStorageService::new(Arc::new(repository.clone()), SecretDigestKey::new([92; 32]));
+    let actor: ObjectStorageActor = "operator:multipart".parse()?;
+    let bucket_id = service
+        .create_bucket(
+            scope,
+            OperationId::generate(),
+            configuration("multipart", BucketPolicy::Private)?,
+            actor.clone(),
+            TimestampMicros::new(1),
+        )
+        .await?
+        .operation
+        .bucket_id;
+    let upload_id = MultipartUploadId::generate();
+    service
+        .create_multipart_upload(&MultipartUpload {
+            scope,
+            bucket_id,
+            upload_id,
+            key: "uploads/exact.bin".to_owned(),
+            content_type: "application/octet-stream".to_owned(),
+            metadata: BTreeMap::new(),
+            actor,
+            state: MultipartUploadState::Active,
+            created_at: TimestampMicros::new(2),
+            completed_at: None,
+            completed_version_id: None,
+        })
+        .await?;
+    let part = runku_object_storage::MultipartPart {
+        number: 1,
+        size: 3,
+        sha256: [3; 32],
+        etag: runku_object_storage::object_etag(&[3; 32]),
+        created_at: TimestampMicros::new(3),
+    };
+    service
+        .put_multipart_part(scope, bucket_id, upload_id, &part)
+        .await?;
+    assert_eq!(
+        service
+            .list_multipart_uploads(scope, bucket_id, "uploads/", None, 100)
+            .await?
+            .uploads
+            .len(),
+        1
+    );
+
+    service
+        .claim_multipart_completion(scope, bucket_id, upload_id, [7; 32])
+        .await?;
+    service
+        .claim_multipart_completion(scope, bucket_id, upload_id, [7; 32])
+        .await?;
+    assert_eq!(
+        service
+            .claim_multipart_completion(scope, bucket_id, upload_id, [8; 32])
+            .await,
+        Err(ObjectStorageError::Conflict)
+    );
+    assert_eq!(
+        service
+            .put_multipart_part(scope, bucket_id, upload_id, &part)
+            .await,
+        Err(ObjectStorageError::Conflict)
+    );
+    assert_eq!(
+        service
+            .abort_multipart_upload(scope, bucket_id, upload_id)
+            .await,
+        Err(ObjectStorageError::Conflict)
+    );
+    let version_id = ObjectVersionId::generate();
+    service
+        .complete_multipart_upload(
+            scope,
+            bucket_id,
+            upload_id,
+            version_id,
+            TimestampMicros::new(4),
+        )
+        .await?;
+    service
+        .complete_multipart_upload(
+            scope,
+            bucket_id,
+            upload_id,
+            version_id,
+            TimestampMicros::new(5),
+        )
+        .await?;
+    assert_eq!(
+        service
+            .complete_multipart_upload(
+                scope,
+                bucket_id,
+                upload_id,
+                ObjectVersionId::generate(),
+                TimestampMicros::new(5),
+            )
+            .await,
+        Err(ObjectStorageError::Conflict)
+    );
+    repository.close().await;
+
+    let reopened =
+        SqlObjectStorageRepository::connect_sqlite(&url, ObjectStorageRepositoryConfig::LOCAL)
+            .await?;
+    let reopened = ObjectStorageService::new(Arc::new(reopened), SecretDigestKey::new([92; 32]));
+    let upload = reopened
+        .get_multipart_upload(scope, bucket_id, upload_id)
+        .await?
+        .ok_or("multipart upload missing after reopen")?;
+    assert_eq!(upload.state, MultipartUploadState::Completed);
+    assert_eq!(upload.completed_version_id, Some(version_id));
+    assert!(
+        reopened
+            .list_multipart_uploads(scope, bucket_id, "uploads/", None, 100)
+            .await?
+            .uploads
+            .is_empty()
+    );
+    assert_eq!(
+        reopened
+            .list_multipart_parts(scope, bucket_id, upload_id)
+            .await?,
+        [part]
+    );
+    Ok(())
 }
 
 #[test]

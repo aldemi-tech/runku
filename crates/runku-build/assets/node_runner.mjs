@@ -158,6 +158,39 @@ async function contract(digest) {
   return value;
 }
 
+function platformContext(request) {
+  const capabilities = new Set(request.capabilities ?? []);
+  const variables = Object.freeze({ ...(request.variables ?? {}) });
+  const secrets = Object.freeze({ ...(request.secrets ?? {}) });
+  const readConfiguration = (kind, values, name) => {
+    const exact = String(name);
+    if (!capabilities.has(`${kind}:${exact}`) || !Object.hasOwn(values, exact)) {
+      return Promise.reject(Object.assign(new Error("configuration unavailable"), {
+        code: "CONFIGURATION_NOT_FOUND",
+      }));
+    }
+    return Promise.resolve(values[exact]);
+  };
+  const context = {
+    invocation: Object.freeze({
+      releaseId: request.releaseId,
+      invocationId: request.invocationId,
+      function: request.function,
+    }),
+  };
+  if ([...capabilities].some((capability) => capability.startsWith("variable:"))) {
+    context.env = Object.freeze({
+      get: (name) => readConfiguration("variable", variables, name),
+    });
+  }
+  if ([...capabilities].some((capability) => capability.startsWith("secret:"))) {
+    context.secrets = Object.freeze({
+      get: (name) => readConfiguration("secret", secrets, name),
+    });
+  }
+  return Object.freeze(context);
+}
+
 async function executeRequest(request) {
   let performanceStart;
   try {
@@ -172,11 +205,7 @@ async function executeRequest(request) {
   const exportName = request.function.split(".").at(-1);
   const handler = implementation[exportName];
   if (typeof handler !== "function") throw new TypeError("handler export missing");
-  const context = Object.freeze({ invocation: Object.freeze({
-    releaseId: request.releaseId,
-    invocationId: request.invocationId,
-    function: request.function,
-  }) });
+  const context = platformContext(request);
   const encoded = encode(await handler(context, decode(request.arguments)));
   if (!validates(resultContract, encoded)) throw new TypeError("invalid result");
   return {

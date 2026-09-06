@@ -488,6 +488,152 @@ impl ObjectStorageService {
             .await
     }
 
+    /// Lists immutable object versions for one exact bucket.
+    pub async fn list_object_versions(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        request: &crate::ObjectVersionPageRequest,
+    ) -> Result<crate::ObjectVersionPage, ObjectStorageError> {
+        request.validate()?;
+        self.repository
+            .list_object_versions(scope, bucket_id, request)
+            .await
+    }
+
+    /// Deletes one exact immutable version.
+    pub async fn delete_object_version(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+        version_id: crate::ObjectVersionId,
+    ) -> Result<bool, ObjectStorageError> {
+        crate::validate_object_key(key)?;
+        self.repository
+            .delete_object_version(scope, bucket_id, key, version_id)
+            .await
+    }
+
+    /// Creates one durable multipart upload.
+    pub async fn create_multipart_upload(
+        &self,
+        upload: &crate::MultipartUpload,
+    ) -> Result<(), ObjectStorageError> {
+        upload.validate()?;
+        self.repository.create_multipart_upload(upload).await
+    }
+
+    /// Gets one multipart upload.
+    pub async fn get_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: crate::MultipartUploadId,
+    ) -> Result<Option<crate::MultipartUpload>, ObjectStorageError> {
+        self.repository
+            .get_multipart_upload(scope, bucket_id, upload_id)
+            .await
+    }
+
+    /// Upserts one multipart part.
+    pub async fn put_multipart_part(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: crate::MultipartUploadId,
+        part: &crate::MultipartPart,
+    ) -> Result<(), ObjectStorageError> {
+        part.validate()?;
+        self.repository
+            .put_multipart_part(scope, bucket_id, upload_id, part)
+            .await
+    }
+
+    /// Lists all parts of one upload.
+    pub async fn list_multipart_parts(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: crate::MultipartUploadId,
+    ) -> Result<Vec<crate::MultipartPart>, ObjectStorageError> {
+        self.repository
+            .list_multipart_parts(scope, bucket_id, upload_id)
+            .await
+    }
+
+    /// Lists active multipart uploads.
+    pub async fn list_multipart_uploads(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        prefix: &str,
+        after: Option<(&str, crate::MultipartUploadId)>,
+        limit: u16,
+    ) -> Result<crate::MultipartUploadPage, ObjectStorageError> {
+        if prefix.len() > 1_024 || prefix.starts_with('/') || limit == 0 || limit > 100 {
+            return Err(ObjectStorageError::InvalidInput);
+        }
+        self.repository
+            .list_multipart_uploads(scope, bucket_id, prefix, after, limit)
+            .await
+    }
+
+    /// Claims one exact multipart completion body before reading parts or writing final bytes.
+    pub async fn claim_multipart_completion(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: crate::MultipartUploadId,
+        completion_digest: [u8; 32],
+    ) -> Result<(), ObjectStorageError> {
+        self.repository
+            .claim_multipart_completion(scope, bucket_id, upload_id, completion_digest)
+            .await
+    }
+
+    /// Marks an upload completed with the exact committed object version.
+    pub async fn complete_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: crate::MultipartUploadId,
+        version_id: crate::ObjectVersionId,
+        at: TimestampMicros,
+    ) -> Result<(), ObjectStorageError> {
+        self.repository
+            .complete_multipart_upload(scope, bucket_id, upload_id, version_id, at)
+            .await
+    }
+
+    /// Aborts one incomplete multipart upload idempotently.
+    pub async fn abort_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: crate::MultipartUploadId,
+    ) -> Result<(), ObjectStorageError> {
+        self.repository
+            .abort_multipart_upload(scope, bucket_id, upload_id)
+            .await
+    }
+
+    /// Applies one bounded lifecycle pass.
+    pub async fn apply_lifecycle(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        at: TimestampMicros,
+        limit: u16,
+    ) -> Result<crate::LifecycleResult, ObjectStorageError> {
+        if at.get() < 0 || limit == 0 || limit > 100 {
+            return Err(ObjectStorageError::InvalidInput);
+        }
+        self.repository
+            .apply_lifecycle(scope, bucket_id, at, limit)
+            .await
+    }
+
     /// Deletes one exact current version from the logical namespace.
     pub async fn delete_object(
         &self,

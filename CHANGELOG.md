@@ -2,7 +2,7 @@
 
 All notable changes are documented in this file.
 
-## 0.4.6 - 2026-09-05
+## 0.4.6 - 2026-09-06
 
 ### Added
 
@@ -11,11 +11,11 @@ All notable changes are documented in this file.
   bounded metrics, and sanitized instance health.
 - Logical Object Storage with revisioned buckets, scoped one-time Product S3 credentials,
   encrypted overlapping key generations, Management object transfer, public/presigned access, and
-  a path-style SigV4 S3 subset covering put/get/head/list/copy/delete, ranges, conditions, and exact
-  version reads.
+  a path-style SigV4 S3 profile covering put/get/head/list/copy/delete, ranges, conditions, object
+  version listing/deletion, and durable multipart create/upload/list/complete/abort.
 - Environment variables and encrypted secrets with global revision CAS, exact idempotency replay,
   value-free history, `variable:NAME`/`secret:NAME` capabilities, and `ctx.env`/`ctx.secrets` in
-  Safe V8 and local Full Node runtime contract v3.
+  the cumulative current Safe V8 and Full Node runtime contract.
 - Portable Environment archive/restore intent and deterministic `environment:default` routing over
   compatible weighted Releases.
 
@@ -25,6 +25,12 @@ All notable changes are documented in this file.
   File/Object Storage bytes as one verified unit.
 - Management route authorization includes the new least-privilege configuration, storage,
   lifecycle, invocation, telemetry, Cron, and Scheduled capabilities.
+- New builds always emit the cumulative generation-3 runtime contract for their Safe, Full Node,
+  or hybrid artifact. Earlier runtime identifiers remain readers for already-persisted Releases,
+  not independently evolving runtime products.
+- Object Storage lifecycle rules now execute in bounded batches, incomplete multipart uploads are
+  durably reconciled, and the external-client campaign covers the supported profile with the
+  official AWS CLI.
 
 ### Security
 
@@ -37,14 +43,12 @@ All notable changes are documented in this file.
 
 ### Compatibility and rollback
 
-- Runtime v3 is additive over application-file runtime v2. Safe V8 and local Full Node support it;
-  production OCI/distributed Full Node remains on v1 and rejects storage/configuration manifests.
-- Legacy manifests containing the formerly reserved secret tag remain decodable, but only runtime
-  v3 exposes configuration values. Version-3 configuration names are canonical uppercase
-  identifiers.
+- The current runtime is cumulative over the earlier application-file and base contracts. Legacy
+  manifests remain decodable for persisted compatibility, while every new build targets the
+  generation-3 wire identifier. Configuration names are canonical uppercase identifiers.
 - The compact configuration registry is currently SQLite-backed even when Function data uses
-  PostgreSQL. S3 multipart, version listing/deletion, and lifecycle execution are not included in
-  this release.
+  PostgreSQL. The S3-compatible surface is a documented Runku profile rather than all AWS S3 APIs;
+  bucket ACLs, tagging, website hosting, replication, and cross-bucket copy are outside it.
 - New checksum-protected Product schemas are forward-only. Take and verify a coordinated backup
   before upgrade; downgrading a state already written by 0.4.6 is unsupported.
 

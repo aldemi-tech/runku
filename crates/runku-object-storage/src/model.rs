@@ -75,6 +75,11 @@ storage_id!(
     "Identifies one immutable logical object version."
 );
 storage_id!(
+    MultipartUploadId,
+    "mpu_",
+    "Identifies one durable multipart upload."
+);
+storage_id!(
     AccessKeyId,
     "sak_",
     "Identifies one Product Object Storage access key."
@@ -1042,6 +1047,160 @@ pub struct ObjectPage {
     pub common_prefixes: Vec<String>,
     /// Exclusive full-key cursor, when more current keys remain.
     pub next: Option<String>,
+}
+
+/// Stable version-history listing request ordered by key, newest version, then version ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectVersionPageRequest {
+    /// Inclusive object-key prefix.
+    pub prefix: String,
+    /// Exclusive key cursor from a previous page.
+    pub after_key: Option<String>,
+    /// Exclusive version cursor paired with `after_key`.
+    pub after_version: Option<ObjectVersionId>,
+    /// Maximum versions returned.
+    pub limit: u16,
+}
+
+impl ObjectVersionPageRequest {
+    /// Validates cursor pairing and bounds.
+    pub fn validate(&self) -> Result<(), ObjectStorageError> {
+        if self.prefix.len() > 1_024
+            || self.prefix.starts_with('/')
+            || self.prefix.chars().any(char::is_control)
+            || self.limit == 0
+            || self.limit > MAX_PAGE_SIZE
+            || self.after_key.is_some() != self.after_version.is_some()
+            || self
+                .after_key
+                .as_ref()
+                .is_some_and(|value| validate_object_key(value).is_err())
+        {
+            return Err(ObjectStorageError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
+/// One stable page of immutable logical object versions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectVersionPage {
+    /// Exact owner scope.
+    pub scope: EnvironmentScope,
+    /// Exact logical bucket.
+    pub bucket_id: BucketId,
+    /// Requested prefix.
+    pub prefix: String,
+    /// Ordered immutable versions.
+    pub versions: Vec<ObjectMetadata>,
+    /// Next key/version cursor when more history exists.
+    pub next: Option<(String, ObjectVersionId)>,
+}
+
+/// Durable multipart upload lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MultipartUploadState {
+    /// Parts may be written and the upload may complete.
+    Active,
+    /// Completion owns the upload; parts and competing completion bodies are frozen.
+    Completing,
+    /// The final object version committed successfully.
+    Completed,
+    /// The upload was explicitly or lifecycle-aborted.
+    Aborted,
+}
+
+/// Durable multipart upload metadata. Part bytes remain content-addressed in the byte adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultipartUpload {
+    /// Exact owner scope.
+    pub scope: EnvironmentScope,
+    /// Owning logical bucket.
+    pub bucket_id: BucketId,
+    /// Upload identity.
+    pub upload_id: MultipartUploadId,
+    /// Destination object key.
+    pub key: String,
+    /// Final media type.
+    pub content_type: String,
+    /// Final user metadata.
+    pub metadata: BTreeMap<String, String>,
+    /// Actor that created the upload.
+    pub actor: ObjectStorageActor,
+    /// Durable upload lifecycle state.
+    pub state: MultipartUploadState,
+    /// Creation time used by lifecycle expiry.
+    pub created_at: TimestampMicros,
+    /// Completion time when committed.
+    pub completed_at: Option<TimestampMicros>,
+    /// Resulting immutable version when committed.
+    pub completed_version_id: Option<ObjectVersionId>,
+}
+
+impl MultipartUpload {
+    /// Validates persisted multipart invariants.
+    pub fn validate(&self) -> Result<(), ObjectStorageError> {
+        validate_object_key(&self.key)?;
+        validate_object_headers(&self.content_type, &self.metadata)?;
+        if self.created_at.get() < 0
+            || self.completed_at.is_some() != self.completed_version_id.is_some()
+            || matches!(self.state, MultipartUploadState::Completed) != self.completed_at.is_some()
+            || self
+                .completed_at
+                .is_some_and(|completed| completed < self.created_at)
+        {
+            return Err(ObjectStorageError::Corruption);
+        }
+        Ok(())
+    }
+}
+
+/// One immutable part of a durable multipart upload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultipartPart {
+    /// Part number in the S3 range 1..=10,000.
+    pub number: u16,
+    /// Byte length.
+    pub size: u64,
+    /// SHA-256 content address.
+    pub sha256: [u8; 32],
+    /// Stable quoted part `ETag`.
+    pub etag: String,
+    /// Last successful write time.
+    pub created_at: TimestampMicros,
+}
+
+/// One bounded multipart-upload listing page ordered by object key then upload ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultipartUploadPage {
+    /// Active uploads only.
+    pub uploads: Vec<MultipartUpload>,
+    /// Exclusive key/upload cursor when more active uploads exist.
+    pub next: Option<(String, MultipartUploadId)>,
+}
+
+impl MultipartPart {
+    /// Validates a persisted part.
+    pub fn validate(&self) -> Result<(), ObjectStorageError> {
+        if !(1..=10_000).contains(&self.number)
+            || self.created_at.get() < 0
+            || self.etag != object_etag(&self.sha256)
+        {
+            return Err(ObjectStorageError::Corruption);
+        }
+        Ok(())
+    }
+}
+
+/// Metadata removed by one bounded lifecycle pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LifecycleResult {
+    /// Current logical objects expired.
+    pub current_objects: u64,
+    /// Non-current immutable versions expired.
+    pub noncurrent_versions: u64,
+    /// Incomplete multipart uploads aborted.
+    pub multipart_uploads: u64,
 }
 
 /// Idempotent intent for one object upload after bytes reached immutable physical storage.

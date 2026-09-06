@@ -26,8 +26,12 @@ use tokio::{
     process::{Child, Command},
     sync::{Mutex, OnceCell, Semaphore},
 };
+use zeroize::Zeroize;
 
-use crate::{FullNodeActionOutcome, FullNodeActionRuntime};
+use crate::{
+    FullNodeActionOutcome, FullNodeActionRuntime,
+    protocol::{capability_name, resolve_configuration},
+};
 
 const HOST_RUNNER: &str = include_str!("local_runner.mjs");
 const MAX_CONCURRENCY: usize = 128;
@@ -507,7 +511,7 @@ impl HostNodeRuntime {
                 u64::try_from(request.artifact_bytes().len()).ok(),
             )
         });
-        let prepared = prepare_request(&self.config, request);
+        let prepared = prepare_request(&self.config, request).await;
         let input_bytes = prepared
             .as_ref()
             .ok()
@@ -626,7 +630,7 @@ fn resolve_executable(binary: &str) -> Result<String, RuntimeError> {
 impl FullNodeActionRuntime for HostNodeRuntime {
     fn validate_manifest(&self, manifest: &ReleaseManifestV1) -> Result<(), RuntimeError> {
         manifest
-            .ensure_full_node_v1_supported()
+            .ensure_full_node_supported()
             .map_err(|_| RuntimeError::UnsupportedRuntime)
     }
 
@@ -644,13 +648,13 @@ struct PreparedInvocation {
     result_contract: Contract,
 }
 
-fn prepare_request(
+async fn prepare_request(
     config: &HostNodeRuntimeConfig,
     request: &InvocationRequest,
 ) -> Result<PreparedInvocation, RuntimeError> {
     request
         .manifest()
-        .ensure_full_node_v1_supported()
+        .ensure_full_node_supported()
         .map_err(|_| RuntimeError::UnsupportedRuntime)?;
     let function = request
         .manifest()
@@ -697,6 +701,7 @@ fn prepare_request(
         .validate_value(request.arguments())
         .map_err(|_| RuntimeError::InvalidArguments)?;
     let result_contract = read_contract(&image_root, function.result_contract_hash)?;
+    let mut configuration = resolve_configuration(request, function).await?;
     let input = serde_json::to_vec(&NodeRequestV1 {
         protocol_version: 1,
         collect_performance: request.performance().is_some(),
@@ -704,10 +709,14 @@ fn prepare_request(
         invocation_id: request.invocation_id().to_string(),
         function: function.name.as_str().to_owned(),
         implementation_hash: function.implementation_hash.to_string(),
+        capabilities: function.capabilities.iter().map(capability_name).collect(),
+        variables: &configuration.variables,
+        secrets: &configuration.secrets,
         arguments: WireValueV1::from_canonical(request.arguments())
             .map_err(|_| RuntimeError::InvalidArguments)?,
     })
     .map_err(|_| RuntimeError::Internal)?;
+    configuration.zeroize();
     Ok(PreparedInvocation {
         image_root,
         input,
@@ -969,13 +978,16 @@ fn decode_response(bytes: &[u8]) -> Result<FullNodeActionOutcome, RuntimeError> 
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NodeRequestV1 {
+struct NodeRequestV1<'a> {
     protocol_version: u8,
     collect_performance: bool,
     release_id: String,
     invocation_id: String,
     function: String,
     implementation_hash: String,
+    capabilities: Vec<String>,
+    variables: &'a std::collections::BTreeMap<String, String>,
+    secrets: &'a std::collections::BTreeMap<String, String>,
     arguments: WireValueV1,
 }
 

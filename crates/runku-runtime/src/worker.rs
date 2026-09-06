@@ -962,7 +962,7 @@ fn validate_input(
         }
         request
             .manifest
-            .ensure_full_node_v1_supported()
+            .ensure_full_node_supported()
             .map_err(|_| RuntimeError::UnsupportedRuntime)?;
         runku_releases::decode_hybrid_oci_artifact(&request.artifact_bytes)
             .map_err(|_| RuntimeError::InvalidArtifact)?

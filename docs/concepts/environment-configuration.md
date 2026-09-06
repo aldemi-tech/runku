@@ -43,12 +43,17 @@ export const sendPayment = action({
 `ctx.env` and `ctx.secrets` are absent unless the Function declares a matching capability. Their
 `get(name)` methods recheck the exact kind and name in the host, so casting TypeScript or forging a
 Full Node platform message cannot broaden access. Nested calls keep the exact Environment and
-attach only the child Function's declared names. Configuration capabilities select runtime contract
-version `runku-js-3`, `runku-node-3`, or `runku-hybrid-3`.
+attach only the child Function's declared names. Every new build targets the cumulative current
+runtime contract: `runku-js-3`, `runku-node-3`, or `runku-hybrid-3`, according to artifact class.
+Capability selection no longer emits reduced v1/v2 runtime variants. Readers still accept
+already-persisted legacy manifests; those identifiers are compatibility inputs, not separately
+evolving runtimes.
 
-Safe V8 and the local Full Node runner implement version 3. The production OCI/distributed Full
-Node agent remains on version 1; promotion of a Node or hybrid configuration manifest to that
-profile fails closed until the mediated agent protocol is upgraded and qualified.
+Safe V8 and local Full Node resolve configuration through the exact-name broker. OCI, dedicated
+host, Docker, and Firecracker Full Node execution resolve exactly the declared names before handing
+the authenticated invocation to the isolated runner, zeroize temporary plaintext after encoding,
+and fail closed when the exact Environment broker is absent. The distributed queue/agent test
+proves Gateway-to-agent resolution and verifies that secret material is absent from diagnostics.
 
 ## Management API
 

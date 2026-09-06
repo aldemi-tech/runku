@@ -6,12 +6,13 @@ conformance runs in the ordinary crate test; PostgreSQL 16+ runs when
 bucket, object-browser/upload/download/delete, and Product access-key administration over this
 authority. Object bytes use the same filesystem/S3 provider boundary as Application Files under a
 physically disjoint content-addressed namespace. The attached Product listener also implements a
-path-style AWS Signature Version 4 surface for bounded single-object operations, ListObjectsV2,
-COPY, public reads, presigned URLs, ranges, conditional reads, immutable version reads, and bucket
-CORS over the same authority. The compact coordinated backup includes the authoritative Product
+path-style AWS Signature Version 4 surface for bounded object operations, ListObjectsV2, immutable
+version listing/deletion, multipart create/upload/list/complete/abort, COPY, public reads, presigned
+URLs, ranges, conditional reads, and bucket CORS over the same authority. Bucket lifecycle rules
+execute in bounded batches. The compact coordinated backup includes the authoritative Product
 registry plus filesystem object bytes and verifies their archive digest before an empty restore.
-Native SDK object operations, multipart, version deletion/listing, lifecycle execution, and CLI
-commands remain unimplemented.
+The exact supported profile has conformance with the official AWS CLI; it is not a claim to every
+AWS S3 service API.
 
 This capability is distinct from [Application file storage](../functions/file-storage.md).
 Application Files are an Action-oriented upload/download facility. Logical Object Storage is a
@@ -41,10 +42,14 @@ all active access-key generations.
 ## Object authority and transfer ordering
 
 Current keys and immutable versions persist size, SHA-256, Product ETag, content type, bounded user
-metadata, and creation time. Lists accept a bounded prefix, optional `/` delimiter, exclusive full-
-key cursor, and limit up to 100. Prefixes are a presentation over exact keys; they are never
-filesystem paths. Put and delete require an `OperationId`; delete additionally requires the exact
-current `ovr_*` version and therefore cannot remove a concurrent replacement.
+metadata, and creation time. Current-object lists accept a bounded prefix, optional `/` delimiter,
+exclusive full-key cursor, and limit up to 100. Version lists use the exclusive key/version cursor
+and the same bound. Prefixes are a presentation over exact keys; they are never filesystem paths.
+Administrative put and current delete require an `OperationId`; delete additionally requires the
+exact current `ovr_*` version and therefore cannot remove a concurrent replacement. S3 exact-
+version deletion is idempotent and promotes the newest remaining immutable version only when the
+deleted version was current. Deleting the current key hides it while retaining version evidence;
+the profile does not synthesize AWS delete-marker resources.
 
 Upload hashes and validates the bounded bytes, writes the immutable physical content address, and
 then commits quota/current/version metadata plus operation and audit in one serializable registry
@@ -133,25 +138,40 @@ configured cutoff; revocation is checked on every request. Semantic content, cop
 `x-amz-meta-*` headers must be signed. Verification material and signing keys are redacted and
 zeroized after use.
 
-The implemented subset is `ListObjectsV2`, `HEAD`, `GET`, bounded single-request `PUT`, same-bucket
-`CopyObject`, and current-object `DELETE`. GET/HEAD accept one byte range, standard ETag/date
-preconditions, `If-Range`, and an immutable `versionId` when bucket versioning is enabled. Reads
-from a `public_read` bucket may be anonymous;
-listing and every mutation always require Product credentials. Bucket CORS is evaluated for actual
-and preflight requests. Product ETag/version/checksum metadata and sanitized Product request IDs are
-returned without exposing the physical adapter. An exact signed retry maps to one deterministic
-Product operation ID, so the metadata journal resolves a lost acknowledgement instead of inventing
-a second logical intent.
+The implemented profile is `ListObjectsV2`, `ListObjectVersions`, `HEAD`, `GET`, bounded
+single-request `PUT`, same-bucket `CopyObject`, current/exact-version `DELETE`,
+`CreateMultipartUpload`, `UploadPart`, `ListParts`, `ListMultipartUploads`,
+`CompleteMultipartUpload`, and `AbortMultipartUpload`. GET/HEAD accept one byte range, standard
+ETag/date preconditions, `If-Range`, and an immutable `versionId` when bucket versioning is enabled.
+Reads from a `public_read` bucket may be anonymous; listing and every mutation always require
+Product credentials. Bucket CORS is evaluated for actual and preflight requests. Product
+ETag/version/checksum metadata and sanitized Product request IDs are returned without exposing the
+physical adapter. An exact signed single-object retry maps to one deterministic Product operation
+ID, so the metadata journal resolves a lost acknowledgement instead of inventing a second logical
+intent.
 
-The non-multipart body bound is 64 MiB in server composition. Multipart upload/list/abort,
-version listing/deletion, lifecycle execution, and cross-bucket copy are not yet part of this
-subset and must not be advertised as implemented S3
-operations. Public and presigned URLs are Product routes; a Cloud deployment must wrap this origin
+The per-request and completed-object bound is 64 MiB in server composition. A multipart upload has
+at most 10,000 ordered parts; every non-final completed part is at least 5 MiB. Parts are immutable
+content addresses and may be replaced while the upload is active. Completion first validates the
+complete part set, durably claims a digest of the exact completion body, assembles and verifies the
+bytes, commits through an object operation deterministically derived from upload ID plus completion
+digest, and then marks the upload complete.
+An identical completion retry reconciles; a different completion body, part mutation after claim,
+abort during completion, or completion after abort fails closed. Bucket lifecycle execution can
+expire current objects, expire non-current versions, and abort incomplete uploads in batches of at
+most 100 per authenticated request. Physical content-addressed bytes are retained for later safe
+garbage collection.
+
+Bucket ACLs, tagging, website hosting, replication, provider administration, cross-bucket copy,
+delete-marker resources, `UploadPartCopy`, and unbounded AWS pagination are outside this Runku
+profile. Public and presigned URLs are Product routes; a Cloud deployment must wrap this origin
 with its exact, revocable opaque Environment route rather than reveal a cell.
 
 The ordinary Rust test uses the in-process router and durable SQLite/filesystem adapters. The
 separate external-client gate starts a loopback listener and proves PUT, HEAD, ListObjectsV2,
-version-addressed GET, range GET, COPY, GET, and DELETE with the installed official AWS CLI:
+version-addressed GET, range GET, COPY, multipart create/list/upload/list-parts/complete/download/
+abort, version listing, exact-version deletion, current GET, and DELETE with the installed official
+AWS CLI:
 
 ```sh
 make object-storage-s3-client-check
@@ -164,6 +184,8 @@ Production composition accepts PostgreSQL 16+ only, with bounded pools, statemen
 timeouts, and serializable writes. Migration history is append-only and checksum protected.
 Schema v3 adds nullable authenticated-encryption fields so existing registries upgrade without
 inventing secrets; every newly issued or rotated generation writes both verifier forms atomically.
+Schema v4 adds durable multipart upload/part state and completion-claim digests. All are forward-
+only migrations; an older binary must not write the registry after a newer schema is adopted.
 
 Successful state mutation, operation journal entry, and audit event commit in one transaction.
 Audit rows are append-only and ordered independently within each Environment. Operators should:
@@ -181,5 +203,5 @@ the PostgreSQL dump and state archive digests, requires the Object Storage byte 
 only into empty destinations before `doctor` and readiness checks. The release artifact campaign
 adds an actual object byte before backup and verifies it after restore. An external-S3 deployment
 still fails the compact backup closed because provider recovery must be coordinated separately.
-Lifecycle/garbage collection, multipart, version listing/deletion, and a broader AWS-compatible
-client matrix each retain their own later gate.
+External-provider backup/restore, physical orphan garbage collection, and a broader SDK/client
+matrix retain their own later gates; they are not inferred from the official CLI campaign.

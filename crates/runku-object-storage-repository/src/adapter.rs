@@ -18,11 +18,12 @@ use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyPage, AccessKeyPageRequest,
     AccessKeyState, AuditEvent, AuditPage, AuditPageRequest, Bucket, BucketId, BucketName,
     BucketPage, BucketPageRequest, BucketState, DeleteObjectCommand, EncryptedAccessKeyGeneration,
-    EncryptedAccessKeySecret, ObjectMetadata, ObjectOperation, ObjectOperationResult, ObjectPage,
-    ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand, ObjectStorageError,
-    ObjectStorageOperation, ObjectStorageOperationResult, ObjectStorageRepository,
-    ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot, ObjectVersionId,
-    PutObjectCommand, object_etag,
+    EncryptedAccessKeySecret, LifecycleResult, MultipartPart, MultipartUpload, MultipartUploadId,
+    MultipartUploadPage, MultipartUploadState, ObjectMetadata, ObjectOperation,
+    ObjectOperationResult, ObjectPage, ObjectPageRequest, ObjectStorageActor, ObjectStorageCommand,
+    ObjectStorageError, ObjectStorageOperation, ObjectStorageOperationResult,
+    ObjectStorageRepository, ObjectStorageRepositoryBackend, ObjectStorageTelemetrySnapshot,
+    ObjectVersionId, ObjectVersionPage, ObjectVersionPageRequest, PutObjectCommand, object_etag,
 };
 use runku_value::TimestampMicros;
 use sha2::{Digest, Sha256};
@@ -53,7 +54,17 @@ const MIGRATION_3: &[&str] = &[
     "ALTER TABLE runku_storage_access_key_generations ADD COLUMN secret_ciphertext BYTEA NULL",
     "CREATE INDEX runku_storage_access_key_generations_by_key ON runku_storage_access_key_generations(project_id,environment_id,access_key_id,generation)",
 ];
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3)];
+const MIGRATION_4: &[&str] = &[
+    "CREATE TABLE runku_storage_multipart_uploads (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, bucket_id TEXT NOT NULL, upload_id TEXT NOT NULL, object_key TEXT NOT NULL, content_type TEXT NOT NULL, metadata_json TEXT NOT NULL, actor TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','completing','completed','aborted')), completion_digest BYTEA NULL, created_at_micros BIGINT NOT NULL CHECK(created_at_micros >= 0), completed_at_micros BIGINT NULL, completed_version_id TEXT NULL, PRIMARY KEY(project_id,environment_id,bucket_id,upload_id), FOREIGN KEY(project_id,environment_id,bucket_id) REFERENCES runku_storage_buckets(project_id,environment_id,bucket_id) ON DELETE RESTRICT)",
+    "CREATE INDEX runku_storage_multipart_uploads_active ON runku_storage_multipart_uploads(project_id,environment_id,bucket_id,state,object_key,upload_id)",
+    "CREATE TABLE runku_storage_multipart_parts (project_id TEXT NOT NULL, environment_id TEXT NOT NULL, bucket_id TEXT NOT NULL, upload_id TEXT NOT NULL, part_number BIGINT NOT NULL CHECK(part_number BETWEEN 1 AND 10000), size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0), sha256 BYTEA NOT NULL CHECK(length(sha256)=32), etag TEXT NOT NULL, created_at_micros BIGINT NOT NULL CHECK(created_at_micros >= 0), PRIMARY KEY(project_id,environment_id,bucket_id,upload_id,part_number), FOREIGN KEY(project_id,environment_id,bucket_id,upload_id) REFERENCES runku_storage_multipart_uploads(project_id,environment_id,bucket_id,upload_id) ON DELETE RESTRICT)",
+];
+const MIGRATIONS: &[(i64, &[&str])] = &[
+    (1, MIGRATION_1),
+    (2, MIGRATION_2),
+    (3, MIGRATION_3),
+    (4, MIGRATION_4),
+];
 
 /// Operational role selected for repository composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -369,6 +380,121 @@ impl ObjectStorageRepository for SqlObjectStorageRepository {
     ) -> Result<ObjectPage, ObjectStorageError> {
         self.counters.reads.fetch_add(1, Ordering::Relaxed);
         list_objects(&self.pool, scope, bucket_id, request).await
+    }
+    async fn list_object_versions(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        request: &ObjectVersionPageRequest,
+    ) -> Result<ObjectVersionPage, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        list_object_versions(&self.pool, scope, bucket_id, request).await
+    }
+    async fn delete_object_version(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+        version_id: ObjectVersionId,
+    ) -> Result<bool, ObjectStorageError> {
+        delete_object_version(&self.pool, self.backend, scope, bucket_id, key, version_id).await
+    }
+    async fn create_multipart_upload(
+        &self,
+        upload: &MultipartUpload,
+    ) -> Result<(), ObjectStorageError> {
+        create_multipart_upload(&self.pool, upload).await
+    }
+    async fn get_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+    ) -> Result<Option<MultipartUpload>, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        get_multipart_upload(&self.pool, scope, bucket_id, upload_id).await
+    }
+    async fn put_multipart_part(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+        part: &MultipartPart,
+    ) -> Result<(), ObjectStorageError> {
+        put_multipart_part(&self.pool, self.backend, scope, bucket_id, upload_id, part).await
+    }
+    async fn list_multipart_parts(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+    ) -> Result<Vec<MultipartPart>, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        list_multipart_parts(&self.pool, scope, bucket_id, upload_id).await
+    }
+    async fn list_multipart_uploads(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        prefix: &str,
+        after: Option<(&str, MultipartUploadId)>,
+        limit: u16,
+    ) -> Result<MultipartUploadPage, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        list_multipart_uploads(&self.pool, scope, bucket_id, prefix, after, limit).await
+    }
+    async fn claim_multipart_completion(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+        completion_digest: [u8; 32],
+    ) -> Result<(), ObjectStorageError> {
+        claim_multipart_completion(
+            &self.pool,
+            self.backend,
+            scope,
+            bucket_id,
+            upload_id,
+            completion_digest,
+        )
+        .await
+    }
+    async fn complete_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+        version_id: ObjectVersionId,
+        at: TimestampMicros,
+    ) -> Result<(), ObjectStorageError> {
+        complete_multipart_upload(
+            &self.pool,
+            self.backend,
+            scope,
+            bucket_id,
+            upload_id,
+            version_id,
+            at,
+        )
+        .await
+    }
+    async fn abort_multipart_upload(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        upload_id: MultipartUploadId,
+    ) -> Result<(), ObjectStorageError> {
+        abort_multipart_upload(&self.pool, scope, bucket_id, upload_id).await
+    }
+    async fn apply_lifecycle(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        at: TimestampMicros,
+        limit: u16,
+    ) -> Result<LifecycleResult, ObjectStorageError> {
+        apply_lifecycle(&self.pool, self.backend, scope, bucket_id, at, limit).await
     }
     async fn delete_object(
         &self,
@@ -1221,7 +1347,7 @@ async fn put_object(
         return rollback(tx, ObjectStorageError::LimitExceeded).await;
     }
     let current = load_object_tx(&mut tx, scope, bucket_id, &command.key).await?;
-    let row = sqlx::query("SELECT COALESCE(SUM(size_bytes),0) AS total_bytes,COUNT(*) AS object_count FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3")
+    let row = sqlx::query("SELECT CAST(COALESCE(SUM(size_bytes),0) AS BIGINT) AS total_bytes,COUNT(*) AS object_count FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3")
         .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
         .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
     let total: i64 = row.try_get("total_bytes").map_err(corrupt)?;
@@ -1524,6 +1650,428 @@ async fn list_objects(
         common_prefixes,
         next,
     })
+}
+
+async fn list_object_versions(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    request: &ObjectVersionPageRequest,
+) -> Result<ObjectVersionPage, ObjectStorageError> {
+    request.validate()?;
+    if load_bucket(pool, scope, bucket_id).await?.is_none() {
+        return Err(ObjectStorageError::NotFound);
+    }
+    let pattern = format!("{}%", escape_like(&request.prefix));
+    let rows = if let (Some(key), Some(version)) = (&request.after_key, request.after_version) {
+        sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_object_versions WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' AND (object_key>$5 OR (object_key=$5 AND version_id<$6)) ORDER BY object_key,version_id DESC LIMIT $7")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+            .bind(&pattern).bind(key).bind(version.to_string()).bind(i64::from(request.limit) + 1)
+            .fetch_all(pool).await.map_err(map_sqlx_error)?
+    } else {
+        sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_object_versions WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key LIKE $4 ESCAPE '\\' ORDER BY object_key,version_id DESC LIMIT $5")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+            .bind(&pattern).bind(i64::from(request.limit) + 1).fetch_all(pool).await.map_err(map_sqlx_error)?
+    };
+    let mut versions = rows
+        .iter()
+        .map(|row| decode_object(scope, bucket_id, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    let more = versions.len() > usize::from(request.limit);
+    if more {
+        versions.pop();
+    }
+    let next = more
+        .then(|| {
+            versions
+                .last()
+                .map(|value| (value.key.clone(), value.version_id))
+        })
+        .flatten();
+    Ok(ObjectVersionPage {
+        scope,
+        bucket_id,
+        prefix: request.prefix.clone(),
+        versions,
+        next,
+    })
+}
+
+async fn delete_object_version(
+    pool: &AnyPool,
+    backend: ObjectStorageRepositoryBackend,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    key: &str,
+    version_id: ObjectVersionId,
+) -> Result<bool, ObjectStorageError> {
+    runku_object_storage::validate_object_key(key)?;
+    let mut tx = begin_write(pool, backend).await?;
+    let Some(target) = load_object_version_tx(&mut tx, scope, bucket_id, key, version_id).await?
+    else {
+        tx.commit().await.map_err(map_commit_error)?;
+        return Ok(false);
+    };
+    let current = load_object_tx(&mut tx, scope, bucket_id, key).await?;
+    let deleted = sqlx::query("DELETE FROM runku_storage_object_versions WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4 AND version_id=$5")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+        .bind(key).bind(version_id.to_string()).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+    if deleted.rows_affected() != 1 {
+        return rollback(tx, ObjectStorageError::Conflict).await;
+    }
+    if current.is_some_and(|value| value.version_id == version_id) {
+        sqlx::query("DELETE FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+            .bind(key).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        let prior = sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_object_versions WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4 ORDER BY version_id DESC LIMIT 1")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(key)
+            .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
+        if let Some(row) = prior {
+            let prior = decode_object(scope, bucket_id, &row)?;
+            upsert_current_object(&mut tx, &prior).await?;
+        }
+    }
+    let _ = target;
+    tx.commit().await.map_err(map_commit_error)?;
+    Ok(true)
+}
+
+async fn create_multipart_upload(
+    pool: &AnyPool,
+    upload: &MultipartUpload,
+) -> Result<(), ObjectStorageError> {
+    upload.validate()?;
+    if upload.completed_at.is_some() || upload.state != MultipartUploadState::Active {
+        return Err(ObjectStorageError::InvalidInput);
+    }
+    let metadata =
+        serde_json::to_string(&upload.metadata).map_err(|_| ObjectStorageError::Internal)?;
+    sqlx::query("INSERT INTO runku_storage_multipart_uploads(project_id,environment_id,bucket_id,upload_id,object_key,content_type,metadata_json,actor,state,completion_digest,created_at_micros,completed_at_micros,completed_version_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',NULL,$9,NULL,NULL)")
+        .bind(upload.scope.project_id().to_string()).bind(upload.scope.environment_id().to_string())
+        .bind(upload.bucket_id.to_string()).bind(upload.upload_id.to_string()).bind(&upload.key)
+        .bind(&upload.content_type).bind(metadata).bind(upload.actor.as_str()).bind(upload.created_at.get())
+        .execute(pool).await.map_err(map_constraint_error)?;
+    Ok(())
+}
+
+async fn get_multipart_upload(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    upload_id: MultipartUploadId,
+) -> Result<Option<MultipartUpload>, ObjectStorageError> {
+    let row = sqlx::query("SELECT object_key,content_type,metadata_json,actor,state,created_at_micros,completed_at_micros,completed_version_id FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .fetch_optional(pool).await.map_err(map_sqlx_error)?;
+    row.map(|row| decode_multipart_upload(scope, bucket_id, upload_id, &row))
+        .transpose()
+}
+
+fn decode_multipart_upload(
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    upload_id: MultipartUploadId,
+    row: &sqlx::any::AnyRow,
+) -> Result<MultipartUpload, ObjectStorageError> {
+    let metadata_json: String = row.try_get("metadata_json").map_err(corrupt)?;
+    let state: String = row.try_get("state").map_err(corrupt)?;
+    let completed_at = row
+        .try_get::<Option<i64>, _>("completed_at_micros")
+        .map_err(corrupt)?
+        .map(TimestampMicros::new);
+    let completed_version_id = row
+        .try_get::<Option<String>, _>("completed_version_id")
+        .map_err(corrupt)?
+        .map(|value| value.parse())
+        .transpose()?;
+    if state == "active" && (completed_at.is_some() || completed_version_id.is_some())
+        || state == "completed" && (completed_at.is_none() || completed_version_id.is_none())
+        || state == "aborted" && (completed_at.is_some() || completed_version_id.is_some())
+        || !matches!(
+            state.as_str(),
+            "active" | "completing" | "completed" | "aborted"
+        )
+    {
+        return Err(ObjectStorageError::Corruption);
+    }
+    let upload = MultipartUpload {
+        scope,
+        bucket_id,
+        upload_id,
+        key: row.try_get("object_key").map_err(corrupt)?,
+        content_type: row.try_get("content_type").map_err(corrupt)?,
+        metadata: serde_json::from_str(&metadata_json).map_err(corrupt)?,
+        actor: row
+            .try_get::<String, _>("actor")
+            .map_err(corrupt)?
+            .parse()?,
+        state: match state.as_str() {
+            "active" => MultipartUploadState::Active,
+            "completing" => MultipartUploadState::Completing,
+            "completed" => MultipartUploadState::Completed,
+            "aborted" => MultipartUploadState::Aborted,
+            _ => return Err(ObjectStorageError::Corruption),
+        },
+        created_at: TimestampMicros::new(row.try_get("created_at_micros").map_err(corrupt)?),
+        completed_at,
+        completed_version_id,
+    };
+    upload.validate()?;
+    Ok(upload)
+}
+
+async fn put_multipart_part(
+    pool: &AnyPool,
+    backend: ObjectStorageRepositoryBackend,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    upload_id: MultipartUploadId,
+    part: &MultipartPart,
+) -> Result<(), ObjectStorageError> {
+    part.validate()?;
+    let mut tx = begin_write(pool, backend).await?;
+    let state = sqlx::query_scalar::<_, String>("SELECT state FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?.ok_or(ObjectStorageError::NotFound)?;
+    if state != "active" {
+        return rollback(tx, ObjectStorageError::Conflict).await;
+    }
+    sqlx::query("INSERT INTO runku_storage_multipart_parts(project_id,environment_id,bucket_id,upload_id,part_number,size_bytes,sha256,etag,created_at_micros) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(project_id,environment_id,bucket_id,upload_id,part_number) DO UPDATE SET size_bytes=excluded.size_bytes,sha256=excluded.sha256,etag=excluded.etag,created_at_micros=excluded.created_at_micros")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .bind(i64::from(part.number)).bind(to_i64(part.size)?).bind(part.sha256.as_slice()).bind(&part.etag).bind(part.created_at.get())
+        .execute(&mut *tx).await.map_err(map_constraint_error)?;
+    tx.commit().await.map_err(map_commit_error)
+}
+
+async fn list_multipart_parts(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    upload_id: MultipartUploadId,
+) -> Result<Vec<MultipartPart>, ObjectStorageError> {
+    if get_multipart_upload(pool, scope, bucket_id, upload_id)
+        .await?
+        .is_none()
+    {
+        return Err(ObjectStorageError::NotFound);
+    }
+    let rows = sqlx::query("SELECT part_number,size_bytes,sha256,etag,created_at_micros FROM runku_storage_multipart_parts WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4 ORDER BY part_number")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .fetch_all(pool).await.map_err(map_sqlx_error)?;
+    rows.iter().map(decode_multipart_part).collect()
+}
+
+fn decode_multipart_part(row: &sqlx::any::AnyRow) -> Result<MultipartPart, ObjectStorageError> {
+    let sha256: [u8; 32] = row
+        .try_get::<Vec<u8>, _>("sha256")
+        .map_err(corrupt)?
+        .try_into()
+        .map_err(corrupt)?;
+    let part = MultipartPart {
+        number: u16::try_from(row.try_get::<i64, _>("part_number").map_err(corrupt)?)
+            .map_err(corrupt)?,
+        size: u64::try_from(row.try_get::<i64, _>("size_bytes").map_err(corrupt)?)
+            .map_err(corrupt)?,
+        sha256,
+        etag: row.try_get("etag").map_err(corrupt)?,
+        created_at: TimestampMicros::new(row.try_get("created_at_micros").map_err(corrupt)?),
+    };
+    part.validate()?;
+    Ok(part)
+}
+
+async fn list_multipart_uploads(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    prefix: &str,
+    after: Option<(&str, MultipartUploadId)>,
+    limit: u16,
+) -> Result<MultipartUploadPage, ObjectStorageError> {
+    let pattern = format!("{}%", escape_like(prefix));
+    let rows = if let Some((key, upload_id)) = after {
+        sqlx::query("SELECT upload_id,object_key,content_type,metadata_json,actor,state,created_at_micros,completed_at_micros,completed_version_id FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND state='active' AND object_key LIKE $4 ESCAPE '\\' AND (object_key>$5 OR (object_key=$5 AND upload_id>$6)) ORDER BY object_key,upload_id LIMIT $7")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(&pattern)
+            .bind(key).bind(upload_id.to_string()).bind(i64::from(limit) + 1).fetch_all(pool).await.map_err(map_sqlx_error)?
+    } else {
+        sqlx::query("SELECT upload_id,object_key,content_type,metadata_json,actor,state,created_at_micros,completed_at_micros,completed_version_id FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND state='active' AND object_key LIKE $4 ESCAPE '\\' ORDER BY object_key,upload_id LIMIT $5")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(&pattern)
+            .bind(i64::from(limit) + 1).fetch_all(pool).await.map_err(map_sqlx_error)?
+    };
+    let mut uploads = rows
+        .iter()
+        .map(|row| {
+            let id: MultipartUploadId = row
+                .try_get::<String, _>("upload_id")
+                .map_err(corrupt)?
+                .parse()?;
+            decode_multipart_upload(scope, bucket_id, id, row)
+        })
+        .collect::<Result<Vec<_>, ObjectStorageError>>()?;
+    let more = uploads.len() > usize::from(limit);
+    if more {
+        uploads.pop();
+    }
+    let next = more
+        .then(|| {
+            uploads
+                .last()
+                .map(|value| (value.key.clone(), value.upload_id))
+        })
+        .flatten();
+    Ok(MultipartUploadPage { uploads, next })
+}
+
+async fn claim_multipart_completion(
+    pool: &AnyPool,
+    backend: ObjectStorageRepositoryBackend,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    upload_id: MultipartUploadId,
+    completion_digest: [u8; 32],
+) -> Result<(), ObjectStorageError> {
+    let mut tx = begin_write(pool, backend).await?;
+    let row = sqlx::query("SELECT state,completion_digest FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?.ok_or(ObjectStorageError::NotFound)?;
+    let state: String = row.try_get("state").map_err(corrupt)?;
+    let stored: Option<Vec<u8>> = row.try_get("completion_digest").map_err(corrupt)?;
+    match state.as_str() {
+        "active" => {
+            let changed = sqlx::query("UPDATE runku_storage_multipart_uploads SET state='completing',completion_digest=$5 WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4 AND state='active'")
+                .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+                .bind(completion_digest.as_slice()).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+            if changed.rows_affected() != 1 {
+                return rollback(tx, ObjectStorageError::Conflict).await;
+            }
+        }
+        "completing" | "completed" if stored.as_deref() == Some(completion_digest.as_slice()) => {}
+        "completing" | "completed" | "aborted" => {
+            return rollback(tx, ObjectStorageError::Conflict).await;
+        }
+        _ => return rollback(tx, ObjectStorageError::Corruption).await,
+    }
+    tx.commit().await.map_err(map_commit_error)
+}
+
+async fn complete_multipart_upload(
+    pool: &AnyPool,
+    backend: ObjectStorageRepositoryBackend,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    upload_id: MultipartUploadId,
+    version_id: ObjectVersionId,
+    at: TimestampMicros,
+) -> Result<(), ObjectStorageError> {
+    if at.get() < 0 {
+        return Err(ObjectStorageError::InvalidInput);
+    }
+    let mut tx = begin_write(pool, backend).await?;
+    let row = sqlx::query("SELECT state,completed_version_id FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?.ok_or(ObjectStorageError::NotFound)?;
+    let state: String = row.try_get("state").map_err(corrupt)?;
+    if state == "completed" {
+        let stored: Option<String> = row.try_get("completed_version_id").map_err(corrupt)?;
+        tx.commit().await.map_err(map_commit_error)?;
+        return if stored.as_deref() == Some(&version_id.to_string()) {
+            Ok(())
+        } else {
+            Err(ObjectStorageError::Conflict)
+        };
+    }
+    if state != "completing" {
+        return rollback(tx, ObjectStorageError::Conflict).await;
+    }
+    sqlx::query("UPDATE runku_storage_multipart_uploads SET state='completed',completed_at_micros=$5,completed_version_id=$6 WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4 AND state='completing'")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .bind(at.get()).bind(version_id.to_string()).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+    tx.commit().await.map_err(map_commit_error)
+}
+
+async fn abort_multipart_upload(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    upload_id: MultipartUploadId,
+) -> Result<(), ObjectStorageError> {
+    let state = sqlx::query_scalar::<_, String>("SELECT state FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+        .fetch_optional(pool).await.map_err(map_sqlx_error)?;
+    match state.as_deref() {
+        None | Some("aborted") => Ok(()),
+        Some("active") => {
+            sqlx::query("UPDATE runku_storage_multipart_uploads SET state='aborted' WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND upload_id=$4 AND state='active'")
+                .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(upload_id.to_string())
+                .execute(pool).await.map_err(map_sqlx_error)?;
+            Ok(())
+        }
+        Some("completing" | "completed") => Err(ObjectStorageError::Conflict),
+        Some(_) => Err(ObjectStorageError::Corruption),
+    }
+}
+
+async fn apply_lifecycle(
+    pool: &AnyPool,
+    backend: ObjectStorageRepositoryBackend,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    at: TimestampMicros,
+    limit: u16,
+) -> Result<LifecycleResult, ObjectStorageError> {
+    let bucket = load_bucket(pool, scope, bucket_id)
+        .await?
+        .ok_or(ObjectStorageError::NotFound)?;
+    if bucket
+        .configuration
+        .lifecycle
+        .expire_current_after_days
+        .is_none()
+        && bucket
+            .configuration
+            .lifecycle
+            .expire_noncurrent_after_days
+            .is_none()
+        && bucket
+            .configuration
+            .lifecycle
+            .abort_incomplete_after_days
+            .is_none()
+    {
+        return Ok(LifecycleResult::default());
+    }
+    let cutoff = |days: u32| at.get().saturating_sub(i64::from(days) * 86_400_000_000);
+    let mut tx = begin_write(pool, backend).await?;
+    let mut result = LifecycleResult::default();
+    if let Some(days) = bucket.configuration.lifecycle.expire_current_after_days {
+        let rows = sqlx::query("SELECT object_key FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND created_at_micros<=$4 ORDER BY object_key LIMIT $5")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(cutoff(days)).bind(i64::from(limit))
+            .fetch_all(&mut *tx).await.map_err(map_sqlx_error)?;
+        for row in rows {
+            let key: String = row.try_get("object_key").map_err(corrupt)?;
+            result.current_objects += sqlx::query("DELETE FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4")
+                .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(key)
+                .execute(&mut *tx).await.map_err(map_sqlx_error)?.rows_affected();
+        }
+    }
+    if let Some(days) = bucket.configuration.lifecycle.expire_noncurrent_after_days {
+        let rows = sqlx::query("SELECT v.object_key,v.version_id FROM runku_storage_object_versions v LEFT JOIN runku_storage_objects c ON c.project_id=v.project_id AND c.environment_id=v.environment_id AND c.bucket_id=v.bucket_id AND c.object_key=v.object_key AND c.version_id=v.version_id WHERE v.project_id=$1 AND v.environment_id=$2 AND v.bucket_id=$3 AND v.created_at_micros<=$4 AND c.version_id IS NULL ORDER BY v.object_key,v.version_id LIMIT $5")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(cutoff(days)).bind(i64::from(limit))
+            .fetch_all(&mut *tx).await.map_err(map_sqlx_error)?;
+        for row in rows {
+            result.noncurrent_versions += sqlx::query("DELETE FROM runku_storage_object_versions WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4 AND version_id=$5")
+                .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+                .bind(row.try_get::<String, _>("object_key").map_err(corrupt)?).bind(row.try_get::<String, _>("version_id").map_err(corrupt)?)
+                .execute(&mut *tx).await.map_err(map_sqlx_error)?.rows_affected();
+        }
+    }
+    if let Some(days) = bucket.configuration.lifecycle.abort_incomplete_after_days {
+        result.multipart_uploads = sqlx::query("UPDATE runku_storage_multipart_uploads SET state='aborted' WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND state IN ('active','completing') AND created_at_micros<=$4 AND upload_id IN (SELECT upload_id FROM runku_storage_multipart_uploads WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND state IN ('active','completing') AND created_at_micros<=$4 ORDER BY upload_id LIMIT $5)")
+            .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(cutoff(days)).bind(i64::from(limit))
+            .execute(&mut *tx).await.map_err(map_sqlx_error)?.rows_affected();
+    }
+    tx.commit().await.map_err(map_commit_error)?;
+    Ok(result)
 }
 
 fn escape_like(value: &str) -> String {
