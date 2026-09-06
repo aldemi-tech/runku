@@ -2,6 +2,52 @@
 
 All notable changes are documented in this file.
 
+## 0.4.6 - 2026-09-05
+
+### Added
+
+- Console-oriented Management APIs for Function/Release catalogs, typed Runner invocation, Data
+  Admin, Environment lifecycle, weighted serving policy, Cron activation and Scheduled history,
+  bounded metrics, and sanitized instance health.
+- Logical Object Storage with revisioned buckets, scoped one-time Product S3 credentials,
+  encrypted overlapping key generations, Management object transfer, public/presigned access, and
+  a path-style SigV4 S3 subset covering put/get/head/list/copy/delete, ranges, conditions, and exact
+  version reads.
+- Environment variables and encrypted secrets with global revision CAS, exact idempotency replay,
+  value-free history, `variable:NAME`/`secret:NAME` capabilities, and `ctx.env`/`ctx.secrets` in
+  Safe V8 and local Full Node runtime contract v3.
+- Portable Environment archive/restore intent and deterministic `environment:default` routing over
+  compatible weighted Releases.
+
+### Changed
+
+- The compact coordinated backup now archives `product`, `platform`, and filesystem Application
+  File/Object Storage bytes as one verified unit.
+- Management route authorization includes the new least-privilege configuration, storage,
+  lifecycle, invocation, telemetry, Cron, and Scheduled capabilities.
+
+### Security
+
+- Secret values are encrypted with AES-256-GCM and never returned after write; runtime reads recheck
+  exact Environment, kind, Function type, runtime version, and declared name.
+- Product S3 credentials are independent of provider credentials and Cloud/Management identity;
+  signing, scope, prefix, operation, generation, expiry, and revocation all fail closed.
+- Console-facing projections omit physical providers, storage locations, cell identity, raw
+  diagnostics, and secret material.
+
+### Compatibility and rollback
+
+- Runtime v3 is additive over application-file runtime v2. Safe V8 and local Full Node support it;
+  production OCI/distributed Full Node remains on v1 and rejects storage/configuration manifests.
+- Legacy manifests containing the formerly reserved secret tag remain decodable, but only runtime
+  v3 exposes configuration values. Version-3 configuration names are canonical uppercase
+  identifiers.
+- The compact configuration registry is currently SQLite-backed even when Function data uses
+  PostgreSQL. S3 multipart, version listing/deletion, and lifecycle execution are not included in
+  this release.
+- New checksum-protected Product schemas are forward-only. Take and verify a coordinated backup
+  before upgrade; downgrading a state already written by 0.4.6 is unsupported.
+
 ## 0.4.5 - 2026-09-05
 
 ### Added
