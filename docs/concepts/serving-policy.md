@@ -110,12 +110,12 @@ Header and weighted entries are read in one database snapshot and changed atomic
 changes append a migration; applied migration text or checksums are never rewritten. Unknown future
 migration versions fail closed. SQLite is Local/test-only and PostgreSQL is Production-role-only.
 
-The compact process stores the registry tables in its coordinated identity database, but the
-current backup manifest does not yet declare or verify them as a recovery component. Backup work
-must quiesce policy and Release writers and coordinate policy,
-operation/audit, Release metadata/artifacts, Environment records, Cron activation state, and
-subordinate Product data at a verified recovery point. An older binary that does not understand an
-adopted serving authority must not resume writes after rollback.
+The compact process stores the registry under the coordinated Product state. Backup format v2
+quiesces the writer and archives the complete `product`, `platform`, and `files` roots with the
+Platform PostgreSQL dump, so policy, operation/audit, Release metadata/artifacts, Environment
+records, Cron activation, and subordinate Product data share one verified recovery point. External
+storage profiles still require their provider recovery contract. An older binary that does not
+understand an adopted serving authority must not resume writes after rollback.
 
 ## Security and serving semantics
 

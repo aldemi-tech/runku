@@ -13,8 +13,8 @@ Runku versions contracts at every boundary that can outlive one process:
 Unknown versions fail closed. A client-selected Release is served only while its contract and
 runtime remain supported. Channel routing cannot silently replace an explicit incompatible Release.
 
-The source line reports version `0.4.5` and has not established a general stable compatibility
-window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.5 supports a
+This release reports version `0.4.6` and has not established a general stable compatibility
+window. Version 0.3.0 is the first supported compact Docker installation floor; 0.4.6 supports a
 deliberate forward upgrade from that floor.
 Tagged releases coordinate the CLI, both TypeScript SDKs, Linux compact server binaries, and the
 compact server image. Agent, distributed deployment, protocol, storage, and runtime support windows
@@ -25,7 +25,7 @@ non-interactively to an older server with explicit IDs; parameterless interactiv
 the new resource catalog. Managed enrollment is disabled unless both gateway and server configure
 their separate shared secret, so upgrading invitation-only Self-Hosted preserves its policy.
 
-The post-0.4.5 source line adds versioned Function/schema catalog and logical Data Admin Management
+Version 0.4.6 adds versioned Function/schema catalog and logical Data Admin Management
 endpoints without changing existing endpoint or persisted-row meanings. It also adds explicit
 `data:read` and `data:write` Platform capabilities. Existing grants are intentionally not backfilled
 and receive no new document authority; administrators must opt in by issuing/reconciling an updated
@@ -34,15 +34,14 @@ exact. Older clients can ignore the additive endpoints and capabilities. Data wr
 existing logical operation journal and storage schemas, so no migration or release-version change
 is introduced by this source change.
 
-The same post-0.4.5 source line makes managed grant reconciliation source-owned and revisioned.
+The same release makes managed grant reconciliation source-owned and revisioned.
 Managed OIDC and `PUT /v1/auth/managed/operators/{operatorId}/grants` share one transactional
 contract: greater `u64` revisions replace only the configured HTTPS authority's subset, exact
 digest replays succeed, and stale/divergent revisions conflict. Platform Identity schema v3 is an
 append-only ownership migration. It snapshots existing grants as unmanaged and does not grant new
 authority; the first trusted reconciliation adopts only its explicit operator. Existing sessions
 and invitation-only operators remain valid. Older servers do not understand this ordering or
-ownership contract, so server rollback after schema v3 is unsupported. No release number or
-artifact is assigned by this source change.
+ownership contract, so server rollback after schema v3 is unsupported.
 
 This is additive for invitation login, ordinary linked OIDC, operator sessions, and Product API
 clients. It is a coordinated contract upgrade for the opt-in managed control plane: the gateway
@@ -56,7 +55,7 @@ the server back after schema v3.
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.5` alone |
+| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.6` alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
 | TypeScript packages | `@runku/client`, `@runku/server`, and `@runku/cli` update together |
@@ -87,14 +86,14 @@ it does not change public Product protocols. The remaining Product repositories 
 Product root, so backup/restore must coordinate both authorities. Older binaries must not serve an
 Environment after this profile is adopted.
 
-The post-0.4.5 Management API additions for application credentials, weighted serving policy, and
+The 0.4.6 Management API additions for application credentials, weighted serving policy, and
 logical Object Storage are additive HTTP contracts. Operators that grant the new `storage:read`
 or `storage:manage` capabilities must upgrade Platform Identity and the Management API together;
 older binaries do not recognize those capability names and fail closed. Storage quotas are encoded
 as canonical decimal strings so JavaScript clients do not lose integer precision. Application-key
 secrets remain one-time responses and are intentionally absent from idempotent replay payloads.
 The additive `cron:read`, `cron:activate`, and `schedules:read` names likewise require Identity and
-Management binaries that recognize the same catalog. The post-0.4.5 source line implements
+Management binaries that recognize the same catalog. Version 0.4.6 implements
 `cron:activate` as a per-declaration CAS/idempotency contract and adds Cron repository schema v2 for
 durable disabled-definition intent. After that migration, an older binary must not serve the same
 Cron repository. Declaration editing and Scheduled retry/cancel remain outside this contract.
@@ -105,7 +104,7 @@ canonical invocation still requires a separately scoped Application credential a
 functional principal. Existing grants are not backfilled; operator/developer role expansion affects
 only newly issued or source-reconciled grants, while custom grants remain exact.
 
-The later post-0.4.5 Object Storage extension adds current/version metadata schema v2 and bounded
+The 0.4.6 Object Storage extension adds current/version metadata schema v2 and bounded
 administrative object routes. After schema v2 is applied, an older binary must not serve the same
 registry. PUT writes a SHA-256 content address before the metadata transaction, so an uncertain
 response is reconciled by `object-operations`; DELETE is exact-version CAS. These routes do not yet
@@ -116,7 +115,7 @@ Product can verify AWS Signature Version 4 without storing plaintext. Existing b
 continue to authenticate by digest, but generations created before v3 must be rotated before S3
 use. Once v3 is applied, older binaries must not serve the same registry.
 
-The corresponding post-0.4.5 Product listener adds `/s3/{bucket}/{key}` with logical signing region
+The corresponding 0.4.6 Product listener adds `/s3/{bucket}/{key}` with logical signing region
 `runku`. The currently implemented compatibility subset is ListObjectsV2, HEAD/GET, bounded PUT,
 same-bucket COPY, current DELETE, public read, bucket CORS, query-presigned SigV4, single byte
 ranges, conditional reads, and immutable version-addressed reads. It does not yet claim multipart,
@@ -124,12 +123,12 @@ version listing/deletion, lifecycle execution, or a full AWS SDK/MinIO client ma
 preserve the original signed host through its opaque
 Product route; proxying this protocol through the global Control API is not compatible.
 
-The post-0.4.5 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on
+The 0.4.6 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on
 both success and sanitized failure responses. The header is additive and CORS-exposed; the v1 JSON
 success/error envelopes remain byte-contract compatible with 0.4.5 SDK decoders. A failure before
 allocation has only `x-runku-request-id`.
 
-The post-0.4.5 Code Target grammar adds the exact `environment:default` value. Older SDKs reject it
+The 0.4.6 Code Target grammar adds the exact `environment:default` value. Older SDKs reject it
 locally and older gateways reject it during decoding; explicit `release:`, `channel:`, and
 `workspace:` targets are unchanged. A default target is serveable only with an exactly converged
 weighted policy. Mutation routing is derived from `OperationId`, so the same logical retry cannot
@@ -141,7 +140,7 @@ revision, convergence, Release weights, and the common schema/index/Cron hashes.
 are always compatible because an incompatible mutation is rejected atomically; clients must still
 check `converged` before treating the set as active traffic.
 
-The post-0.4.5 Management API also adds exact-Environment `metrics` and `instances/healthz` reads.
+The 0.4.6 Management API also adds exact-Environment `metrics` and `instances/healthz` reads.
 They reuse the existing `usage:read` and `environments:read` capabilities respectively, so no grant
 migration is required. Metric values are canonical decimal strings rather than JSON numbers, and
 both responses reject unknown fields. Metrics are process-local diagnostic aggregates and never
@@ -189,7 +188,7 @@ Management API now compose it as an additive exact-scope authority. Operators mu
 Platform Identity and Management together before granting the new `environments:read` capability;
 adopting the registry still requires a coordinated backup and rollback decision.
 
-The post-0.4.5 Environment schema v2 extends only the operation-kind constraint with `archive` and
+The 0.4.6 Environment schema v2 extends only the operation-kind constraint with `archive` and
 `restore`; it transactionally copies all v1 journal rows and does not reinterpret Environment
 configuration. Both commands increment the existing configuration/state revision, use the same
 idempotency and operation reconciliation contract, and preserve subordinate data. An older binary
@@ -200,9 +199,11 @@ The standalone serving-policy registry is another compatible additive source-lin
 schema v1 adds only namespaced policy, weighted-Release, operation, audit, and migration tables.
 Each policy stores canonical schema, logical-index, and Cron-declaration hashes derived from
 validated Release Manifest v1 values. Multiple Releases fail closed unless all three hashes are
-byte-identical. The registry is not attached to Channel/request routing; a future composition must
-define runtime selection, `EnvironmentDefault`, the effective write contract, mixed-version
-behavior, and coordinated backup/rollback before it changes traffic.
+byte-identical. The compact gateway attaches exactly converged policies to
+`environment:default`: request/subscription identity selects Query, Action, and Realtime traffic,
+while Mutation selection derives from `OperationId`. Explicit Release, Channel, and Workspace
+targets retain their existing semantics. Safe coexistence beyond the current exact-hash rule and
+distributed-runtime qualification remain separate compatibility gates.
 
 ## Change rules
 

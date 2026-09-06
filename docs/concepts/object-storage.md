@@ -8,8 +8,10 @@ authority. Object bytes use the same filesystem/S3 provider boundary as Applicat
 physically disjoint content-addressed namespace. The attached Product listener also implements a
 path-style AWS Signature Version 4 surface for bounded single-object operations, ListObjectsV2,
 COPY, public reads, presigned URLs, ranges, conditional reads, immutable version reads, and bucket
-CORS over the same authority. Native SDK object operations, multipart, version deletion/listing,
-lifecycle execution, coordinated backup, and CLI commands remain unimplemented.
+CORS over the same authority. The compact coordinated backup includes the authoritative Product
+registry plus filesystem object bytes and verifies their archive digest before an empty restore.
+Native SDK object operations, multipart, version deletion/listing, lifecycle execution, and CLI
+commands remain unimplemented.
 
 This capability is distinct from [Application file storage](../functions/file-storage.md).
 Application Files are an Action-oriented upload/download facility. Logical Object Storage is a
@@ -174,8 +176,10 @@ Audit rows are append-only and ordered independently within each Environment. Op
 4. Treat migration checksum mismatch, malformed persisted configuration, or impossible key state
    as corruption and stop writes until the authoritative database is restored or repaired.
 
-The current backup/restore contract still does not coordinate these bytes, so an operator must not
-claim complete Object Storage recovery yet. Filesystem byte round trips run in ordinary tests and
-the shared physical S3 adapter retains its opt-in MinIO conformance. The coordinated recovery
-point, lifecycle/garbage-collection worker, multipart protocol, and real AWS-compatible client
-campaign each require their own later gate.
+Compact filesystem backup format v2 archives `product`, `platform`, and `files` together, verifies
+the PostgreSQL dump and state archive digests, requires the Object Storage byte root, and restores
+only into empty destinations before `doctor` and readiness checks. The release artifact campaign
+adds an actual object byte before backup and verifies it after restore. An external-S3 deployment
+still fails the compact backup closed because provider recovery must be coordinated separately.
+Lifecycle/garbage collection, multipart, version listing/deletion, and a broader AWS-compatible
+client matrix each retain their own later gate.
