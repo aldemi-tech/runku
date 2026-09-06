@@ -111,6 +111,7 @@ chat-example-e2e-check: chat-example-check
 node-example-check: js-install sdk-typescript-check sdk-server-check
 	@node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major < 20 || (major === 20 && (minor < 18 || (minor === 18 && patch < 1)))) { console.error("Runku Node example requires Node.js >=20.18.1"); process.exit(1) }'
 	cargo build -p runku-cli --release --locked
+	$(CURDIR)/target/release/runku init --root examples/node-actions --workspace local --listen 127.0.0.1:0
 	cd examples/node-actions && RUNKU_BIN="$(CURDIR)/target/release/runku" PATH="$(CURDIR)/target/release:$$PATH" pnpm validate
 
 storage-up:

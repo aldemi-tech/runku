@@ -55,6 +55,10 @@ application listener for provider-owned networks. `RUNKU_APPLICATION_LISTEN` is 
 paired with `RUNKU_APPLICATION_TLS_TERMINATED=true` and an attached Product root; incomplete,
 invalid, or non-TLS configuration fails before readiness. This lets an ingress/TLS boundary reach
 the application port without weakening local development or changing persisted Product identity.
+The compact Management adapter also completes local materialization of both Environment creation
+and full-configuration updates before reporting success. Wire and persisted shapes are unchanged;
+an exact idempotent replay resumes convergence only while its revision remains current. This is a
+behavioral fix for 0.4.6 responses that could otherwise leave the desired revision pending.
 
 ## Pre-release matrix
 

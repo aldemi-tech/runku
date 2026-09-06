@@ -65,10 +65,12 @@ the service.
 | observed revision | Exact desired revision for `ready`/`failed`; an older revision may remain visible while a new configuration is `pending` |
 
 The registry creation transition writes desired `active`, observed `pending`, and revision 1. The
-compact server immediately materializes that revision to `ready`. A configuration update
-requires the exact current revision, replaces the complete configuration, increments the revision,
-and returns observed state to `pending`. It retains the last older observed revision so an operator
-can distinguish “never materialized” from “updating a previously materialized Environment.”
+compact server immediately materializes that revision to `ready` before returning success. A
+configuration update requires the exact current revision, replaces the complete configuration,
+increments the revision, and first returns the registry state to `pending`. The compact server then
+applies the local effect and records that exact revision `ready` before returning success. During
+that bounded transition, the registry retains the last older observed revision so recovery can
+distinguish “never materialized” from “updating a previously materialized Environment.”
 
 `materialize` does not provision infrastructure. A trusted reconciler calls it only after applying
 the desired configuration and records `ready` or `failed` for the exact revision. It cannot create
@@ -138,6 +140,12 @@ Environment, complete intent, precondition, and trusted timestamp.
 | `ENVIRONMENT_RESULT_UNCERTAIN` | Commit acknowledgement was lost; look up the same operation under the same exact scope before retrying |
 | busy/unavailable | Retry with bounded backoff and the same operation ID/body |
 | corrupt/unsupported | Stop writes, preserve the database and migration evidence, and recover rather than editing rows |
+
+The compact Management adapter may persist a create or update intent before local materialization
+fails. Retry the identical request with the same operation ID: the durable operation replay is
+recognized and the adapter retries convergence only when that operation still names the current
+pending revision. If a later revision already exists, read current state and reconcile that newer
+intent instead.
 
 Operation lookup is not authorization. A caller must still hold current authority for the exact
 stored scope. Looking up an operation under another Project or Environment returns no record and

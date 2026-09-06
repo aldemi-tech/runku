@@ -1101,13 +1101,13 @@ impl ManagementProduct for ProductAdapter {
             .await
             .map_err(map_environment)?
             .ok_or(ManagementProductError::Corruption)?;
-        if environment.configuration_revision == 1
+        if environment.configuration_revision == result.operation.configuration_revision
             && environment.desired_state == EnvironmentDesiredState::Active
             && !environment.is_converged()
         {
             Box::pin(self.reconcile_environment_state(
                 EnvironmentDesiredState::Active,
-                1,
+                result.operation.configuration_revision,
                 created_at,
             ))
             .await?;
@@ -1130,6 +1130,7 @@ impl ManagementProduct for ProductAdapter {
         operation_id: OperationId,
         request: &ManagementEnvironmentUpdate,
     ) -> Result<ManagementEnvironmentResult, ManagementProductError> {
+        let updated_at = parse_timestamp(&request.updated_at_micros)?;
         let result = self
             .environments
             .update(
@@ -1137,16 +1138,33 @@ impl ManagementProduct for ProductAdapter {
                 operation_id,
                 request.expected_revision,
                 environment_configuration(&request.configuration)?,
-                parse_timestamp(&request.updated_at_micros)?,
+                updated_at,
             )
             .await
             .map_err(map_environment)?;
-        let environment = self
+        let mut environment = self
             .environments
             .get(self.scope)
             .await
             .map_err(map_environment)?
             .ok_or(ManagementProductError::Corruption)?;
+        if environment.configuration_revision == result.operation.configuration_revision
+            && environment.desired_state == EnvironmentDesiredState::Active
+            && !environment.is_converged()
+        {
+            Box::pin(self.reconcile_environment_state(
+                EnvironmentDesiredState::Active,
+                result.operation.configuration_revision,
+                updated_at,
+            ))
+            .await?;
+            environment = self
+                .environments
+                .get(self.scope)
+                .await
+                .map_err(map_environment)?
+                .ok_or(ManagementProductError::Corruption)?;
+        }
         Ok(ManagementEnvironmentResult {
             environment: management_environment(&environment),
             operation_id: result.operation.operation_id.to_string(),
@@ -4169,6 +4187,9 @@ export const hourly = cron({
             )
             .await?;
         assert_eq!(updated.environment.configuration_revision, 2);
+        assert_eq!(updated.environment.observed_configuration_revision, Some(2));
+        assert_eq!(updated.environment.observed_state, "ready");
+        assert!(updated.environment.converged);
         assert_eq!(updated.operation_id, update_operation.to_string());
         assert_eq!(
             product
@@ -4176,6 +4197,19 @@ export const hourly = cron({
                 .await?
                 .configuration_revision,
             2
+        );
+        assert!(
+            product
+                .environment_update(
+                    update_operation,
+                    &ManagementEnvironmentUpdate {
+                        expected_revision: 1,
+                        configuration: updated.environment.configuration.clone(),
+                        updated_at_micros: "1800000000000020".to_owned(),
+                    },
+                )
+                .await?
+                .replayed
         );
         assert_eq!(
             product

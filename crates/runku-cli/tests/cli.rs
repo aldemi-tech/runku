@@ -1990,6 +1990,16 @@ async fn source_watch_hot_reloads_keeps_last_good_and_recovers() -> Result<(), B
         functions.join("schema.ts"),
         "import { defineSchema } from '@runku/server';\nexport default defineSchema({});\n",
     )?;
+    let initialized = run(&[
+        "init",
+        "--root",
+        root,
+        "--workspace",
+        "local",
+        "--listen",
+        "127.0.0.1:0",
+    ])?;
+    assert!(initialized.status.success());
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_runku"))
         .args(["dev", "--root", root])
@@ -2023,7 +2033,11 @@ async fn source_watch_hot_reloads_keeps_last_good_and_recovers() -> Result<(), B
     assert_eq!(ready["watching"], true);
     assert_eq!(ready["eventVersion"], 1);
     assert_eq!(ready["workspace"], "local");
-    assert_eq!(ready["address"], "127.0.0.1:3210");
+    assert!(
+        ready["address"]
+            .as_str()
+            .is_some_and(|address| address.starts_with("127.0.0.1:"))
+    );
     assert!(
         directory
             .path()

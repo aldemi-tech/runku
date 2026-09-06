@@ -47,28 +47,71 @@ async function environment() {
   )
 }
 
-async function waitUntilReady(baseUrl, child) {
+async function waitUntilReady(child, stderr) {
+  return new Promise((resolve, reject) => {
+    let stdout = ""
+    const finish = (error, address) => {
+      clearTimeout(timeout)
+      child.stdout.off("data", onData)
+      child.off("exit", onExit)
+      if (error) reject(error)
+      else resolve(`http://${address}`)
+    }
+    const onData = (chunk) => {
+      stdout += chunk
+      for (;;) {
+        const newline = stdout.indexOf("\n")
+        if (newline < 0) return
+        const line = stdout.slice(0, newline)
+        stdout = stdout.slice(newline + 1)
+        let event
+        try {
+          event = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (event.status === "ready" && typeof event.address === "string") {
+          finish(null, event.address)
+          return
+        }
+      }
+    }
+    const onExit = (code) => finish(new Error(`runku dev exited with ${code}: ${stderr()}`))
+    const timeout = setTimeout(
+      () => finish(new Error(`runku dev did not become ready: ${stderr()}`)),
+      10_000,
+    )
+    child.stdout.setEncoding("utf8")
+    child.stdout.on("data", onData)
+    child.once("exit", onExit)
+  })
+}
+
+async function waitForHealth(baseUrl, child, stderr) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (child.exitCode !== null) throw new Error(`runku dev exited with ${child.exitCode}`)
+    if (child.exitCode !== null) {
+      throw new Error(`runku dev exited with ${child.exitCode}: ${stderr()}`)
+    }
     try {
       const response = await fetch(`${baseUrl}/readyz`)
       if (response.ok) return
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
-  throw new Error("runku dev did not become ready")
+  throw new Error(`runku dev health did not become ready: ${stderr()}`)
 }
 
-async function startRuntime(baseUrl) {
+async function startRuntime() {
   const child = spawn(binary, ["dev"], {
     cwd: projectRoot,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   })
   let stderr = ""
   child.stderr.setEncoding("utf8")
   child.stderr.on("data", (chunk) => { stderr += chunk })
-  await waitUntilReady(baseUrl, child)
-  return { child, stderr: () => stderr }
+  const baseUrl = await waitUntilReady(child, () => stderr)
+  await waitForHealth(baseUrl, child, () => stderr)
+  return { baseUrl, child, stderr: () => stderr }
 }
 
 async function stopRuntime(runtime) {
@@ -103,21 +146,37 @@ async function waitForStoredValue(client, key, expected) {
   assert.fail(`scheduled value ${JSON.stringify(expected)} was not persisted`)
 }
 
+async function waitForInvocation(client) {
+  let lastError
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await client.action("images.readStored", { key: "readiness" })
+      return
+    } catch (error) {
+      if (!(error instanceof RunkuError) || error.code !== "SDK_NETWORK_ERROR") throw error
+      lastError = error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw lastError ?? new Error("Runku invocation path did not become ready")
+}
+
 test("Node Actions are executable, isolated and composable in local development", async (t) => {
   prepare()
   const env = await environment()
   assert.match(env.RUNKU_KEY ?? "", /^rk_pub_v1_/u)
-  let runtime = await startRuntime(env.RUNKU_URL)
-  const client = new RunkuClient({
-    baseUrl: env.RUNKU_URL,
+  let runtime = await startRuntime()
+  let client = new RunkuClient({
+    baseUrl: runtime.baseUrl,
     target: env.RUNKU_TARGET,
     applicationKey: env.RUNKU_KEY,
   })
+  await waitForInvocation(client)
 
   try {
     await t.test("rejects invalid application keys and direct calls to internal Functions", async () => {
       const invalidClient = new RunkuClient({
-        baseUrl: env.RUNKU_URL,
+        baseUrl: runtime.baseUrl,
         target: env.RUNKU_TARGET,
         applicationKey: tamperCanonicalKey(env.RUNKU_KEY),
       })
@@ -183,7 +242,12 @@ test("Node Actions are executable, isolated and composable in local development"
 
     await t.test("preserves Safe data across a local runtime restart", async () => {
       await stopRuntime(runtime)
-      runtime = await startRuntime(env.RUNKU_URL)
+      runtime = await startRuntime()
+      client = new RunkuClient({
+        baseUrl: runtime.baseUrl,
+        target: env.RUNKU_TARGET,
+        applicationKey: env.RUNKU_KEY,
+      })
       const persisted = await client.action("images.readStored", { key: "node-platform-op" })
       assert.equal(persisted.value, "committed-through-safe-mutation")
     })

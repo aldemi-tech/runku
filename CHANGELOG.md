@@ -11,8 +11,9 @@ All notable changes are documented in this file.
   `RUNKU_APPLICATION_TLS_TERMINATED=true`; incomplete or plaintext exposure fails closed.
 - Kept `runku init` and `runku link` loopback-only, so remote provider exposure no longer weakens
   the local development contract or mutates persisted Product identity.
-- Made compact-server Environment creation converge through its trusted local materializer before
-  the Management API reports success.
+- Made compact-server Environment creation and configuration updates converge through its trusted
+  local materializer before the Management API reports success. An identical operation replay can
+  safely resume a previously persisted but not-yet-materialized current revision.
 
 ## 0.4.6 - 2026-09-06
 
