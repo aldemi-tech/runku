@@ -118,9 +118,10 @@ use. Once v3 is applied, older binaries must not serve the same registry.
 
 The corresponding post-0.4.5 Product listener adds `/s3/{bucket}/{key}` with logical signing region
 `runku`. The currently implemented compatibility subset is ListObjectsV2, HEAD/GET, bounded PUT,
-same-bucket COPY, current DELETE, public read, bucket CORS, and query-presigned SigV4. It does not
-yet claim multipart, ranges, conditional/version-addressed operations, lifecycle execution, or a
-full AWS SDK/MinIO client matrix. Cloud must preserve the original signed host through its opaque
+same-bucket COPY, current DELETE, public read, bucket CORS, query-presigned SigV4, single byte
+ranges, conditional reads, and immutable version-addressed reads. It does not yet claim multipart,
+version listing/deletion, lifecycle execution, or a full AWS SDK/MinIO client matrix. Cloud must
+preserve the original signed host through its opaque
 Product route; proxying this protocol through the global Control API is not compatible.
 
 The post-0.4.5 public gateway adds `x-runku-invocation-id` after runtime invocation allocation on

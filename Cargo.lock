@@ -3838,6 +3838,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "hmac",
+ "httpdate",
  "reqwest",
  "runku-build",
  "runku-compatibility",

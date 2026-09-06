@@ -139,6 +139,15 @@ pub trait ObjectStorageRepository: Send + Sync {
         key: &str,
     ) -> Result<Option<ObjectMetadata>, ObjectStorageError>;
 
+    /// Gets one immutable object version without consulting the physical provider.
+    async fn get_object_version(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+        version_id: crate::ObjectVersionId,
+    ) -> Result<Option<ObjectMetadata>, ObjectStorageError>;
+
     /// Lists one stable current-object prefix/delimiter page.
     async fn list_objects(
         &self,

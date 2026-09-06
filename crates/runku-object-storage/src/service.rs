@@ -461,6 +461,20 @@ impl ObjectStorageService {
         self.repository.get_object(scope, bucket_id, key).await
     }
 
+    /// Gets one immutable object version.
+    pub async fn get_object_version(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+        version_id: crate::ObjectVersionId,
+    ) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+        crate::validate_object_key(key)?;
+        self.repository
+            .get_object_version(scope, bucket_id, key, version_id)
+            .await
+    }
+
     /// Lists one bounded object browser page.
     pub async fn list_objects(
         &self,

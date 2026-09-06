@@ -7,9 +7,9 @@ bucket, object-browser/upload/download/delete, and Product access-key administra
 authority. Object bytes use the same filesystem/S3 provider boundary as Application Files under a
 physically disjoint content-addressed namespace. The attached Product listener also implements a
 path-style AWS Signature Version 4 surface for bounded single-object operations, ListObjectsV2,
-COPY, public reads, presigned URLs, and bucket CORS over the same authority. Native SDK object
-operations, multipart, lifecycle execution, coordinated backup, and CLI commands remain
-unimplemented.
+COPY, public reads, presigned URLs, ranges, conditional reads, immutable version reads, and bucket
+CORS over the same authority. Native SDK object operations, multipart, version deletion/listing,
+lifecycle execution, coordinated backup, and CLI commands remain unimplemented.
 
 This capability is distinct from [Application file storage](../functions/file-storage.md).
 Application Files are an Action-oriented upload/download facility. Logical Object Storage is a
@@ -132,7 +132,9 @@ configured cutoff; revocation is checked on every request. Semantic content, cop
 zeroized after use.
 
 The implemented subset is `ListObjectsV2`, `HEAD`, `GET`, bounded single-request `PUT`, same-bucket
-`CopyObject`, and current-object `DELETE`. Reads from a `public_read` bucket may be anonymous;
+`CopyObject`, and current-object `DELETE`. GET/HEAD accept one byte range, standard ETag/date
+preconditions, `If-Range`, and an immutable `versionId` when bucket versioning is enabled. Reads
+from a `public_read` bucket may be anonymous;
 listing and every mutation always require Product credentials. Bucket CORS is evaluated for actual
 and preflight requests. Product ETag/version/checksum metadata and sanitized Product request IDs are
 returned without exposing the physical adapter. An exact signed retry maps to one deterministic
@@ -140,14 +142,14 @@ Product operation ID, so the metadata journal resolves a lost acknowledgement in
 a second logical intent.
 
 The non-multipart body bound is 64 MiB in server composition. Multipart upload/list/abort,
-version-addressed reads/deletes, byte ranges, conditional requests, lifecycle execution, and
-cross-bucket copy are not yet part of this subset and must not be advertised as implemented S3
+version listing/deletion, lifecycle execution, and cross-bucket copy are not yet part of this
+subset and must not be advertised as implemented S3
 operations. Public and presigned URLs are Product routes; a Cloud deployment must wrap this origin
 with its exact, revocable opaque Environment route rather than reveal a cell.
 
 The ordinary Rust test uses the in-process router and durable SQLite/filesystem adapters. The
-separate external-client gate starts a loopback listener and proves PUT, HEAD, ListObjectsV2, COPY,
-GET, and DELETE with the installed official AWS CLI:
+separate external-client gate starts a loopback listener and proves PUT, HEAD, ListObjectsV2,
+version-addressed GET, range GET, COPY, GET, and DELETE with the installed official AWS CLI:
 
 ```sh
 make object-storage-s3-client-check

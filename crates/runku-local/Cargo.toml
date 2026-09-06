@@ -15,6 +15,7 @@ base64.workspace = true
 bytes.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
+httpdate.workspace = true
 runku-core = { path = "../runku-core" }
 runku-compatibility = { path = "../runku-compatibility" }
 runku-cron = { path = "../runku-cron" }

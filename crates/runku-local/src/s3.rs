@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -194,8 +194,12 @@ async fn handle(
         (Method::GET, None) => {
             list_objects(request_id, &state.0, &bucket, auth.as_ref(), &uri).await
         }
-        (Method::GET, Some(key)) => get_object(request_id, &state.0, &bucket, key, false).await,
-        (Method::HEAD, Some(key)) => get_object(request_id, &state.0, &bucket, key, true).await,
+        (Method::GET, Some(key)) => {
+            get_object(request_id, &state.0, &bucket, key, false, &uri, &headers).await
+        }
+        (Method::HEAD, Some(key)) => {
+            get_object(request_id, &state.0, &bucket, key, true, &uri, &headers).await
+        }
         (Method::PUT, Some(key)) if headers.contains_key("x-amz-copy-source") => {
             copy_object(
                 request_id,
@@ -513,6 +517,12 @@ fn semantic_signed_header(name: &str) -> bool {
             | "x-amz-copy-source"
             | "x-amz-date"
             | "x-amz-metadata-directive"
+            | "range"
+            | "if-match"
+            | "if-none-match"
+            | "if-modified-since"
+            | "if-unmodified-since"
+            | "if-range"
     ) || name.starts_with("x-amz-meta-")
         || name.starts_with("x-amz-checksum-")
 }
@@ -812,29 +822,205 @@ async fn get_object(
     bucket: &Bucket,
     key: &str,
     head_only: bool,
+    uri: &Uri,
+    headers: &HeaderMap,
 ) -> Response {
-    let object = match config
-        .service
-        .get_object(config.scope, bucket.id, key)
-        .await
+    let version = match requested_version(uri) {
+        Ok(value) => value,
+        Err(()) => return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidArgument"),
+    };
+    if version.is_some()
+        && bucket.configuration.versioning != runku_object_storage::Versioning::Enabled
     {
+        return s3_error(request_id, StatusCode::NOT_FOUND, "NoSuchVersion");
+    }
+    let loaded = if let Some(version_id) = version {
+        config
+            .service
+            .get_object_version(config.scope, bucket.id, key, version_id)
+            .await
+    } else {
+        config
+            .service
+            .get_object(config.scope, bucket.id, key)
+            .await
+    };
+    let object = match loaded {
         Ok(Some(value)) => value,
-        Ok(None) => return s3_error(request_id, StatusCode::NOT_FOUND, "NoSuchKey"),
+        Ok(None) => {
+            return s3_error(
+                request_id,
+                StatusCode::NOT_FOUND,
+                if version.is_some() {
+                    "NoSuchVersion"
+                } else {
+                    "NoSuchKey"
+                },
+            );
+        }
         Err(error) => return storage_error(request_id, error),
     };
+    if let Some(status) = conditional_status(headers, &object) {
+        let mut response = empty_response(request_id, status);
+        object_headers(response.headers_mut(), &object);
+        return response;
+    }
     let bytes = match read_bytes(config, bucket, &object).await {
         Ok(value) => value,
         Err(response) => return s3_error(request_id, response.0, response.1),
     };
+    let range = match requested_range(headers, object.size, &object) {
+        Ok(value) => value,
+        Err(()) => {
+            let mut response = s3_error(
+                request_id,
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "InvalidRange",
+            );
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", object.size)) {
+                response.headers_mut().insert(header::CONTENT_RANGE, value);
+            }
+            return response;
+        }
+    };
+    let selected = range
+        .map(|(start, end)| bytes.slice(start..end))
+        .unwrap_or(bytes);
     let mut response = Response::new(if head_only {
         Body::empty()
     } else {
-        Body::from(bytes)
+        Body::from(selected.clone())
     });
-    *response.status_mut() = StatusCode::OK;
+    *response.status_mut() = if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
     object_headers(response.headers_mut(), &object);
+    if let Some((start, end)) = range {
+        response.headers_mut().remove("x-amz-checksum-sha256");
+        if let Ok(value) = HeaderValue::from_str(&selected.len().to_string()) {
+            response.headers_mut().insert(header::CONTENT_LENGTH, value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "bytes {start}-{}/{}",
+            end.saturating_sub(1),
+            object.size
+        )) {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
+    }
     response_headers(response.headers_mut(), request_id);
     response
+}
+
+fn requested_version(uri: &Uri) -> Result<Option<ObjectVersionId>, ()> {
+    let query = query_pairs(uri);
+    let value = unique_optional_query(&query, "versionId")?;
+    value.map(str::parse).transpose().map_err(|_| ())
+}
+
+fn conditional_status(headers: &HeaderMap, object: &ObjectMetadata) -> Option<StatusCode> {
+    let if_match = headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok());
+    if if_match.is_some_and(|value| !etag_condition(value, &object.etag, false)) {
+        return Some(StatusCode::PRECONDITION_FAILED);
+    }
+    if if_match.is_none()
+        && headers
+            .get(header::IF_UNMODIFIED_SINCE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .is_some_and(|at| object_system_time(object) > at)
+    {
+        return Some(StatusCode::PRECONDITION_FAILED);
+    }
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok());
+    if if_none_match.is_some_and(|value| etag_condition(value, &object.etag, true)) {
+        return Some(StatusCode::NOT_MODIFIED);
+    }
+    if if_none_match.is_none()
+        && headers
+            .get(header::IF_MODIFIED_SINCE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| httpdate::parse_http_date(value).ok())
+            .is_some_and(|at| object_system_time(object) <= at)
+    {
+        return Some(StatusCode::NOT_MODIFIED);
+    }
+    None
+}
+
+fn etag_condition(value: &str, etag: &str, weak: bool) -> bool {
+    value.split(',').map(str::trim).any(|candidate| {
+        candidate == "*" || candidate == etag || weak && candidate.strip_prefix("W/") == Some(etag)
+    })
+}
+
+fn requested_range(
+    headers: &HeaderMap,
+    size: u64,
+    object: &ObjectMetadata,
+) -> Result<Option<(usize, usize)>, ()> {
+    let Some(value) = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(None);
+    };
+    if let Some(if_range) = headers
+        .get(header::IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let matches = if if_range.starts_with('"') {
+            if_range == object.etag
+        } else {
+            httpdate::parse_http_date(if_range)
+                .ok()
+                .is_some_and(|at| object_system_time(object) <= at)
+        };
+        if !matches {
+            return Ok(None);
+        }
+    }
+    let value = value.strip_prefix("bytes=").ok_or(())?;
+    if value.contains(',') || size == 0 {
+        return Err(());
+    }
+    let (start, end) = value.split_once('-').ok_or(())?;
+    let (start, end_exclusive) = if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        (size.saturating_sub(suffix), size)
+    } else {
+        let start = start.parse::<u64>().map_err(|_| ())?;
+        if start >= size {
+            return Err(());
+        }
+        let end = if end.is_empty() {
+            size - 1
+        } else {
+            end.parse::<u64>().map_err(|_| ())?.min(size - 1)
+        };
+        if end < start {
+            return Err(());
+        }
+        (start, end.checked_add(1).ok_or(())?)
+    };
+    Ok(Some((
+        usize::try_from(start).map_err(|_| ())?,
+        usize::try_from(end_exclusive).map_err(|_| ())?,
+    )))
+}
+
+fn object_system_time(object: &ObjectMetadata) -> SystemTime {
+    let micros = u64::try_from(object.created_at.get()).unwrap_or(0);
+    UNIX_EPOCH + Duration::from_micros(micros)
 }
 
 async fn put_object(
@@ -1137,6 +1323,18 @@ fn one_optional_query<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&
     Some(&value.1)
 }
 
+fn unique_optional_query<'a>(
+    pairs: &'a [(String, String)],
+    name: &str,
+) -> Result<Option<&'a str>, ()> {
+    let mut values = pairs.iter().filter(|(candidate, _)| candidate == name);
+    let value = values.next().map(|value| value.1.as_str());
+    if values.next().is_some() {
+        return Err(());
+    }
+    Ok(value)
+}
+
 fn object_user_metadata(headers: &HeaderMap) -> Result<BTreeMap<String, String>, ()> {
     let mut metadata = BTreeMap::new();
     for (name, value) in headers {
@@ -1152,6 +1350,7 @@ fn object_user_metadata(headers: &HeaderMap) -> Result<BTreeMap<String, String>,
 }
 
 fn object_headers(headers: &mut HeaderMap, object: &ObjectMetadata) {
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     if let Ok(value) = HeaderValue::from_str(&object.content_type) {
         headers.insert(header::CONTENT_TYPE, value);
     }
@@ -1163,6 +1362,9 @@ fn object_headers(headers: &mut HeaderMap, object: &ObjectMetadata) {
     }
     if let Ok(value) = HeaderValue::from_str(&object.version_id.to_string()) {
         headers.insert("x-amz-version-id", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&httpdate::fmt_http_date(object_system_time(object))) {
+        headers.insert(header::LAST_MODIFIED, value);
     }
     if let Ok(value) = HeaderValue::from_str(&STANDARD.encode(object.sha256)) {
         headers.insert("x-amz-checksum-sha256", value);
@@ -1616,6 +1818,12 @@ mod tests {
             panic!("S3 PUT failed with {status}: {failure}");
         }
         assert!(put.headers().contains_key("x-amz-version-id"));
+        let first_version = put
+            .headers()
+            .get("x-amz-version-id")
+            .and_then(|value| value.to_str().ok())
+            .ok_or("first version missing")?
+            .to_owned();
         let admin_object = service
             .get_object(scope, bucket, "uploads/hello.txt")
             .await
@@ -1638,6 +1846,75 @@ mod tests {
             .await?;
         assert_eq!(public.status(), StatusCode::OK);
         assert_eq!(to_bytes(public.into_body(), 16).await?, "hello");
+
+        let replaced = router
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/s3/media/uploads/hello.txt",
+                b"hello-new",
+                issued.metadata.id,
+                &secret,
+                &[("content-type", "text/plain")],
+            )?)
+            .await?;
+        assert_eq!(replaced.status(), StatusCode::OK);
+        let current_etag = replaced
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .ok_or("current etag missing")?
+            .to_owned();
+
+        let old_version_uri = format!("/s3/media/uploads/hello.txt?versionId={first_version}");
+        let old_version = router
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &old_version_uri,
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[],
+            )?)
+            .await?;
+        assert_eq!(old_version.status(), StatusCode::OK);
+        assert_eq!(to_bytes(old_version.into_body(), 16).await?, "hello");
+
+        let range = router
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                "/s3/media/uploads/hello.txt",
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[("range", "bytes=1-4")],
+            )?)
+            .await?;
+        assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            range
+                .headers()
+                .get("content-range")
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes 1-4/9")
+        );
+        assert_eq!(to_bytes(range.into_body(), 16).await?, "ello");
+
+        let not_modified = router
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                "/s3/media/uploads/hello.txt",
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[("if-none-match", &current_etag)],
+            )?)
+            .await?;
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(to_bytes(not_modified.into_body(), 16).await?.len(), 0);
 
         let list = router
             .clone()
@@ -1823,7 +2100,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let input = directory.path().join("input.txt");
         std::fs::write(&input, b"official aws cli")?;
-        aws_cli(
+        let first_put = aws_cli(
             &endpoint,
             &access_key_id,
             &secret,
@@ -1837,6 +2114,10 @@ mod tests {
                 input.to_str().ok_or("input path")?,
             ],
         )?;
+        let first_version = serde_json::from_str::<serde_json::Value>(&first_put)?["VersionId"]
+            .as_str()
+            .ok_or("AWS CLI put response omitted VersionId")?
+            .to_owned();
         aws_cli(
             &endpoint,
             &access_key_id,
@@ -1862,6 +2143,55 @@ mod tests {
             ],
         )?;
         assert!(listed.contains("uploads/source.txt"));
+        std::fs::write(&input, b"official aws cli replaced")?;
+        aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "put-object",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/source.txt",
+                "--body",
+                input.to_str().ok_or("input path")?,
+            ],
+        )?;
+        let old_output = directory.path().join("old-output.txt");
+        aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "get-object",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/source.txt",
+                "--version-id",
+                &first_version,
+                old_output.to_str().ok_or("old output path")?,
+            ],
+        )?;
+        assert_eq!(std::fs::read(old_output)?, b"official aws cli");
+        let range_output = directory.path().join("range-output.txt");
+        aws_cli(
+            &endpoint,
+            &access_key_id,
+            &secret,
+            &[
+                "get-object",
+                "--bucket",
+                "aws-cli",
+                "--key",
+                "uploads/source.txt",
+                "--range",
+                "bytes=9-15",
+                range_output.to_str().ok_or("range output path")?,
+            ],
+        )?;
+        assert_eq!(std::fs::read(range_output)?, b"aws cli");
         aws_cli(
             &endpoint,
             &access_key_id,
@@ -1890,7 +2220,7 @@ mod tests {
                 output.to_str().ok_or("output path")?,
             ],
         )?;
-        assert_eq!(std::fs::read(output)?, b"official aws cli");
+        assert_eq!(std::fs::read(output)?, b"official aws cli replaced");
         aws_cli(
             &endpoint,
             &access_key_id,

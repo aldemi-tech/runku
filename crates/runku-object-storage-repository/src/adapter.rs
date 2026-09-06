@@ -351,6 +351,16 @@ impl ObjectStorageRepository for SqlObjectStorageRepository {
         self.counters.reads.fetch_add(1, Ordering::Relaxed);
         load_object(&self.pool, scope, bucket_id, key).await
     }
+    async fn get_object_version(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: BucketId,
+        key: &str,
+        version_id: ObjectVersionId,
+    ) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+        self.counters.reads.fetch_add(1, Ordering::Relaxed);
+        load_object_version(&self.pool, scope, bucket_id, key, version_id).await
+    }
     async fn list_objects(
         &self,
         scope: EnvironmentScope,
@@ -1388,6 +1398,20 @@ async fn load_object_tx(
     let row = sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_objects WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4")
         .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string()).bind(key)
         .fetch_optional(&mut **tx).await.map_err(map_sqlx_error)?;
+    row.map(|row| decode_object(scope, bucket_id, &row))
+        .transpose()
+}
+
+async fn load_object_version(
+    pool: &AnyPool,
+    scope: EnvironmentScope,
+    bucket_id: BucketId,
+    key: &str,
+    version_id: ObjectVersionId,
+) -> Result<Option<ObjectMetadata>, ObjectStorageError> {
+    let row = sqlx::query("SELECT object_key,version_id,size_bytes,sha256,etag,content_type,metadata_json,created_at_micros FROM runku_storage_object_versions WHERE project_id=$1 AND environment_id=$2 AND bucket_id=$3 AND object_key=$4 AND version_id=$5")
+        .bind(scope.project_id().to_string()).bind(scope.environment_id().to_string()).bind(bucket_id.to_string())
+        .bind(key).bind(version_id.to_string()).fetch_optional(pool).await.map_err(map_sqlx_error)?;
     row.map(|row| decode_object(scope, bucket_id, &row))
         .transpose()
 }

@@ -68,6 +68,7 @@ swc_ecma_transforms_module = "=33.0.0"
 deno_error = "=0.7.1"
 getrandom = "=0.4.3"
 hmac = "=0.13.0"
+httpdate = "=1.0.3"
 ipnet = "=2.12.1"
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }
 proptest = "=1.11.0"
