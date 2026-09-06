@@ -930,9 +930,11 @@ fn validate_input(
             | "runku-js-1"
             | "runku-js-2"
             | "runku-js-3"
+            | "runku-js"
             | "runku-hybrid-1"
             | "runku-hybrid-2"
             | "runku-hybrid-3"
+            | "runku-hybrid"
     ) {
         return Err(RuntimeError::UnsupportedRuntime);
     }
@@ -974,7 +976,7 @@ fn validate_input(
         decode_safe_esm_bundle(resource_bytes).map_err(|_| RuntimeError::InvalidArtifact)?;
     if matches!(
         request.manifest.runtime_version.as_str(),
-        "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3"
+        "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3" | "runku-hybrid"
     ) {
         let node_bundle = runku_releases::decode_node_esm_bundle(resource_bytes)
             .map_err(|_| RuntimeError::InvalidArtifact)?;
@@ -1001,9 +1003,11 @@ fn validate_input(
         "runku-js-1"
             | "runku-js-2"
             | "runku-js-3"
+            | "runku-js"
             | "runku-hybrid-1"
             | "runku-hybrid-2"
             | "runku-hybrid-3"
+            | "runku-hybrid"
     ) {
         let arguments_contract = contract_resource(&bundle, function.arguments_contract_hash)?;
         arguments_contract
@@ -1172,7 +1176,7 @@ fn platform_state(
 ) -> Arc<PlatformState> {
     let configuration_runtime = matches!(
         request.manifest.runtime_version.as_str(),
-        "runku-js-3" | "runku-hybrid-3"
+        "runku-js" | "runku-hybrid"
     );
     let network_https = function.function_type == FunctionType::Action
         && function.capabilities.contains(&Capability::NetworkHttps);
@@ -1498,7 +1502,7 @@ fn metadata(request: &InvocationRequest, function: &FunctionManifest) -> WireInv
     let auth_enabled = function.capabilities.contains(&Capability::AuthRead);
     let configuration_runtime = matches!(
         request.manifest.runtime_version.as_str(),
-        "runku-js-3" | "runku-hybrid-3"
+        "runku-js" | "runku-hybrid"
     );
     WireInvocationMetadata {
         project_id: request.scope.project_id().to_string(),

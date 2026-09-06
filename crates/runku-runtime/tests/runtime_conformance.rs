@@ -2247,7 +2247,7 @@ fn request_with_contracts(
             runtime_version: if capabilities.iter().any(|capability| {
                 matches!(capability, Capability::Variable(_) | Capability::Secret(_))
             }) {
-                "runku-js-3"
+                "runku-js"
             } else if capabilities.iter().any(|capability| {
                 matches!(capability, Capability::FileRead | Capability::FileWrite)
             }) {

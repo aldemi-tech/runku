@@ -44,10 +44,10 @@ export const sendPayment = action({
 `get(name)` methods recheck the exact kind and name in the host, so casting TypeScript or forging a
 Full Node platform message cannot broaden access. Nested calls keep the exact Environment and
 attach only the child Function's declared names. Every new build targets the cumulative current
-runtime contract: `runku-js-3`, `runku-node-3`, or `runku-hybrid-3`, according to artifact class.
-Capability selection no longer emits reduced v1/v2 runtime variants. Readers still accept
-already-persisted legacy manifests; those identifiers are compatibility inputs, not separately
-evolving runtimes.
+runtime contract: `runku-js`, `runku-node`, or `runku-hybrid`, according to artifact class.
+Capability selection no longer emits numeric runtime variants. Readers still accept already-
+persisted `*-1`, `*-2`, and `*-3` manifests; those identifiers are compatibility inputs, not
+separately evolving runtimes.
 
 Safe V8 and local Full Node resolve configuration through the exact-name broker. OCI, dedicated
 host, Docker, and Firecracker Full Node execution resolve exactly the declared names before handing

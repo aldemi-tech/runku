@@ -172,9 +172,9 @@ expand/migrate/contract and rollback documentation.
 
 Environment variables and encrypted secrets add the `variable:NAME` capability and activate the
 previously reserved `secret:NAME` capability. Every new build now emits the cumulative current wire
-identifier—`runku-js-3`, `runku-node-3`, or `runku-hybrid-3` according to artifact class—even when
-it uses only earlier capabilities. Version 3 is a superset of the base and application-file
-Platform Ops. Legacy v1/v2 manifests remain decodable as persisted compatibility inputs, not
+identifier—`runku-js`, `runku-node`, or `runku-hybrid` according to artifact class—even when it
+uses only earlier capabilities. The current runtime is a superset of the base and application-file
+Platform Ops. Legacy numeric manifests remain decodable as persisted compatibility inputs, not
 parallel runtime products. Safe V8 and local Full Node expose the cumulative API; OCI/dedicated-
 host/Docker/Firecracker execution pre-resolves exact declared configuration through the agent-side
 Environment broker. Configuration registry schema v1 is additive, checksum-protected, and stores

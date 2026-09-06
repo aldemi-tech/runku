@@ -112,7 +112,7 @@ fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() 
     let bundle = decode_safe_esm_bundle(&artifact)?;
 
     assert_eq!(manifest.functions.len(), 2);
-    assert_eq!(manifest.runtime_version.as_str(), "runku-js-3");
+    assert_eq!(manifest.runtime_version.as_str(), "runku-js");
     assert_eq!(manifest.cron_definitions.len(), 1);
     assert_eq!(manifest.cron_definitions[0].name.as_str(), "crons.hourly");
     assert_eq!(manifest.functions[0].name.as_str(), "functions.echo");
@@ -197,7 +197,7 @@ fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() 
 }
 
 #[test]
-fn named_environment_configuration_selects_v3_and_enforces_function_type() -> TestResult {
+fn named_environment_configuration_uses_current_runtime_and_enforces_function_type() -> TestResult {
     let directory = tempdir()?;
     prepare(directory.path())?;
     std::fs::remove_file(directory.path().join("runku/crons.ts"))?;
@@ -222,7 +222,7 @@ export const payment = action({
         metadata(120),
     )?;
     let manifest = decode_release_manifest(&std::fs::read(output.manifest_path)?)?;
-    assert_eq!(manifest.runtime_version.as_str(), "runku-js-3");
+    assert_eq!(manifest.runtime_version.as_str(), "runku-js");
     assert!(manifest.functions.iter().any(|function| {
         function
             .capabilities
@@ -375,7 +375,7 @@ export const work = action({
     let manifest = decode_release_manifest(&std::fs::read(output.manifest_path)?)?;
     let artifact = std::fs::read(output.artifact_path)?;
     let bundle = decode_node_esm_bundle(&artifact)?;
-    assert_eq!(manifest.runtime_version.as_str(), "runku-node-3");
+    assert_eq!(manifest.runtime_version.as_str(), "runku-node");
     assert_eq!(manifest.artifact.format, ArtifactFormat::NodeEsmBundleV1);
     assert_eq!(manifest.functions[0].runtime_class, RuntimeClass::FullNode);
     let source = bundle
@@ -447,7 +447,7 @@ export const digest = action({
     let manifest = decode_release_manifest(&std::fs::read(output.manifest_path)?)?;
     let artifact = std::fs::read(output.artifact_path)?;
     let bundle = decode_node_esm_bundle(&artifact)?;
-    assert_eq!(manifest.runtime_version.as_str(), "runku-hybrid-3");
+    assert_eq!(manifest.runtime_version.as_str(), "runku-hybrid");
     assert_eq!(manifest.artifact.format, ArtifactFormat::NodeEsmBundleV1);
     assert!(
         manifest

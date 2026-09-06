@@ -16,8 +16,8 @@ developer feedback, not the security boundary.
 
 Every new Release targets the cumulative current runtime contract. The artifact class still
 selects Safe V8, Full Node, or a hybrid artifact, but declared capabilities do not select an older
-or reduced runtime. Legacy v1/v2 identifiers are accepted only while reading persisted Releases;
-they are not maintained as separate product editions.
+or reduced runtime. Legacy `*-1`, `*-2`, and `*-3` identifiers are accepted only while reading
+persisted Releases; they are not maintained as separate product editions.
 
 | Function | Semantics | Automatic retry |
 |---|---|---|

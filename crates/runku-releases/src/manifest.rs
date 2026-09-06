@@ -129,6 +129,9 @@ impl FromStr for RuntimeVersion {
     type Err = ReleaseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if matches!(value, "runku-js" | "runku-node" | "runku-hybrid") {
+            return Ok(Self(value.to_owned()));
+        }
         let suffix = value
             .strip_prefix("platform-js-")
             .or_else(|| value.strip_prefix("runku-js-"))
@@ -274,6 +277,9 @@ impl ReleaseManifestV1 {
                     | "runku-js-3"
                     | "runku-node-3"
                     | "runku-hybrid-3"
+                    | "runku-js"
+                    | "runku-node"
+                    | "runku-hybrid"
             )
         {
             return Err(ReleaseError::InvalidManifest);
@@ -312,7 +318,7 @@ impl ReleaseManifestV1 {
         self.validate()?;
         if !matches!(
             self.runtime_version.as_str(),
-            "platform-js-1" | "runku-js-1" | "runku-js-2" | "runku-js-3"
+            "platform-js-1" | "runku-js-1" | "runku-js-2" | "runku-js-3" | "runku-js"
         ) || self
             .functions
             .iter()
@@ -325,8 +331,8 @@ impl ReleaseManifestV1 {
 
     /// Validates the production Full Node artifact contract.
     ///
-    /// Homogeneous Node Releases use `runku-node-1` plus an OCI descriptor. Mixed Safe/Node
-    /// Releases use `runku-hybrid-1` plus the canonical resources-and-OCI artifact. Full Node
+    /// Homogeneous Node Releases use `runku-node` plus an OCI descriptor. Mixed Safe/Node
+    /// Releases use `runku-hybrid` plus the canonical resources-and-OCI artifact. Full Node
     /// entrypoints remain Actions; their declared Platform Ops are enforced by the dispatcher.
     ///
     /// # Errors
@@ -336,14 +342,14 @@ impl ReleaseManifestV1 {
         self.validate()?;
         let supported = match (self.runtime_version.as_str(), self.artifact.format) {
             (
-                "runku-node-1" | "runku-node-2" | "runku-node-3",
+                "runku-node-1" | "runku-node-2" | "runku-node-3" | "runku-node",
                 ArtifactFormat::NodeOciDescriptorV1,
             ) => self
                 .functions
                 .iter()
                 .all(|function| function.runtime_class == RuntimeClass::FullNode),
             (
-                "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3",
+                "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3" | "runku-hybrid",
                 ArtifactFormat::HybridOciArtifactV1,
             ) => {
                 self.functions
@@ -376,11 +382,11 @@ impl ReleaseManifestV1 {
     pub fn ensure_local_full_node_supported(&self) -> Result<(), ReleaseError> {
         self.validate()?;
         let version_supported = match self.runtime_version.as_str() {
-            "runku-node-1" | "runku-node-2" | "runku-node-3" => self
+            "runku-node-1" | "runku-node-2" | "runku-node-3" | "runku-node" => self
                 .functions
                 .iter()
                 .all(|function| function.runtime_class == RuntimeClass::FullNode),
-            "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3" => {
+            "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3" | "runku-hybrid" => {
                 self.functions
                     .iter()
                     .any(|function| function.runtime_class == RuntimeClass::SafeV8)
@@ -812,7 +818,7 @@ fn valid_configuration_name(name: &str) -> bool {
 fn validate_configuration_runtime(manifest: &ReleaseManifestV1) -> Result<(), ReleaseError> {
     let configuration_runtime = matches!(
         manifest.runtime_version.as_str(),
-        "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+        "runku-js" | "runku-node" | "runku-hybrid"
     );
     let mut variable_requested = false;
     for capability in manifest

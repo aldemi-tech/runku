@@ -34,11 +34,11 @@ use compiler::compile_module;
 use declarative::{LoadedCron, LoadedFunction, input_fingerprint, load_project};
 use output::publish_output;
 
-// Runtime 3 is the first cumulative Product runtime: every new build targets the same complete
-// Platform API instead of selecting a reduced ABI from the capabilities used by one Release.
-const CONTRACT_RUNTIME_VERSION: &str = "runku-js-3";
-const NODE_RUNTIME_VERSION: &str = "runku-node-3";
-const HYBRID_RUNTIME_VERSION: &str = "runku-hybrid-3";
+// Every new build targets the single cumulative Product runtime. Numeric identifiers remain
+// reader-only compatibility inputs for artifacts produced before this contract was consolidated.
+const CONTRACT_RUNTIME_VERSION: &str = "runku-js";
+const NODE_RUNTIME_VERSION: &str = "runku-node";
+const HYBRID_RUNTIME_VERSION: &str = "runku-hybrid";
 const FUNCTION_ID_DOMAIN: &[u8] = b"RUNKU_FUNCTION_ID_V1";
 const FUNCTION_CONTRACT_DOMAIN: &[u8] = b"RUNKU_FUNCTION_CONTRACT_V1";
 type CompiledFunctions = Vec<(LoadedFunction, Sha256Digest)>;

@@ -50,7 +50,7 @@ pub(crate) fn prepare_child(
     }
     if matches!(
         root.manifest().runtime_version.as_str(),
-        "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+        "runku-js" | "runku-node" | "runku-hybrid"
     ) && target
         .capabilities
         .iter()

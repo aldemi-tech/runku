@@ -250,7 +250,7 @@ impl MutationExecutor {
             Some(Arc::clone(schema))
         } else if matches!(
             request.manifest().runtime_version.as_str(),
-            "runku-js-1" | "runku-js-2" | "runku-js-3"
+            "runku-js-1" | "runku-js-2" | "runku-js-3" | "runku-js"
         ) {
             let bundle = decode_safe_esm_bundle(request.artifact_bytes())
                 .map_err(|_| MutationExecutionError::Schema(SchemaError::InvalidCatalog))?;

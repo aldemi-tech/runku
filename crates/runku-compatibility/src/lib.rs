@@ -48,7 +48,7 @@ impl ReleasePackage {
         let mut contracts = BTreeMap::new();
         let schema = if matches!(
             manifest.runtime_version.as_str(),
-            "runku-js-1" | "runku-js-2" | "runku-js-3"
+            "runku-js-1" | "runku-js-2" | "runku-js-3" | "runku-js"
         ) {
             for function in &manifest.functions {
                 load_contract(&bundle, function.arguments_contract_hash, &mut contracts)?;

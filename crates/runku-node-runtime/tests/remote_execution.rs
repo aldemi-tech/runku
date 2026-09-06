@@ -470,7 +470,7 @@ async fn queued_gateway_agent_executes_real_node_and_returns_durable_result()
 async fn queued_agent_resolves_only_declared_environment_configuration()
 -> Result<(), Box<dyn Error>> {
     let fixture = fixture()?;
-    assert_eq!(fixture.manifest.runtime_version.as_str(), "runku-node-3");
+    assert_eq!(fixture.manifest.runtime_version.as_str(), "runku-node");
     let vertical = vertical(&fixture)?;
     let outcome = vertical
         .runtime

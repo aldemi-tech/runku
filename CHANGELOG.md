@@ -25,8 +25,8 @@ All notable changes are documented in this file.
   File/Object Storage bytes as one verified unit.
 - Management route authorization includes the new least-privilege configuration, storage,
   lifecycle, invocation, telemetry, Cron, and Scheduled capabilities.
-- New builds always emit the cumulative generation-3 runtime contract for their Safe, Full Node,
-  or hybrid artifact. Earlier runtime identifiers remain readers for already-persisted Releases,
+- New builds always emit the single cumulative `runku-js`, `runku-node`, or `runku-hybrid`
+  runtime contract for their artifact class. Numeric runtime identifiers remain readers for already-persisted Releases,
   not independently evolving runtime products.
 - Object Storage lifecycle rules now execute in bounded batches, incomplete multipart uploads are
   durably reconciled, and the external-client campaign covers the supported profile with the
@@ -45,7 +45,7 @@ All notable changes are documented in this file.
 
 - The current runtime is cumulative over the earlier application-file and base contracts. Legacy
   manifests remain decodable for persisted compatibility, while every new build targets the
-  generation-3 wire identifier. Configuration names are canonical uppercase identifiers.
+  unversioned current wire identifier. Configuration names are canonical uppercase identifiers.
 - The compact configuration registry is currently SQLite-backed even when Function data uses
   PostgreSQL. The S3-compatible surface is a documented Runku profile rather than all AWS S3 APIs;
   bucket ACLs, tagging, website hosting, replication, and cross-bucket copy are outside it.

@@ -930,7 +930,7 @@ impl ProductInvocationService {
         }
         if matches!(
             resolved.manifest.runtime_version.as_str(),
-            "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+            "runku-js" | "runku-node" | "runku-hybrid"
         ) && function
             .capabilities
             .iter()

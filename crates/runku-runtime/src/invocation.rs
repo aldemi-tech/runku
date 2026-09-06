@@ -648,7 +648,7 @@ impl InvocationRequest {
         let authorized = self.manifest.functions.iter().any(|function| {
             matches!(
                 self.manifest.runtime_version.as_str(),
-                "runku-js-3" | "runku-node-3" | "runku-hybrid-3"
+                "runku-js" | "runku-node" | "runku-hybrid"
             ) && function.id == self.function_id
                 && function
                     .capabilities

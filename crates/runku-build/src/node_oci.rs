@@ -214,7 +214,7 @@ impl RemoteNodePublisher {
             .map_err(|_| NodeOciPublishError::InvalidBuild)?;
         let remote_artifact = if matches!(
             manifest.runtime_version.as_str(),
-            "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3"
+            "runku-hybrid-1" | "runku-hybrid-2" | "runku-hybrid-3" | "runku-hybrid"
         ) {
             let artifact = encode_hybrid_oci_artifact(&local_artifact, &descriptor_bytes)
                 .map_err(|_| NodeOciPublishError::InvalidBuild)?;
@@ -725,7 +725,7 @@ exit 1
             )
         );
         let manifest = decode_release_manifest(&outcome.manifest_bytes)?;
-        assert_eq!(manifest.runtime_version.as_str(), "runku-hybrid-3");
+        assert_eq!(manifest.runtime_version.as_str(), "runku-hybrid");
         assert_eq!(
             manifest.artifact.format,
             ArtifactFormat::HybridOciArtifactV1

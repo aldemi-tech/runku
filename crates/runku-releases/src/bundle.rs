@@ -145,7 +145,7 @@ impl SafeEsmBundleV1 {
 
     /// Returns one exact UTF-8 resource selected by its content digest.
     ///
-    /// Runtime implementations and `runku-js-1` canonical contract definitions share the
+    /// Runtime implementations and canonical contract definitions share the
     /// same immutable content-addressed namespace without making contract bytes executable.
     #[must_use]
     pub fn resource(&self, digest: Sha256Digest) -> Option<&str> {
@@ -230,7 +230,7 @@ impl SafeEsmBundleV1 {
         }
         if matches!(
             manifest.runtime_version.as_str(),
-            "runku-js-1" | "runku-js-2" | "runku-js-3"
+            "runku-js-1" | "runku-js-2" | "runku-js-3" | "runku-js"
         ) && (self.resource(manifest.schema_contract_hash).is_none()
             || self.resource(manifest.index_contract_hash).is_none()
             || manifest.functions.iter().any(|function| {

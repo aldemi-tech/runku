@@ -538,7 +538,7 @@ fn prepare_request(request: &InvocationRequest) -> Result<PreparedInvocation, Ru
         .map_err(|_| RuntimeError::InvalidArguments)?;
     let configuration_runtime = matches!(
         request.manifest().runtime_version.as_str(),
-        "runku-node-3" | "runku-hybrid-3"
+        "runku-node" | "runku-hybrid"
     );
     let input = serde_json::to_vec(&NodeRequestV1 {
         protocol_version: 1,

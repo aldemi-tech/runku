@@ -147,7 +147,7 @@ export const configured = action({
     )?)?);
     assert_eq!(manifest.artifact.format, ArtifactFormat::NodeEsmBundleV1);
     assert_eq!(manifest.functions[0].runtime_class, RuntimeClass::FullNode);
-    assert_eq!(manifest.runtime_version.as_str(), "runku-node-3");
+    assert_eq!(manifest.runtime_version.as_str(), "runku-node");
     let basename_id = manifest
         .functions
         .iter()
