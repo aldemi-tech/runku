@@ -12,8 +12,10 @@ first-owner invitation bootstrap, sessions, scoped grants, and optional OIDC.
 Delegated invitation issuance can be reconciled by a durable Operation ID and pending material can
 be revoked without recovering its one-time secret.
 
-The compact `runku-server` distribution composes PostgreSQL-backed Platform Identity and can attach
-one initialized Product Environment through `RUNKU_PRODUCT_ROOT`. The Environment's transactional
+The `runku-server` distribution composes PostgreSQL-backed Platform Identity and can attach one
+initialized Product Environment through `RUNKU_PRODUCT_ROOT`, or a strict shared/dedicated cell
+manifest through `RUNKU_CELL_CONFIG`. A shared member opens several isolated Product roots and
+keeps their application processes warm behind one Host-dispatched listener. The Environment's transactional
 Function data store is SQLite by default or an optional exact-scope PostgreSQL database. The same process embeds hot log
 capture, filesystem or S3-compatible Parquet archival, DuckDB historical query, safe retention, and
 authenticated live streaming; a small installation does not need a separate observability service.
@@ -23,7 +25,7 @@ process, historical logs, and one-connection log streaming. Tagged releases publ
 ARM64/x86_64 server archives plus a matching multi-platform, non-root Safe V8 OCI image. The
 server also implements `runku-server logs-worker` for the optional NATS-to-S3 HA log path, using the
 same server artifact. The project does not yet publish general distributed role/Agent binaries, a
-supported Kubernetes package, multi-Environment orchestration, active-active Product writers, or
+supported Kubernetes package, active-active Product writers, or
 rolling multi-node upgrades. Tagged releases do include a supported Docker standalone package with
 mounted secret files, probes, bounded resources, a TLS-proxy boundary, offline backup verification,
 empty-install restore, upgrade preflight, guarded removal, and optional browser/HA-log overlays. See
@@ -81,7 +83,9 @@ topology. Safe V8, Gateway, data, Realtime, management, and ordinary workers do 
 | `logs-worker` | Optional replicated-journal to immutable Parquet archive | Non-root, no KVM |
 | `agent` | Full Node queued execution and isolated worker lifecycle | Depends on selected trust profile |
 
-The compact `runku-server` publishes an `all`-style, single-Environment composition. Its optional
+The same `runku-server` publishes a compact one-Environment composition and a 0.5 cell-member
+composition. `shared` packs several warm Environments into one process; `dedicated` validates one
+Environment through the same implementation. Its optional
 `logs-worker` command is the same binary/image and does not turn standalone into a multi-service
 requirement. Other separated product roles and Agent packages are not published yet.
 
@@ -91,6 +95,11 @@ the default Product and Management listeners remain on loopback. A provider-owne
 may set an explicit application listener only together with its trusted TLS-termination assertion;
 local `init`/`link` state remains loopback-only. See
 [Docker standalone installation](../../deployments/docker/README.md).
+
+The cell-member contract is portable to provider containers but is not a scheduler or Helm chart.
+Each Environment still has one active writer; external placement must fence ownership and prefer
+the member already holding the warm assignment. See
+[Multi-Environment cell profile](cell-profile.md).
 
 ## Storage and dependency profiles
 

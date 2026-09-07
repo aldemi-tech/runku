@@ -1,5 +1,6 @@
 //! `runku-server` self-hosted process composition.
 
+mod cell;
 mod product;
 
 use std::{
@@ -31,7 +32,7 @@ use runku_identity_provider::{
 use runku_management_service::{
     ExternalIdentityAuthenticator, JwtExternalIdentityAuthenticator, ManagedEnrollmentKey,
     ManagementHttpConfig, ManagementHttpExposure, ManagementProduct, OidcClientConfiguration,
-    build_management_router_with_product, serve_management,
+    build_management_router_with_product, build_management_router_with_products, serve_management,
 };
 use runku_observability::{
     JournalArchiveOutcome, LogArchive, LogJournalArchiver, NatsLogJournal, NatsLogJournalConfig,
@@ -47,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
+use crate::cell::{CellManifest, build_cell_router};
 use crate::product::{ProductAdapter, ProductAdapterConfig, migrate_platform_database};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3220";
@@ -96,8 +98,10 @@ async fn run() -> Result<(), &'static str> {
     }
     let config = ServerConfig::load()?;
     let file_object_store = config.file_storage.open().await?;
+    let cell_database_urls = load_cell_database_urls(&config)?;
     if command == "check" {
         let _ = external_authenticator(config.oidc.as_ref())?;
+        validate_cell_product_inputs(&config)?;
         println!("configuration valid");
         return Ok(());
     }
@@ -115,6 +119,13 @@ async fn run() -> Result<(), &'static str> {
             config.platform_database_url.as_ref(),
         ) {
             migrate_platform_database(root, url.as_str()).await?;
+        }
+        if let Some(manifest) = &config.cell_manifest {
+            for (environment, url) in manifest.environments.iter().zip(&cell_database_urls) {
+                if let Some(url) = url {
+                    migrate_platform_database(&environment.root, url.as_str()).await?;
+                }
+            }
         }
         repository.close().await;
         println!("migrations applied");
@@ -147,30 +158,62 @@ async fn run() -> Result<(), &'static str> {
         managed_source_authority: config.managed_source_authority.clone(),
     };
     let external = external_authenticator(config.oidc.as_ref())?;
-    let product_adapter = match config.product_root.as_ref() {
-        Some(root) => Some(Arc::new(
+    let mut product_adapters = Vec::new();
+    if let Some(root) = config.product_root.as_ref() {
+        product_adapters.push(Arc::new(
             Box::pin(ProductAdapter::open(
                 root.clone(),
                 ProductAdapterConfig {
                     trusted_application_listen: config.trusted_application_listen,
+                    embedded_application_listener: false,
                     platform_database_url: config.platform_database_url.clone(),
                     log_archive: config.log_archive.clone(),
                     log_journal: log_journal.clone(),
                     allowed_origins: config.product_allowed_origins.clone(),
                     auth_config: config.product_auth_config.clone(),
-                    file_object_store,
+                    file_object_store: file_object_store.clone(),
                     file_storage_limits: config.file_storage_limits,
                     file_usage_sink: config.file_usage_sink.clone(),
                     file_usage_interval: config.file_usage_interval,
                 },
             ))
             .await?,
-        )),
-        None => None,
-    };
-    let product = product_adapter
-        .as_ref()
-        .map(|adapter| Arc::clone(adapter) as Arc<dyn ManagementProduct>);
+        ));
+    }
+    if let Some(manifest) = &config.cell_manifest {
+        for (environment, platform_database_url) in
+            manifest.environments.iter().zip(cell_database_urls)
+        {
+            let allowed_origins = environment
+                .allowed_origins
+                .iter()
+                .map(|origin| {
+                    origin
+                        .parse::<CorsOrigin>()
+                        .map_err(|_| "SERVER_CELL_CONFIG_INVALID")
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            product_adapters.push(Arc::new(
+                Box::pin(ProductAdapter::open(
+                    environment.root.clone(),
+                    ProductAdapterConfig {
+                        trusted_application_listen: None,
+                        embedded_application_listener: true,
+                        platform_database_url,
+                        log_archive: config.log_archive.clone(),
+                        log_journal: log_journal.clone(),
+                        allowed_origins,
+                        auth_config: environment.auth_config.clone(),
+                        file_object_store: file_object_store.clone(),
+                        file_storage_limits: config.file_storage_limits,
+                        file_usage_sink: config.file_usage_sink.clone(),
+                        file_usage_interval: config.file_usage_interval,
+                    },
+                ))
+                .await?,
+            ));
+        }
+    }
     let oidc_client = config.oidc.as_ref().and_then(|oidc| {
         oidc.native_client
             .as_ref()
@@ -183,26 +226,173 @@ async fn run() -> Result<(), &'static str> {
                 resource: native.resource.clone(),
             })
     });
-    let mut router =
-        build_management_router_with_product(http, identity, external, product, oidc_client)
-            .map_err(|_| "SERVER_MANAGEMENT_CONFIGURATION_INVALID")?;
-    if let Some(adapter) = product_adapter.as_ref() {
-        router = router.merge(
+    let products = product_adapters
+        .iter()
+        .map(|adapter| Arc::clone(adapter) as Arc<dyn ManagementProduct>)
+        .collect::<Vec<_>>();
+    let mut management_router = if config.cell_manifest.is_some() {
+        build_management_router_with_products(http, identity, external, products, oidc_client)
+    } else {
+        build_management_router_with_product(
+            http,
+            identity,
+            external,
+            products.into_iter().next(),
+            oidc_client,
+        )
+    }
+    .map_err(|_| "SERVER_MANAGEMENT_CONFIGURATION_INVALID")?;
+    if config.cell_manifest.is_none()
+        && let Some(adapter) = product_adapters.first()
+    {
+        management_router = management_router.merge(
             adapter
                 .s3_router()
                 .map_err(|_| "SERVER_PRODUCT_CONFIGURATION_INVALID")?,
         );
     }
-    let listener = TcpListener::bind(config.listen)
+    let management_listener = TcpListener::bind(config.listen)
         .await
         .map_err(|_| "SERVER_MANAGEMENT_LISTENER_UNAVAILABLE")?;
+    let cell_listener = if let Some(manifest) = &config.cell_manifest {
+        let host_assignments = manifest
+            .environments
+            .iter()
+            .zip(&product_adapters)
+            .map(|(environment, adapter)| (environment.hosts.clone(), Arc::clone(adapter)))
+            .collect();
+        let cell_router = build_cell_router(host_assignments)?;
+        let listen = config
+            .trusted_application_listen
+            .ok_or("SERVER_CELL_APPLICATION_LISTENER_REQUIRED")?;
+        let listener = TcpListener::bind(listen)
+            .await
+            .map_err(|_| "SERVER_APPLICATION_LISTENER_UNAVAILABLE")?;
+        println!(
+            "runku-server cell member {} ({:?}) serving {} environment(s) on {}",
+            manifest.member_id,
+            manifest.mode,
+            manifest.environments.len(),
+            listen
+        );
+        Some((listener, cell_router))
+    } else {
+        None
+    };
     println!("runku-server management listening on {}", config.listen);
-    let result = serve_management(listener, router, config.exposure, shutdown()).await;
-    if let Some(product) = product_adapter {
+    let result = serve_cell_and_management(
+        management_listener,
+        management_router,
+        config.exposure,
+        cell_listener,
+    )
+    .await;
+    for product in product_adapters {
         product.shutdown().await;
     }
     repository.close().await;
     result.map_err(|_| "SERVER_MANAGEMENT_STOPPED")
+}
+
+fn load_cell_database_urls(
+    config: &ServerConfig,
+) -> Result<Vec<Option<Zeroizing<String>>>, &'static str> {
+    let Some(manifest) = &config.cell_manifest else {
+        return Ok(Vec::new());
+    };
+    let identity_target = postgres_database_target(&config.identity_database_url)
+        .map_err(|()| "SERVER_DATABASE_URL_INVALID")?;
+    let mut targets = BTreeSet::new();
+    manifest
+        .environments
+        .iter()
+        .map(|environment| {
+            let Some(path) = &environment.platform_database_url_file else {
+                return Ok(None);
+            };
+            let value = read_secret_file(path)?;
+            let target = postgres_database_target(&value)
+                .map_err(|()| "SERVER_PRODUCT_DATABASE_URL_INVALID")?;
+            if target == identity_target || !targets.insert(target) {
+                return Err("SERVER_PRODUCT_DATABASE_NOT_ISOLATED");
+            }
+            Ok(Some(Zeroizing::new(value)))
+        })
+        .collect()
+}
+
+fn validate_cell_product_inputs(config: &ServerConfig) -> Result<(), &'static str> {
+    let Some(manifest) = &config.cell_manifest else {
+        return Ok(());
+    };
+    for environment in &manifest.environments {
+        let origins = environment
+            .allowed_origins
+            .iter()
+            .map(|value| {
+                value
+                    .parse::<CorsOrigin>()
+                    .map_err(|_| "SERVER_CELL_CONFIG_INVALID")
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if origins.len() != environment.allowed_origins.len() {
+            return Err("SERVER_CELL_CONFIG_INVALID");
+        }
+    }
+    Ok(())
+}
+
+async fn serve_cell_and_management(
+    management_listener: TcpListener,
+    management_router: axum::Router,
+    exposure: ManagementHttpExposure,
+    cell: Option<(TcpListener, axum::Router)>,
+) -> std::io::Result<()> {
+    let (stop, stop_receiver) = tokio::sync::watch::channel(false);
+    let signal_stop = stop.clone();
+    let signal = tokio::spawn(async move {
+        shutdown().await;
+        signal_stop.send_replace(true);
+    });
+    let management_shutdown = wait_for_stop(stop_receiver.clone());
+    let mut management = tokio::spawn(serve_management(
+        management_listener,
+        management_router,
+        exposure,
+        management_shutdown,
+    ));
+    let result = if let Some((listener, router)) = cell {
+        let cell_shutdown = wait_for_stop(stop_receiver);
+        let mut application = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(cell_shutdown)
+                .await
+        });
+        let (first, management_first) = tokio::select! {
+            result = &mut management => (result, true),
+            result = &mut application => (result, false),
+        };
+        stop.send_replace(true);
+        let second = if management_first {
+            application.await
+        } else {
+            management.await
+        };
+        join_server(first).and_then(|()| join_server(second))
+    } else {
+        join_server(management.await)
+    };
+    signal.abort();
+    drop(signal.await);
+    result
+}
+
+async fn wait_for_stop(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    while !*receiver.borrow() && receiver.changed().await.is_ok() {}
+}
+
+fn join_server(result: Result<std::io::Result<()>, tokio::task::JoinError>) -> std::io::Result<()> {
+    result.map_err(|_| std::io::Error::other("server task stopped"))?
 }
 
 async fn run_logs_worker_command() -> Result<(), &'static str> {
@@ -225,6 +415,7 @@ struct ServerConfig {
     managed_source_authority: Option<ManagedSourceAuthority>,
     oidc: Option<OidcConfig>,
     product_root: Option<PathBuf>,
+    cell_manifest: Option<CellManifest>,
     trusted_application_listen: Option<SocketAddr>,
     platform_database_url: Option<Zeroizing<String>>,
     product_allowed_origins: BTreeSet<CorsOrigin>,
@@ -330,6 +521,13 @@ impl ServerConfig {
                 }
             })
             .transpose()?;
+        let cell_manifest = env::var_os("RUNKU_CELL_CONFIG")
+            .map(PathBuf::from)
+            .map(|path| CellManifest::load(&path))
+            .transpose()?;
+        if product_root.is_some() && cell_manifest.is_some() {
+            return Err("SERVER_PRODUCT_CONFIGURATION_CONFLICT");
+        }
         let application_listen = env::var("RUNKU_APPLICATION_LISTEN")
             .ok()
             .map(|value| {
@@ -352,8 +550,12 @@ impl ServerConfig {
             (Some(_), false) => return Err("SERVER_APPLICATION_TLS_REQUIRED"),
             (None, true) => return Err("SERVER_APPLICATION_LISTENER_CONFIGURATION_INCOMPLETE"),
         };
-        if trusted_application_listen.is_some() && product_root.is_none() {
+        let has_product = product_root.is_some() || cell_manifest.is_some();
+        if trusted_application_listen.is_some() && !has_product {
             return Err("SERVER_PRODUCT_CONFIGURATION_WITHOUT_ROOT");
+        }
+        if cell_manifest.is_some() && trusted_application_listen.is_none() {
+            return Err("SERVER_CELL_APPLICATION_LISTENER_REQUIRED");
         }
         let platform_database_url =
             optional_secret_alias("RUNKU_PLATFORM_DATABASE_URL", "RUNKU_PRODUCT_DATABASE_URL")?
@@ -390,9 +592,7 @@ impl ServerConfig {
                 }
             })
             .transpose()?;
-        if product_root.is_none()
-            && (!product_allowed_origins.is_empty() || product_auth_config.is_some())
-        {
+        if !has_product && (!product_allowed_origins.is_empty() || product_auth_config.is_some()) {
             return Err("SERVER_PRODUCT_CONFIGURATION_WITHOUT_ROOT");
         }
         let log_archive = load_log_archive()?;
@@ -402,11 +602,18 @@ impl ServerConfig {
         }
         let (file_storage, file_storage_limits) = load_file_storage()?;
         let (file_usage_sink, file_usage_interval) = load_file_usage_sink()?;
-        if product_root.is_none() && !matches!(file_storage, ServerFileStorage::ProductFilesystem) {
+        if !has_product && !matches!(file_storage, ServerFileStorage::ProductFilesystem) {
             return Err("SERVER_FILE_STORAGE_WITHOUT_PRODUCT_ROOT");
         }
-        if product_root.is_none() && file_usage_sink.is_some() {
+        if !has_product && file_usage_sink.is_some() {
             return Err("SERVER_FILE_USAGE_WITHOUT_PRODUCT_ROOT");
+        }
+        if cell_manifest.is_some()
+            && (!product_allowed_origins.is_empty()
+                || product_auth_config.is_some()
+                || platform_database_url.is_some())
+        {
+            return Err("SERVER_CELL_PRODUCT_CONFIGURATION_CONFLICT");
         }
         Ok(Self {
             identity_database_url,
@@ -419,6 +626,7 @@ impl ServerConfig {
             managed_source_authority,
             oidc,
             product_root,
+            cell_manifest,
             trusted_application_listen,
             platform_database_url,
             product_allowed_origins,

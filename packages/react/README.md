@@ -7,12 +7,11 @@ utilities with hydration.
 Install the exact frontend SDK pair together:
 
 ```sh
-pnpm add @runku/react@0.4.8 @runku/client@0.4.8
+pnpm add @runku/react@0.5.0 @runku/client@0.5.0
 ```
 
-Version 0.4.8 uses Public Protocol v1 and is compatible with the Runku 0.4.7 gateway. The published
-0.4.7 CLI predates runtime Function-reference generation; use references emitted by the current
-source CLI until a later coordinated distribution includes that codegen.
+Version 0.5.0 uses Public Protocol v1 and ships with the coordinated CLI runtime
+Function-reference generation.
 
 ## Generated Function references
 

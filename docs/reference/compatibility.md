@@ -11,9 +11,9 @@ silently falls back to `latest`, another Release, a weaker runtime, or a differe
 
 ## Current distribution matrix
 
-The product distribution reports version `0.4.7`; the frontend SDK pair reports version `0.4.8`.
-Neither has established a general stable compatibility window. Version 0.3.0 is the first supported
-compact Docker installation floor; 0.4.7 supports a deliberate forward upgrade from that floor.
+The coordinated product distribution and frontend SDK pair report version `0.5.0`. Neither has
+established a general stable compatibility window. Version 0.3.0 is the first supported compact
+Docker installation floor; 0.5.0 supports a deliberate forward upgrade from that floor.
 Product tags coordinate the CLI, Function SDK, Linux compact server binaries, and compact server
 image. Frontend SDK tags coordinate client and React only. Agent, distributed deployment, protocol,
 storage, and runtime support windows remain separate distribution gates.
@@ -22,6 +22,19 @@ Frontend SDK 0.4.8 adds generated Function-reference values and React/Next.js bi
 changing Public HTTP/WebSocket v1. It is compatible with the 0.4.7 gateway. The published 0.4.7 CLI
 predates the reference generator; applications need references produced by the current source CLI
 until a later product distribution includes that generator.
+
+Version 0.5.0 includes that frontend codegen/SDK line and adds the cell-member server composition.
+`RUNKU_CELL_CONFIG` selects a strict manifest for several warm, isolated Environments in `shared`
+mode or exactly one in `dedicated` mode. It is mutually exclusive with `RUNKU_PRODUCT_ROOT` and
+singleton Product database/origin/auth variables. Public HTTP/WebSocket v1 and Product persisted
+formats do not change.
+
+Application ingress selects a candidate Environment from one canonical `Host` header, then runs
+the existing Product authorization stack. Management dispatch selects the exact Product only after
+operator authorization of the Project/Environment path. Version 0.5.0 intentionally preserves one
+active writer per Environment: it does not provide same-Environment active-active, distributed
+scheduler fencing, or a Kubernetes control plane. Provider fleets may prefer the currently
+assigned warm member, but must fence it before replacement.
 
 Version 0.4.5 adds only additive auth response fields and endpoints. A 0.4.5 CLI can still link
 non-interactively to an older server with explicit IDs; parameterless interactive linking requires
@@ -68,16 +81,16 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout is not identified by `0.4.7` alone |
+| Source CLI | Record the Git commit; a modified checkout is not identified by `0.5.0` alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
-| Frontend SDK packages | `@runku/client` and `@runku/react` update together with exact peer versions; currently 0.4.8 |
-| Distribution JavaScript packages | `@runku/server` and `@runku/cli` remain coordinated with the product distribution; currently 0.4.7 |
+| Frontend SDK packages | `@runku/client` and `@runku/react` update together with exact peer versions; currently 0.5.0 |
+| Distribution JavaScript packages | `@runku/server` and `@runku/cli` remain coordinated with the product distribution; currently 0.5.0 |
 | HTTP/WebSocket | v1 envelopes; unknown versions rejected |
 | Values/index keys | v1 canonical encodings; existing vectors immutable |
 | Release/artifact | Version/digest/size/runtime descriptors verified |
 | SQLite/PostgreSQL | Same logical contract; physical schema/files are internal |
-| Compact server | Linux GNU ARM64/x86_64 binary and multi-platform OCI image; one attached Product Environment, Safe V8 profile |
+| Server composition | Linux GNU ARM64/x86_64 binary and multi-platform OCI image; compact one-Environment or strict shared/dedicated cell member, Safe V8 profile |
 | Compact deployment | Dedicated Linux host, Compose v2, one active Environment writer, PostgreSQL 16, host TLS proxy, backup/empty restore |
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
 | Platform Identity | Management HTTP v1, native OIDC configuration, source-owned managed reconciliation, authenticated Product lifecycle/catalog/Data Admin/log stream, schema v3; no mixed-version or downgrade window |
@@ -87,12 +100,12 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Boundary | Current contract |
 |---|---|
 | CLI | tagged macOS/Linux GNU/Windows binaries for ARM64/x86-64 plus exact-version npm launcher |
-| Application authoring | `@runku/server@0.4.7` declaration/validator contract |
-| TypeScript application client | `@runku/client@0.4.8` HTTP/Realtime/file/reference contract |
-| React and Next.js bindings | `@runku/react@0.4.8` with exact `@runku/client@0.4.8` peer |
+| Application authoring | `@runku/server@0.5.0` declaration/validator contract |
+| TypeScript application client | `@runku/client@0.5.0` HTTP/Realtime/file/reference contract |
+| React and Next.js bindings | `@runku/react@0.5.0` with exact `@runku/client@0.5.0` peer |
 | Public API | strict HTTP/WebSocket v1 envelopes and canonical values |
 | Compact server | Linux GNU ARM64/x86-64 binary and multi-platform non-root image |
-| Compact deployment | Docker Compose v2, one attached Product Environment, PostgreSQL 16 Platform Identity, Safe runtime |
+| Deployment | Docker Compose v2 compact profile or externally orchestrated cell member; PostgreSQL 16 Platform Identity, Safe runtime, one active writer per Environment |
 | Function data | Product-root SQLite by default; optional exact-scope PostgreSQL 16 profile |
 | Distributed roles/Kubernetes | no published general-purpose Agent, active-active, or Helm support window |
 

@@ -244,3 +244,67 @@ fn application_listener_requires_product_root_and_explicit_tls_termination()
     assert_eq!(configured.stdout, b"configuration valid\n");
     Ok(())
 }
+
+#[test]
+fn shared_cell_manifest_accepts_two_environments_and_conflicts_with_compact_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    let first = TempDir::new()?;
+    let second = TempDir::new()?;
+    let mut manifest = NamedTempFile::new()?;
+    write!(
+        manifest,
+        "{}",
+        serde_json::json!({
+            "version": 1,
+            "mode": "shared",
+            "memberId": "member_test-01",
+            "environments": [
+                {
+                    "root": first.path(),
+                    "hosts": ["first.runku.test"],
+                    "platformDatabaseUrlFile": null,
+                    "allowedOrigins": [],
+                    "authConfig": null
+                },
+                {
+                    "root": second.path(),
+                    "hosts": ["second.runku.test"],
+                    "platformDatabaseUrlFile": null,
+                    "allowedOrigins": [],
+                    "authConfig": null
+                }
+            ]
+        })
+    )?;
+    let manifest_path = manifest.path().to_str().ok_or("non-UTF-8 temp path")?;
+    let configured = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_CELL_CONFIG", manifest_path),
+        ("RUNKU_APPLICATION_LISTEN", "0.0.0.0:3210"),
+        ("RUNKU_APPLICATION_TLS_TERMINATED", "true"),
+    ])?;
+    assert!(configured.status.success());
+    assert_eq!(configured.stdout, b"configuration valid\n");
+
+    let without_listener = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_CELL_CONFIG", manifest_path),
+    ])?;
+    assert_error(
+        &without_listener,
+        "SERVER_CELL_APPLICATION_LISTENER_REQUIRED",
+    );
+
+    let conflict = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_CELL_CONFIG", manifest_path),
+        (
+            "RUNKU_PRODUCT_ROOT",
+            first.path().to_str().ok_or("non-UTF-8 temp path")?,
+        ),
+        ("RUNKU_APPLICATION_LISTEN", "0.0.0.0:3210"),
+        ("RUNKU_APPLICATION_TLS_TERMINATED", "true"),
+    ])?;
+    assert_error(&conflict, "SERVER_PRODUCT_CONFIGURATION_CONFLICT");
+    Ok(())
+}

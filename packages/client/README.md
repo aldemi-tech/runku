@@ -5,11 +5,11 @@ Framework-independent TypeScript ESM client for Runku HTTP and Realtime protocol
 can inject a WebSocket factory.
 
 ```sh
-npm install @runku/client@0.4.8
+npm install @runku/client@0.5.0
 ```
 
-Client 0.4.8 retains Public Protocol v1 compatibility with the Runku 0.4.7 gateway and adds the
-runtime Function-reference contract required by `@runku/react@0.4.8`.
+Client 0.5.0 retains Public Protocol v1 compatibility and the runtime Function-reference contract
+required by `@runku/react@0.5.0`.
 
 ## Create and type a client
 

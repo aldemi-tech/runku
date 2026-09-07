@@ -36,7 +36,7 @@ Runku is currently pre-release.
 | Environment variables and secrets | Exact-Environment CAS registry, encrypted secret references, value-free audit, Management API, and manifest-gated runtime reads are implemented in the current source line; treat them as pre-release until included in a tag |
 | Cron/Scheduled console authority | Authenticated code-derived Cron catalog, durable per-declaration enable/disable with CAS/operation recovery, and bounded Scheduled Invocation history are implemented over the same SQLite/PostgreSQL authorities; declaration editing and Scheduled retry/cancel remain code/runtime concerns |
 | Console operations telemetry | Authenticated exact-Environment aggregate runtime/cache/worker metrics and sanitized Product component health are implemented and test-covered; diagnostic counters are not billing authority |
-| Compact `runku-server` binary/image for Linux ARM64/x86_64 | Published from tagged releases; composes one Product Environment and Safe V8 |
+| Compact/cell `runku-server` binary/image for Linux ARM64/x86_64 | Same binary composes one compact Environment or a strict shared/dedicated cell member with several warm Environments and Safe V8 |
 | Compact Docker standalone installation | Release-packaged with PostgreSQL, secret files, probes, backup/verify/restore/upgrade, and guarded removal |
 | Embedded Operational Log history | SQLite hot tier, filesystem/S3 Parquet, DuckDB query, safe retention, and live stream implemented and test-covered |
 | Optional HA Operational Log path | Same-package Compose overlay for externally operated NATS/S3 plus explicit failure-path acceptance |
@@ -69,6 +69,7 @@ deployment.
 | Build an operator console over Function/schema catalogs and logical Data Admin | [Data Admin](docs/data/data-and-realtime.md#management-data-admin) |
 | Publish, promote, or roll back code | [Releases and Workspaces](docs/development/releases-and-workspaces.md) |
 | Evaluate self-hosting | [Self-hosting overview](docs/self-hosting/overview.md) |
+| Pack several Environments into one cell member | [Multi-Environment cell profile](docs/self-hosting/cell-profile.md) |
 | Plan and execute a compact deployment | [Self-Hosted deployment guide](docs/self-hosting/deployment-guide.md) |
 | Install the compact self-hosted product | [Docker standalone installation](deployments/docker/README.md) |
 | Operate or recover a local Environment | [Operator handbook](docs/operations/operator-handbook.md) |

@@ -9,7 +9,7 @@ operator's own environment.
 
 ## Compact Docker support decision
 
-Version 0.4.4 supports a forward upgrade from the 0.3.0 compact-installation floor with this exact
+Version 0.5.0 supports a forward upgrade from the 0.3.0 compact-installation floor with this exact
 boundary:
 
 | Area | Included |

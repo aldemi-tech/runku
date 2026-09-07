@@ -33,6 +33,7 @@ use runku_management_service::{
     ManagementResolvedTarget, ManagementScheduledPage, ManagementServingCompatibility,
     ManagementServingRelease, ManagementWorkspacePublish, OidcClientConfiguration,
     build_management_router, build_management_router_with_product,
+    build_management_router_with_products,
 };
 use runku_platform_identity::{
     AccessScope, BootstrapResult, DeviceName, ExternalOperatorIdentity, ManagedSourceAuthority,
@@ -854,6 +855,49 @@ async fn managed_oidc_requires_gateway_secret_and_exposes_linkable_resources()
         followed.as_ref(),
         b"{\"error\":{\"code\":\"PLATFORM_UNAUTHENTICATED\"}}\n"
     );
+    repository.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_product_router_rejects_duplicate_environment_scopes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("multi-product.sqlite3");
+    let repository = Arc::new(
+        SqlPlatformIdentityRepository::connect_sqlite(
+            &format!("sqlite://{}?mode=rwc", database.display()),
+            PlatformIdentityRepositoryConfig::LOCAL,
+        )
+        .await?,
+    );
+    let identity = Arc::new(PlatformIdentityService::new(
+        repository.clone(),
+        Arc::new(PlatformIdentityCrypto::new([51; 32])),
+        SessionTokenPolicy::DEFAULT,
+    )?);
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let product = || {
+        Arc::new(ArchiveStatusProduct {
+            scope,
+            calls: AtomicUsize::new(0),
+            healthy: AtomicBool::new(true),
+        }) as Arc<dyn ManagementProduct>
+    };
+    let result = build_management_router_with_products(
+        ManagementHttpConfig {
+            max_concurrent_requests: 8,
+            exposure: ManagementHttpExposure::LoopbackPlaintext,
+            public_management_endpoint: None,
+            managed_enrollment_key: None,
+            managed_source_authority: None,
+        },
+        identity,
+        None,
+        vec![product(), product()],
+        None,
+    );
+    assert!(matches!(result, Err(PlatformIdentityError::InvalidInput)));
     repository.close().await;
     Ok(())
 }

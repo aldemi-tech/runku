@@ -216,6 +216,11 @@ impl EnvironmentServingResolver for ProductEnvironmentServingResolver {
 pub struct ProductAdapterConfig {
     /// Optional operator-owned application listener behind trusted TLS termination.
     pub trusted_application_listen: Option<std::net::SocketAddr>,
+    /// Bind the Environment gateway only to a process-private ephemeral loopback listener.
+    ///
+    /// Cell mode clones the same router behind its shared Host dispatcher. This flag cannot be
+    /// combined with a public trusted listener.
+    pub embedded_application_listener: bool,
     /// Optional secret PostgreSQL DSN for Environment-scoped Function platform data.
     pub platform_database_url: Option<Zeroizing<String>>,
     /// Optional historical Operational Log archive.
@@ -249,6 +254,9 @@ impl std::fmt::Debug for ProductAdapter {
 impl ProductAdapter {
     #[allow(clippy::too_many_lines)]
     pub async fn open(root: PathBuf, config: ProductAdapterConfig) -> Result<Self, &'static str> {
+        if config.embedded_application_listener && config.trusted_application_listen.is_some() {
+            return Err("SERVER_PRODUCT_LISTENER_CONFIGURATION_INVALID");
+        }
         let (state, paths) = load_local(&root)
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
@@ -342,11 +350,17 @@ impl ProductAdapter {
             process_config: LocalProcessConfig {
                 allowed_origins: config.allowed_origins,
                 auth_config: config.auth_config,
-                listener: config
-                    .trusted_application_listen
-                    .map_or(LocalProcessListener::PersistedLoopback, |address| {
-                        LocalProcessListener::TrustedTlsTermination(address)
-                    }),
+                listener: if config.embedded_application_listener {
+                    LocalProcessListener::ExplicitLoopback(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        0,
+                    )))
+                } else {
+                    config.trusted_application_listen.map_or(
+                        LocalProcessListener::PersistedLoopback,
+                        LocalProcessListener::TrustedTlsTermination,
+                    )
+                },
                 file_object_store: config.file_object_store,
                 data_store: Some(Arc::clone(&data_store)),
                 environment_serving_resolver: Some(environment_serving_resolver),
@@ -396,6 +410,11 @@ impl ProductAdapter {
         if let Some(process) = self.process.lock().await.take() {
             process.shutdown().await;
         }
+    }
+
+    /// Clones the warm Product router when this Environment is currently serving.
+    pub(crate) async fn application_router(&self) -> Option<axum::Router> {
+        self.process.lock().await.as_ref().map(LocalProcess::router)
     }
 
     /// Builds the always-available Product S3 route over the same storage authority as Management.
@@ -3806,6 +3825,7 @@ export const hourly = cron({
             root.to_path_buf(),
             ProductAdapterConfig {
                 trusted_application_listen: None,
+                embedded_application_listener: false,
                 platform_database_url: None,
                 log_archive: None,
                 log_journal: None,
@@ -4977,6 +4997,7 @@ export const hourly = cron({
                 directory.path().to_path_buf(),
                 ProductAdapterConfig {
                     trusted_application_listen: None,
+                    embedded_application_listener: false,
                     platform_database_url: Some(Zeroizing::new(database_url)),
                     log_archive: None,
                     log_journal: None,

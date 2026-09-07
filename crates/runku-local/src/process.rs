@@ -69,6 +69,11 @@ pub enum LocalProcessListener {
     /// Bind the loopback address persisted by local `init`/`link`.
     #[default]
     PersistedLoopback,
+    /// Bind an explicit loopback address selected by an embedding cell process.
+    ///
+    /// Port zero is allowed so several Environments can expose their routers inside one process
+    /// without claiming that the internal listener is protected by external TLS termination.
+    ExplicitLoopback(SocketAddr),
     /// Bind an operator-owned address behind a trusted TLS termination boundary.
     TrustedTlsTermination(SocketAddr),
 }
@@ -301,6 +306,7 @@ impl LocalProcessTelemetry {
 pub struct LocalProcess {
     state: LocalProjectState,
     address: SocketAddr,
+    router: Router,
     service: Arc<ProductInvocationService>,
     logical_store: Arc<dyn LogicalStore>,
     registry: SubscriptionRegistry,
@@ -418,6 +424,12 @@ impl LocalProcess {
                 }
                 state.listen_address
             }
+            LocalProcessListener::ExplicitLoopback(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(LocalProcessError::InvalidConfiguration);
+                }
+                address
+            }
             LocalProcessListener::TrustedTlsTermination(address) => address,
         };
         let listener = TcpListener::bind(listen_address)
@@ -426,8 +438,10 @@ impl LocalProcess {
         let address = listener
             .local_addr()
             .map_err(|_| LocalProcessError::ListenerUnavailable)?;
-        if matches!(config.listener, LocalProcessListener::PersistedLoopback)
-            && !address.ip().is_loopback()
+        if matches!(
+            config.listener,
+            LocalProcessListener::PersistedLoopback | LocalProcessListener::ExplicitLoopback(_)
+        ) && !address.ip().is_loopback()
         {
             return Err(LocalProcessError::InvalidConfiguration);
         }
@@ -668,7 +682,7 @@ impl LocalProcess {
         let mut log_maintenance_tasks = Vec::with_capacity(1);
         tasks.push(spawn_server(
             listener,
-            router,
+            router.clone(),
             shutdown.subscribe(),
             Arc::clone(&ready),
         ));
@@ -767,6 +781,7 @@ impl LocalProcess {
         Ok(Self {
             state,
             address,
+            router,
             service,
             logical_store,
             registry,
@@ -807,6 +822,14 @@ impl LocalProcess {
     #[must_use]
     pub fn service(&self) -> &Arc<ProductInvocationService> {
         &self.service
+    }
+
+    /// Clones the already-composed Environment router for an embedding cell ingress.
+    ///
+    /// The returned service preserves the same exact-scope identity, CORS, admission, file,
+    /// Realtime, and health middleware as the Environment's private loopback listener.
+    pub fn router(&self) -> Router {
+        self.router.clone()
     }
 
     /// Performs a lightweight check against the selected authoritative Product data store.

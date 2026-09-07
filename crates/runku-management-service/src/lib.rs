@@ -45,5 +45,5 @@ pub use product::{
 pub use router::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementHttpConfig,
     ManagementHttpExposure, build_management_router, build_management_router_with_product,
-    serve_management,
+    build_management_router_with_products, serve_management,
 };

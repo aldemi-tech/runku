@@ -1,7 +1,11 @@
 //! Platform Identity HTTP routes and strict transport boundary.
 
 use std::{
-    collections::BTreeSet, convert::Infallible, future::Future, str::FromStr as _, sync::Arc,
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    future::Future,
+    str::FromStr as _,
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -142,7 +146,7 @@ pub trait ExternalIdentityAuthenticator: std::fmt::Debug + Send + Sync {
 struct HttpState {
     identity: Arc<PlatformIdentityService>,
     external: Option<Arc<dyn ExternalIdentityAuthenticator>>,
-    product: Option<Arc<dyn ManagementProduct>>,
+    products: Arc<BTreeMap<EnvironmentScope, Arc<dyn ManagementProduct>>>,
     oidc_client: Option<OidcClientConfiguration>,
     public_management_endpoint: Option<String>,
     managed_enrollment_key: Option<ManagedEnrollmentKey>,
@@ -176,6 +180,31 @@ pub fn build_management_router_with_product(
     product: Option<Arc<dyn ManagementProduct>>,
     oidc_client: Option<OidcClientConfiguration>,
 ) -> Result<Router, PlatformIdentityError> {
+    build_management_router_with_products(
+        config,
+        identity,
+        external,
+        product.into_iter().collect(),
+        oidc_client,
+    )
+}
+
+/// Builds Platform Identity plus authenticated lifecycle routes for multiple Product Environments.
+///
+/// Products are indexed only by the exact scope returned by their adapter. Duplicate scopes fail
+/// before the router is exposed, and request path authorization still occurs before lookup.
+///
+/// # Errors
+///
+/// Rejects invalid transport bounds, OIDC combinations, or duplicate Product scopes.
+#[allow(clippy::too_many_lines)]
+pub fn build_management_router_with_products(
+    config: ManagementHttpConfig,
+    identity: Arc<PlatformIdentityService>,
+    external: Option<Arc<dyn ExternalIdentityAuthenticator>>,
+    products: Vec<Arc<dyn ManagementProduct>>,
+    oidc_client: Option<OidcClientConfiguration>,
+) -> Result<Router, PlatformIdentityError> {
     config.validate()?;
     if oidc_client.is_some() && external.is_none() {
         return Err(PlatformIdentityError::InvalidInput);
@@ -183,10 +212,16 @@ pub fn build_management_router_with_product(
     if let Some(client) = &oidc_client {
         validate_oidc_client(client)?;
     }
+    let mut products_by_scope = BTreeMap::new();
+    for product in products {
+        if products_by_scope.insert(product.scope(), product).is_some() {
+            return Err(PlatformIdentityError::InvalidInput);
+        }
+    }
     let state = HttpState {
         identity,
         external,
-        product,
+        products: Arc::new(products_by_scope),
         oidc_client,
         public_management_endpoint: config.public_management_endpoint,
         managed_enrollment_key: config.managed_enrollment_key,
@@ -2469,12 +2504,10 @@ async fn product_context(
         .authorize(AccessScope::Environment(scope), capability)
         .map_err(|error| Box::new(failure(error)))?;
     let product = state
-        .product
-        .clone()
+        .products
+        .get(&scope)
+        .cloned()
         .ok_or_else(|| Box::new(failure(PlatformIdentityError::NotFound)))?;
-    if product.scope() != scope {
-        return Err(Box::new(failure(PlatformIdentityError::NotFound)));
-    }
     Ok((product, context))
 }
 
@@ -3039,8 +3072,8 @@ async fn resources(State(state): State<HttpState>, headers: HeaderMap) -> Respon
         Err(error) => return failure(error),
     };
     let resources = state
-        .product
-        .as_ref()
+        .products
+        .values()
         .filter(|product| {
             context
                 .authorize(
@@ -3058,7 +3091,6 @@ async fn resources(State(state): State<HttpState>, headers: HeaderMap) -> Respon
                 environment_name: scope.environment_id().to_string(),
             }
         })
-        .into_iter()
         .collect();
     json(
         StatusCode::OK,
@@ -3505,10 +3537,10 @@ async fn ready(State(state): State<HttpState>) -> Response {
     if let Err(error) = state.identity.health().await {
         return failure(error);
     }
-    if let Some(product) = &state.product
-        && product.health().await.is_err()
-    {
-        return failure(PlatformIdentityError::Unavailable);
+    for product in state.products.values() {
+        if product.health().await.is_err() {
+            return failure(PlatformIdentityError::Unavailable);
+        }
     }
     StatusCode::NO_CONTENT.into_response()
 }

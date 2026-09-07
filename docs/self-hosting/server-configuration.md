@@ -43,6 +43,7 @@ Protect file creation, ownership, backup, rotation, and deletion independently f
 | `RUNKU_MANAGEMENT_TLS_TERMINATED` | `false` | `true` asserts an external trusted TLS boundary; non-loopback plaintext is rejected |
 | `RUNKU_PUBLIC_MANAGEMENT_URL` | optional | canonical HTTPS origin, or allowed literal-loopback HTTP origin, advertised to clients |
 | `RUNKU_PRODUCT_ROOT` | optional | absolute non-root initialized Product directory; without it, only Platform Identity/Management runs |
+| `RUNKU_CELL_CONFIG` | optional | absolute strict multi-Environment cell manifest; mutually exclusive with `RUNKU_PRODUCT_ROOT` |
 
 The public Management URL cannot contain credentials, query, fragment, or an unrelated path. CLI
 discovery treats Authentication and Management origins as trust configuration and does not follow
@@ -51,6 +52,12 @@ redirects.
 The compact package sets a Product root and initializes its listener as `127.0.0.1:3210`. Product
 HTTP starts lazily after an eligible Channel exists; the Management probe remains the container
 readiness signal.
+
+For a shared or dedicated cell member, `RUNKU_CELL_CONFIG` moves each root, host set, optional
+Product database secret, origins, and auth config into one versioned manifest. A cell requires
+`RUNKU_APPLICATION_LISTEN` plus `RUNKU_APPLICATION_TLS_TERMINATED=true`. See the
+[Multi-Environment cell profile](cell-profile.md) for the schema, routing, isolation, capacity, and
+single-active-writer constraints.
 
 ## Optional Product logical PostgreSQL
 

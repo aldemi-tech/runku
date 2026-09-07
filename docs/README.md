@@ -89,15 +89,18 @@ Read in this order:
 3. [Docker package](../deployments/docker/README.md) — exact package commands and profiles.
 4. [Server configuration](self-hosting/server-configuration.md) — `runku-server` commands,
    listeners, identity, Product database, browser auth, logs, and validation.
-5. [Storage configuration](self-hosting/storage-configuration.md) — filesystem or external
+5. [Multi-Environment cell profile](self-hosting/cell-profile.md) — shared/dedicated process
+   packing, Host routing, warm affinity, state isolation, and the single-writer boundary.
+6. [Storage configuration](self-hosting/storage-configuration.md) — filesystem or external
    object-store parameters, capacity, credentials, canaries, backup, restore, and backend changes.
-6. [Function data PostgreSQL](self-hosting/product-postgresql.md) — optional Environment-scoped
+7. [Function data PostgreSQL](self-hosting/product-postgresql.md) — optional Environment-scoped
    document/index/outbox/schedule database and its recovery boundary.
-7. [Production readiness](self-hosting/production-readiness.md) — explicit go/no-go criteria.
+8. [Production readiness](self-hosting/production-readiness.md) — explicit go/no-go criteria.
 
-The current supported package is a compact non-root `runku-server` plus Docker Compose for one
-initialized Safe V8 Product Environment. Repository assets for separated general-purpose roles,
-Kubernetes, and VM-isolated shared Full Node are not a supported Helm/cluster distribution.
+The release binary/image also implements the 0.5 shared/dedicated cell-member composition. The
+turnkey Docker Compose package remains the compact one-Environment profile; provider controllers,
+Kubernetes packaging, active-active Product writers, and VM-isolated shared Full Node remain
+separate qualification work.
 
 ## Operate Self-Hosted
 

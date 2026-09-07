@@ -14,12 +14,11 @@ lossless server-to-client hydration.
 Install the React binding together with the client:
 
 ```sh
-pnpm add @runku/react@0.4.8 @runku/client@0.4.8
+pnpm add @runku/react@0.5.0 @runku/client@0.5.0
 ```
 
-The 0.4.8 pair retains Public Protocol v1 compatibility with the Runku 0.4.7 gateway. The published
-0.4.7 CLI predates runtime Function-reference generation; until a later coordinated distribution
-includes it, generate the reference modules with the current source CLI.
+The coordinated 0.5.0 distribution retains Public Protocol v1 and includes the CLI runtime
+Function-reference generator.
 
 ## Generated Function references
 

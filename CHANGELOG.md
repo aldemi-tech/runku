@@ -2,6 +2,36 @@
 
 All notable changes are documented in this file.
 
+## 0.5.0 - 2026-09-07
+
+### Added
+
+- Added a strict versioned cell manifest so one `runku-server` process can open and preheat several
+  independent Product Environments in `shared` mode, or validate exactly one in `dedicated` mode.
+- Added one Host-dispatched application listener with fail-closed canonical routing and exact
+  Project/Environment dispatch for the Management adapter.
+- Added process-level isolation coverage proving two warm Environments serve their own Release and
+  Application Key while rejecting a cross-Environment key.
+
+### Operations and security
+
+- Host chooses only the candidate Product. Existing Product key, functional identity, scope, CORS,
+  Release, and data authorization execute after routing; forwarded-host headers never become
+  tenant authority.
+- Cell manifests require unique Product roots and hosts. Optional per-Environment PostgreSQL
+  targets must be unique and distinct from Platform Identity.
+- Shared placement remains one active writer per Environment. Version 0.5 does not claim
+  active-active Product state; an external fleet controller must fence replacement members and may
+  use warm-member affinity instead of blind round-robin.
+
+### Compatibility
+
+- `RUNKU_CELL_CONFIG` is additive and mutually exclusive with the existing compact
+  `RUNKU_PRODUCT_ROOT` profile. Cell assignment changes require a graceful restart in 0.5.
+- Public HTTP/WebSocket v1 and Product persisted formats are unchanged. The 0.5 coordinated
+  distribution brings the CLI, Function SDK, frontend SDK pair, compact server, and OCI image to
+  the same version.
+
 ## Frontend SDK 0.4.8 - 2026-09-06
 
 ### Added
