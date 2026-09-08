@@ -20,7 +20,8 @@ runku --help
 
 Supported released targets are macOS ARM64/x86-64, Linux GNU ARM64/x86-64, and Windows
 ARM64/x86-64. npm optional dependencies install the matching native executable. Installation with
-optional dependencies disabled cannot run the CLI.
+optional dependencies disabled cannot run the CLI. Linux GNU archives and native npm packages
+require glibc 2.31 or newer and are executed on that pinned baseline before publication.
 
 ## Choose the workflow
 

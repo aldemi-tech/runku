@@ -1,6 +1,8 @@
 # Runku Server
 
 This archive contains the Linux `runku-server` binary for the compact Runku Self-Hosted profile.
+The downloadable binary requires glibc 2.31 or newer and is executed on that pinned runtime during
+the release workflow. The OCI image carries its own compatible runtime libraries.
 It composes PostgreSQL-backed Platform Identity and one explicitly attached Product Environment.
 That Environment can optionally use a separate exact-scope PostgreSQL database for transactional
 Function data through `RUNKU_PLATFORM_DATABASE_URL_FILE`.

@@ -173,6 +173,10 @@ campaign evidence. Do not use a candidate run to infer that npm packages or the 
 exist. The final `vX.Y.Z` tag remains forbidden until every required local and remote scenario has
 passed and the release owner separately approves the coordinated publication.
 
+The retained `0.5.1` candidate record is
+[`v0.5.1-candidate-evidence.md`](v0.5.1-candidate-evidence.md). Future candidate records must retain
+the same distinction between Product conformance, hosted artifact completion, and final publication.
+
 ## Trigger and workflow
 
 After review and CI success:
@@ -198,10 +202,12 @@ git push origin sdk-vX.Y.Z
 3. `selfhost-package` creates the compact installation archive and statically validates its Compose
    model without starting services.
 4. Six `cli-binaries` jobs run concurrently on native ARM64/x86_64 macOS, Linux, and Windows
-   runners. Each builds only `runku-cli --release --locked`, then checks `--version`, `--help`,
+   runners. Linux builds execute in a digest-pinned Debian Bullseye container and must run on its
+   glibc 2.31 runtime; the other platforms build natively. Each job checks `--version`, `--help`,
    package content, and archive creation.
-5. Two `server-binaries` jobs build and smoke-check `runku-server` natively on Linux GNU ARM64 and
-   x86_64 and produce downloadable archives plus exact image inputs.
+5. Two `server-binaries` jobs build and smoke-check `runku-server` on the same pinned Linux GNU
+   glibc 2.31 baseline for ARM64 and x86_64, then produce downloadable archives plus exact image
+   inputs. C++ compilation is bounded to two concurrent jobs so DuckDB cannot exhaust runner RAM.
 6. On a manual pre-tag run, `selfhost-artifact-smoke` assembles the Linux x86_64 image and runs the
    bounded install/lifecycle/disaster-restore campaign. It is skipped on tags because the reviewed
    commit already supplied this behavioral evidence.

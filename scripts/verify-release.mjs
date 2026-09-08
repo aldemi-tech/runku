@@ -24,6 +24,8 @@ assertVersion("runku-cli Cargo package", cargoVersion, version)
 const serverCargoManifest = read("crates/runku-server/Cargo.toml")
 const serverCargoVersion = serverCargoManifest.match(/^version = "([^"]+)"$/m)?.[1]
 assertVersion("runku-server Cargo package", serverCargoVersion, version)
+const rustToolchain = read("rust-toolchain.toml").match(/^channel = "([^"]+)"$/m)?.[1]
+if (!rustToolchain) throw new Error("rust-toolchain.toml does not declare a channel")
 
 const cliSource = read("crates/runku-cli/src/lib.rs")
 if (!cliSource.includes(`runku ${version}\\n`)) {
@@ -44,6 +46,7 @@ const releaseWorkflow = read(".github/workflows/release.yml")
 const cliWorkflow = section(releaseWorkflow, "  cli-binaries:", "  server-binaries:")
 const serverWorkflow = section(releaseWorkflow, "  server-binaries:", "  server-image:")
 const installGuide = read("docs/getting-started/local-development.md")
+const linuxReleaseBuilder = read("scripts/build-linux-gnu-release.sh")
 
 for (const platform of releasePlatforms) {
   const nativePackage = readJson(`${platform.packageDirectory}/package.json`)
@@ -69,6 +72,28 @@ for (const platform of releasePlatforms) {
 for (const target of ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]) {
   assertOccursOnce("server release workflow target", serverWorkflow, `target: ${target}`)
 }
+assertContains(
+  "CLI GNU/Linux compatibility build",
+  cliWorkflow,
+  './scripts/build-linux-gnu-release.sh runku-cli "$VERSION"',
+)
+assertContains(
+  "server GNU/Linux compatibility build",
+  serverWorkflow,
+  './scripts/build-linux-gnu-release.sh runku-server "$VERSION"',
+)
+assertContains(
+  "pinned GNU/Linux release builder",
+  linuxReleaseBuilder,
+  "rust:1.98-bullseye@sha256:4730e387a220a08a365c77da3096544dde214f9d796c16284d4be45438cad4a9",
+)
+assertContains(
+  "GNU/Linux builder Rust toolchain",
+  linuxReleaseBuilder,
+  `rust_toolchain="${rustToolchain}"`,
+)
+assertContains("bounded GNU/Linux C++ build concurrency", linuxReleaseBuilder, "CARGO_BUILD_JOBS=2")
+assertContains("GNU/Linux baseline runtime smoke", linuxReleaseBuilder, '"$builder_image" /artifact')
 assertContains(
   "server image workflow",
   releaseWorkflow,

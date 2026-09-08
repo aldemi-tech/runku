@@ -9,9 +9,10 @@ npm install --global @runku/cli
 runku --version
 ```
 
-Supported combinations are macOS, Linux GNU, and Windows on ARM64 and x86_64. Node.js is required
-to launch an npm installation. Direct archives from the matching GitHub Release execute without
-Node.js.
+Supported combinations are macOS, Linux GNU, and Windows on ARM64 and x86_64. Linux GNU requires
+glibc 2.31 or newer; release artifacts are built and executed on that pinned baseline. Node.js is
+required to launch an npm installation. Direct archives from the matching GitHub Release execute
+without Node.js.
 
 Do not install with optional dependencies disabled. If an installation policy omits optional
 dependencies, use a direct release archive and verify it against `SHA256SUMS`.

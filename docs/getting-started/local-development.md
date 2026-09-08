@@ -33,6 +33,10 @@ requires Node.js; the native executable does not.
 | Windows | ARM64 | `aarch64-pc-windows-msvc` | `@runku/cli-win32-arm64-msvc` | `.zip` |
 | Windows | x86_64 | `x86_64-pc-windows-msvc` | `@runku/cli-win32-x64-msvc` | `.zip` |
 
+The downloadable Linux GNU binaries use a digest-pinned Debian Bullseye build and runtime gate.
+They support glibc 2.31 or newer on ARM64 and x86_64, including Amazon Linux 2023. This minimum is
+independent of the newer Ubuntu image used to host the release job.
+
 Linux musl, Windows 32-bit x86, and other combinations are not release targets. The release gate
 compiles and executes `--version` and `--help` natively on every row; broader application behavior
 continues to be covered by the ordinary repository CI.

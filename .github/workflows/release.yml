@@ -197,8 +197,13 @@ jobs:
           if ($hostTriple -ne '${{ matrix.target }}') {
             throw "runner Rust host $hostTriple does not match ${{ matrix.target }}"
           }
-      - name: Build only the CLI release binary
-        if: runner.os != 'Windows'
+      - name: Build the CLI on the pinned GNU/Linux compatibility baseline
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: ./scripts/build-linux-gnu-release.sh runku-cli "$VERSION"
+      - name: Build only the native macOS CLI release binary
+        if: runner.os == 'macOS'
         run: cargo build --package runku-cli --release --locked
       - name: Build the CLI with the verified DuckDB runtime
         if: runner.os == 'Windows'
@@ -291,8 +296,10 @@ jobs:
         run: |
           host_triple="$(rustc -vV | sed -n 's/^host: //p')"
           test "$host_triple" = '${{ matrix.target }}'
-      - name: Build only the server release binary
-        run: cargo build --package runku-server --release --locked
+      - name: Build the server on the pinned GNU/Linux compatibility baseline
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: ./scripts/build-linux-gnu-release.sh runku-server "$VERSION"
       - name: Run basic server validation
         run: test "$(target/release/runku-server version)" = 'runku-server ${{ needs.metadata.outputs.version }}'
       - name: Prepare server archive and image input

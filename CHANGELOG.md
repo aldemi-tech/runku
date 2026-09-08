@@ -31,6 +31,11 @@ All notable changes are documented in this file.
 - This source state is an OCI-only `0.5.1` candidate for local and remote conformance. It does not
   publish `@runku/client`, `@runku/react`, `@runku/server`, `@runku/cli`, a Git tag, or a GitHub
   Release. The published frontend SDK remains `0.5.0` until the complete campaign passes.
+- Linux GNU CLI/server artifacts now build and execute on a digest-pinned glibc 2.31 baseline with
+  bounded DuckDB C++ concurrency, rather than inheriting the newer glibc of the hosted runner.
+- The exact candidate image, schema/Release coexistence, rollback/retirement, 5 GiB + 1 byte
+  multipart object, incident recovery, and cleanup evidence are recorded in
+  [`docs/maintainers/v0.5.1-candidate-evidence.md`](docs/maintainers/v0.5.1-candidate-evidence.md).
 - Downgrade after applying the new append-only Product schemas is unsupported. Take and verify a
   coordinated backup before upgrading a cell.
 
