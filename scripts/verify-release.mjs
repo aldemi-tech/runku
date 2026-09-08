@@ -78,6 +78,11 @@ assertContains(
   './scripts/build-linux-gnu-release.sh runku-cli "$VERSION"',
 )
 assertContains(
+  "bounded macOS Intel release job",
+  cliWorkflow,
+  "if: matrix.target != 'x86_64-apple-darwin'",
+)
+assertContains(
   "server GNU/Linux compatibility build",
   serverWorkflow,
   './scripts/build-linux-gnu-release.sh runku-server "$VERSION"',

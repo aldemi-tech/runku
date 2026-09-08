@@ -174,7 +174,7 @@ jobs:
             duckdb_sha256: 8375eb1fcf2212e8a0817950354815d4dde9dd383c2d9fa7b8975b71e278c1bd
     runs-on: ${{ matrix.runner }}
     name: cli-binaries (${{ matrix.target }})
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -186,10 +186,16 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: release-cli-deps-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
-            release-cli-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+            release-cli-deps-${{ matrix.target }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.target != 'x86_64-apple-darwin'
+        with:
+          path: target
+          key: release-cli-target-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-cli-target-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Verify native Rust host
         shell: pwsh
         run: |

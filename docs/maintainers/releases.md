@@ -233,8 +233,10 @@ release latency without changing the source. The release gate proves native comp
 metadata, package shape, byte identity, and publication.
 
 Cargo registry, Git dependencies, and the target directory are cached per exact native target and
-lock/toolchain hash. Matrix jobs remain independent and `fail-fast` is disabled so one platform
-failure does not hide evidence from the other five.
+lock/toolchain hash. macOS Intel deliberately caches only Cargo registry/Git inputs: its large
+`target` tree took longer to upload than it saved and could consume the job's post-build timeout
+after the required artifact had already passed. Matrix jobs remain independent and `fail-fast` is
+disabled so one platform failure does not hide evidence from the other five.
 
 ## Distribution success verification
 
