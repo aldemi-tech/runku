@@ -78,6 +78,12 @@ policy, Cron activations, and pending/running schedules no longer retain the exa
 
 ## Explicit local lifecycle
 
+The named `make release-schema-coexistence-check` campaign proves the 0.5.1 candidate boundary in
+one repeatable gate: two compatible Release schemas across Channels/rollback, a real V8 Function
+read and old-Release replace that preserves a newer field, revision-bound serving evidence, and
+streaming multipart composition. It deliberately keeps external databases, Docker, and browsers
+out of the ordinary hosted check.
+
 ```sh
 runku build
 runku publish --manifest PATH_FROM_BUILD --artifact PATH_FROM_BUILD \

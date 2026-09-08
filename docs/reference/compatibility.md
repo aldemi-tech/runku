@@ -11,9 +11,11 @@ silently falls back to `latest`, another Release, a weaker runtime, or a differe
 
 ## Current distribution matrix
 
-The coordinated product distribution and frontend SDK pair report version `0.5.0`. Neither has
-established a general stable compatibility window. Version 0.3.0 is the first supported compact
-Docker installation floor; 0.5.0 supports a deliberate forward upgrade from that floor.
+The latest published coordinated product distribution and frontend SDK pair report version
+`0.5.0`. The source tree is preparing an OCI-only `0.5.1` candidate; it is not a published SDK,
+CLI, Git tag, GitHub Release, or final distribution. Neither track has established a general stable
+compatibility window. Version 0.3.0 is the first supported compact Docker installation floor;
+0.5.0 supports a deliberate forward upgrade from that floor.
 Product tags coordinate the CLI, Function SDK, Linux compact server binaries, and compact server
 image. Frontend SDK tags coordinate client and React only. Agent, distributed deployment, protocol,
 storage, and runtime support windows remain separate distribution gates.
@@ -36,7 +38,8 @@ active writer per Environment: it does not provide same-Environment active-activ
 scheduler fencing, or a Kubernetes control plane. Provider fleets may prefer the currently
 assigned warm member, but must fence it before replacement.
 
-Version 0.5.1 adds Release-scoped document read views and non-destructive full replace semantics.
+The 0.5.1 candidate adds Release-scoped document read views and non-destructive full replace
+semantics.
 Freeze and Channel movement check every `servable`/`active`/`deprecated` Release, including
 Releases reachable only by an explicit target. Optional field addition/hiding can coexist across named Channels and a
 weighted policy; reads project the selected view and an older replacement preserves newer unknown
@@ -95,7 +98,7 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout is not identified by `0.5.0` alone |
+| Source CLI | Record the Git commit; a modified checkout or 0.5.1 candidate is not identified by a published version alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
 | Frontend SDK packages | `@runku/client` and `@runku/react` update together with exact peer versions; currently 0.5.0 |

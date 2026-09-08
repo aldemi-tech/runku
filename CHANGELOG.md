@@ -2,6 +2,38 @@
 
 All notable changes are documented in this file.
 
+## 0.5.1 candidate - 2026-09-08
+
+### Added
+
+- Added Release-scoped document views so optional schema fields can coexist across active Releases,
+  named Channels, exact targets, and weighted rollout policies over the same stored data.
+- Added a coherent Delivery snapshot, revision-bound compatibility preflight, directional Release
+  diff, detailed Release evidence, active-reason projection, and fenced Release retirement.
+- Added streaming Object Storage composition and reads. S3 multipart now accepts up to 10,000 parts,
+  64 MiB per transfer request, and an object up to the bucket quota with an absolute 5 TiB ceiling.
+
+### Changed
+
+- Reads project the schema of the selected Release. A full replace from an older compatible Release
+  preserves fields that exist only in newer active schemas instead of deleting stored data.
+- Freeze, Channel movement, rollout, rollback, and retirement evaluate the complete serving closure,
+  including deprecated Releases and Releases reachable only through an exact target.
+- Management and Console direct object uploads remain bounded to 64 MiB per request; larger objects
+  use the streaming S3 multipart contract. Function `Uint8Array` values remain bounded to 16 MiB.
+
+### Compatibility, rollout, and publication
+
+- Adding or hiding an optional field is compatible. Adding a required field, changing a shared
+  field contract, or changing index/Cron contracts without readiness evidence fails closed.
+- Candidate preflight binds its evidence to both Release-serving and serving-policy revisions, so a
+  stale compatibility result cannot authorize a later rollout.
+- This source state is an OCI-only `0.5.1` candidate for local and remote conformance. It does not
+  publish `@runku/client`, `@runku/react`, `@runku/server`, `@runku/cli`, a Git tag, or a GitHub
+  Release. The published frontend SDK remains `0.5.0` until the complete campaign passes.
+- Downgrade after applying the new append-only Product schemas is unsupported. Take and verify a
+  coordinated backup before upgrading a cell.
+
 ## 0.5.0 - 2026-09-07
 
 ### Added
