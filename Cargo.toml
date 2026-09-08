@@ -63,7 +63,7 @@ axum = { version = "=0.8.9", default-features = false, features = ["http1", "htt
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 bytes = "=1.12.1"
 duckdb = { version = "=1.10505.0", default-features = false }
-deno_core = "=0.410.0"
+deno_core = "=0.411.0"
 deno_ast = { version = "=0.53.3", features = ["transpiling"] }
 swc_ecma_transforms_module = "=33.0.0"
 deno_error = "=0.7.1"
