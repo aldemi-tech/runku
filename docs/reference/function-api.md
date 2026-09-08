@@ -435,6 +435,15 @@ as an uncertain result and reconcile with the remote service before repeating a 
 
 **Self-Hosted availability:** the compact server currently returns `ACTION_HTTPS_UNAVAILABLE`.
 
+**Large-body gate:** `body` and the returned `body` are byte arrays copied across the current
+runtime broker. They are not streams and the 16 MiB hard ceiling is not raised by configuring file
+or object limits. A backward-compatible Application File/Object handle mode is a production
+readiness requirement, not an available field in this API. It must bind the exact Environment and
+immutable object, require both the relevant storage and network capabilities, stream with bounded
+memory, enforce size/digest/deadline/cancellation, and retain uncertain external-effect recovery.
+Until that contract and a compatible broker profile ship, transfer large bytes through Application
+File grants or Runku Object Storage multipart outside the Function envelope.
+
 ## Action file API
 
 `storage:read` adds:

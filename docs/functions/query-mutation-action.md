@@ -322,6 +322,14 @@ The mediated contract bounds request/response bodies to at most 16 MiB, header a
 KiB/256 values, an idempotency key to 128 bytes, and a call to at most one minute; deployment policy
 may be stricter.
 
+Do not raise the byte-array limit to move large payloads through the V8 heap. The current HTTPS
+wire/runtime has no streaming or Application File/Object handle body mode, and compact Self-Hosted
+still has no broker. A production large-body path remains gated on an additive handle contract that
+authorizes an immutable Environment-scoped object, streams it through the egress broker, stores or
+streams the response under an explicit quota, propagates cancellation, verifies size/digest, and
+preserves Action uncertain-effect semantics. Use Application File grants or Runku Object Storage
+multipart as the implemented large-byte path outside the Function envelope.
+
 ## Authentication and visibility
 
 Authentication identifies the functional principal. It does not replace document authorization.

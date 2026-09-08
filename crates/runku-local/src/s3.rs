@@ -3,8 +3,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
+    ops::Range,
     str::FromStr,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -18,7 +19,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, KeyInit as _, Mac};
 use runku_core::{EnvironmentScope, OperationId, RequestId};
-use runku_file_storage::{FileObjectStore, FileStorageError};
+use runku_file_storage::{FileObjectStore, FileStorageError, LogicalObjectPart};
 use runku_object_storage::{
     AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket, BucketName, BucketPolicy,
     BucketState, CorsMethod, DeleteObjectCommand, MultipartPart, MultipartUpload,
@@ -26,6 +27,7 @@ use runku_object_storage::{
     ObjectStorageError, ObjectStorageService, ObjectVersionId, ObjectVersionPageRequest,
     PutObjectCommand,
 };
+use runku_runtime::CancellationToken;
 use runku_value::TimestampMicros;
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -37,6 +39,9 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HEADER_VALUES: usize = 96;
 const MAX_PRESIGN_SECONDS: i64 = 604_800;
 const CLOCK_SKEW_MICROS: i64 = 900_000_000;
+const MAX_MULTIPART_COMPLETION_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_S3_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+const OBJECT_STREAM_DEADLINE: Duration = Duration::from_hours(24);
 
 /// Exact Product authority and physical byte adapter exposed through the S3 protocol.
 #[derive(Clone)]
@@ -49,7 +54,9 @@ pub struct S3ProductConfig {
     pub bytes: FileObjectStore,
     /// Logical customer-visible signing region.
     pub logical_region: String,
-    /// Maximum bytes accepted by one non-multipart PUT.
+    /// Maximum bytes buffered and accepted by one PUT or `UploadPart` request.
+    pub max_single_put_bytes: u64,
+    /// Maximum bytes accepted for one completed object, including multipart composition.
     pub max_object_bytes: u64,
 }
 
@@ -61,6 +68,7 @@ impl std::fmt::Debug for S3ProductConfig {
             .field("service", &self.service)
             .field("bytes", &self.bytes)
             .field("logical_region", &self.logical_region)
+            .field("max_single_put_bytes", &self.max_single_put_bytes)
             .field("max_object_bytes", &self.max_object_bytes)
             .finish()
     }
@@ -74,8 +82,10 @@ impl S3ProductConfig {
                 .logical_region
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            || self.max_object_bytes == 0
-            || self.max_object_bytes > 5 * 1024 * 1024 * 1024
+            || self.max_single_put_bytes == 0
+            || self.max_single_put_bytes > 5 * 1024 * 1024 * 1024
+            || self.max_object_bytes < self.max_single_put_bytes
+            || self.max_object_bytes > MAX_S3_OBJECT_BYTES
         {
             Err(ObjectStorageError::InvalidInput)
         } else {
@@ -150,7 +160,15 @@ async fn handle(
     let method = request.method().clone();
     let uri = request.uri().clone();
     let headers = request.headers().clone();
-    let maximum = usize::try_from(state.0.max_object_bytes).unwrap_or(usize::MAX);
+    let query = query_pairs(&uri);
+    let multipart_requested = query.iter().any(|(name, _)| name == "uploadId");
+    let maximum = if method == Method::PUT {
+        usize::try_from(state.0.max_single_put_bytes).unwrap_or(usize::MAX)
+    } else if method == Method::POST && multipart_requested {
+        MAX_MULTIPART_COMPLETION_BODY_BYTES
+    } else {
+        0
+    };
     let body = if matches!(method, Method::PUT | Method::POST) {
         match to_bytes(request.into_body(), maximum).await {
             Ok(bytes) => bytes,
@@ -165,8 +183,6 @@ async fn handle(
         Err(error) => return s3_error(request_id, error.status, error.code),
     };
     let key = key.as_deref();
-    let query = query_pairs(&uri);
-    let multipart_requested = query.iter().any(|(name, _)| name == "uploadId");
     let operation = match (&method, key, headers.get("x-amz-copy-source")) {
         (&Method::GET, None, _) => AccessKeyOperation::List,
         (&Method::GET, Some(_), _) if multipart_requested => AccessKeyOperation::List,
@@ -1262,10 +1278,6 @@ async fn get_object(
         object_headers(response.headers_mut(), &object);
         return response;
     }
-    let bytes = match read_bytes(config, bucket, &object).await {
-        Ok(value) => value,
-        Err(response) => return s3_error(request_id, response.0, response.1),
-    };
     let Ok(range) = requested_range(headers, object.size, &object) else {
         let mut response = s3_error(
             request_id,
@@ -1277,13 +1289,30 @@ async fn get_object(
         }
         return response;
     };
-    let selected = range
-        .map(|(start, end)| bytes.slice(start..end))
-        .unwrap_or(bytes);
-    let mut response = Response::new(if head_only {
-        Body::empty()
+    let stream = if head_only {
+        None
     } else {
-        Body::from(selected.clone())
+        match config
+            .bytes
+            .get_logical_object_stream(
+                config.scope,
+                &bucket.id.to_string(),
+                &hex_bytes(&object.sha256),
+                object.size,
+                range.clone(),
+                config.max_object_bytes,
+                Instant::now() + OBJECT_STREAM_DEADLINE,
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(download) => Some(download.stream),
+            Err(error) => return file_error(request_id, error),
+        }
+    };
+    let mut response = Response::new(match stream {
+        Some(stream) => Body::from_stream(stream),
+        None => Body::empty(),
     });
     *response.status_mut() = if range.is_some() {
         StatusCode::PARTIAL_CONTENT
@@ -1291,14 +1320,15 @@ async fn get_object(
         StatusCode::OK
     };
     object_headers(response.headers_mut(), &object);
-    if let Some((start, end)) = range {
+    if let Some(range) = range {
         response.headers_mut().remove("x-amz-checksum-sha256");
-        if let Ok(value) = HeaderValue::from_str(&selected.len().to_string()) {
+        if let Ok(value) = HeaderValue::from_str(&(range.end - range.start).to_string()) {
             response.headers_mut().insert(header::CONTENT_LENGTH, value);
         }
         if let Ok(value) = HeaderValue::from_str(&format!(
-            "bytes {start}-{}/{}",
-            end.saturating_sub(1),
+            "bytes {}-{}/{}",
+            range.start,
+            range.end.saturating_sub(1),
             object.size
         )) {
             response.headers_mut().insert(header::CONTENT_RANGE, value);
@@ -1358,7 +1388,7 @@ fn requested_range(
     headers: &HeaderMap,
     size: u64,
     object: &ObjectMetadata,
-) -> Result<Option<(usize, usize)>, ()> {
+) -> Result<Option<Range<u64>>, ()> {
     let Some(value) = headers
         .get(header::RANGE)
         .and_then(|value| value.to_str().ok())
@@ -1404,10 +1434,7 @@ fn requested_range(
         }
         (start, end.checked_add(1).ok_or(())?)
     };
-    Ok(Some((
-        usize::try_from(start).map_err(|_| ())?,
-        usize::try_from(end_exclusive).map_err(|_| ())?,
-    )))
+    Ok(Some(start..end_exclusive))
 }
 
 fn object_system_time(object: &ObjectMetadata) -> SystemTime {
@@ -1477,6 +1504,34 @@ async fn write_object(
     {
         return file_error(request_id, error);
     }
+    commit_written_object(
+        request_id,
+        config,
+        bucket,
+        key,
+        auth,
+        content_type,
+        metadata,
+        body.len() as u64,
+        digest,
+        now,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_written_object(
+    request_id: RequestId,
+    config: &S3ProductConfig,
+    bucket: &Bucket,
+    key: &str,
+    auth: &Authentication,
+    content_type: String,
+    metadata: BTreeMap<String, String>,
+    size: u64,
+    digest: [u8; 32],
+    now: TimestampMicros,
+) -> Response {
     let actor = match format!("storage-key:{}", auth.metadata.id).parse::<ObjectStorageActor>() {
         Ok(value) => value,
         Err(error) => return storage_error(request_id, error),
@@ -1490,7 +1545,7 @@ async fn write_object(
             &PutObjectCommand {
                 version_id: ObjectVersionId::generate(),
                 key: key.to_owned(),
-                size: body.len() as u64,
+                size,
                 sha256: digest,
                 content_type,
                 metadata,
@@ -1526,6 +1581,7 @@ async fn write_object(
     response
 }
 
+#[allow(clippy::too_many_lines)]
 async fn copy_object(
     request_id: RequestId,
     config: &S3ProductConfig,
@@ -1571,10 +1627,19 @@ async fn copy_object(
         Ok(None) => return s3_error(request_id, StatusCode::NOT_FOUND, "NoSuchKey"),
         Err(error) => return storage_error(request_id, error),
     };
-    let bytes = match read_bytes(config, bucket, &source_object).await {
-        Ok(value) => value,
-        Err(error) => return s3_error(request_id, error.0, error.1),
-    };
+    if let Err(error) = config
+        .bytes
+        .verify_logical_object(
+            config.scope,
+            &bucket.id.to_string(),
+            &hex_bytes(&source_object.sha256),
+            source_object.size,
+            config.max_object_bytes,
+        )
+        .await
+    {
+        return file_error(request_id, error);
+    }
     let replace = headers
         .get("x-amz-metadata-directive")
         .and_then(|value| value.to_str().ok())
@@ -1595,7 +1660,7 @@ async fn copy_object(
             source_object.metadata.clone(),
         )
     };
-    let response = write_object(
+    let response = commit_written_object(
         request_id,
         config,
         bucket,
@@ -1603,7 +1668,8 @@ async fn copy_object(
         auth,
         content_type,
         metadata,
-        bytes,
+        source_object.size,
+        source_object.sha256,
         now,
     )
     .await;
@@ -1742,6 +1808,29 @@ async fn complete_multipart_upload(
             return s3_error(request_id, StatusCode::BAD_REQUEST, "EntityTooSmall");
         }
     }
+    let mut total_size = 0_u64;
+    let mut composition_parts = Vec::with_capacity(requested.len());
+    for (number, etag) in &requested {
+        let Some(part) = available.iter().find(|part| part.number == *number) else {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
+        };
+        if &part.etag != etag {
+            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
+        }
+        total_size = match total_size.checked_add(part.size) {
+            Some(value)
+                if value <= bucket.configuration.quota.max_object_bytes
+                    && value <= config.max_object_bytes =>
+            {
+                value
+            }
+            _ => return s3_error(request_id, StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge"),
+        };
+        composition_parts.push(LogicalObjectPart {
+            digest_hex: hex_bytes(&part.sha256),
+            size: part.size,
+        });
+    }
     let completion_digest: [u8; 32] = Sha256::digest(body).into();
     if let Err(error) = config
         .service
@@ -1755,47 +1844,27 @@ async fn complete_multipart_upload(
             _ => storage_error(request_id, error),
         };
     }
-    let mut assembled = Vec::new();
-    for (index, (number, etag)) in requested.iter().enumerate() {
-        let Some(part) = available.iter().find(|part| part.number == *number) else {
-            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
-        };
-        if &part.etag != etag {
-            return s3_error(request_id, StatusCode::BAD_REQUEST, "InvalidPart");
-        }
-        if index + 1 != requested.len() && part.size < 5 * 1024 * 1024 {
-            return s3_error(request_id, StatusCode::BAD_REQUEST, "EntityTooSmall");
-        }
-        let Ok(part_size) = usize::try_from(part.size) else {
-            return s3_error(request_id, StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge");
-        };
-        let next = assembled.len().saturating_add(part_size);
-        if next as u64 > bucket.configuration.quota.max_object_bytes
-            || next as u64 > config.max_object_bytes
-        {
-            return s3_error(request_id, StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge");
-        }
-        let bytes = match config
-            .bytes
-            .get_logical_object(
-                config.scope,
-                &bucket.id.to_string(),
-                &hex_bytes(&part.sha256),
-                part.size,
-                config.max_object_bytes,
-            )
-            .await
-        {
-            Ok(value) => value,
-            Err(error) => return file_error(request_id, error),
-        };
-        assembled.extend_from_slice(&bytes);
-    }
+    let composed = match config
+        .bytes
+        .compose_logical_object(
+            config.scope,
+            &bucket.id.to_string(),
+            &hex_bytes(&completion_digest),
+            &composition_parts,
+            total_size,
+            Instant::now() + OBJECT_STREAM_DEADLINE,
+            CancellationToken::new(),
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return file_error(request_id, error),
+    };
     let completion_auth = Authentication {
         metadata: auth.metadata.clone(),
         operation_id: multipart_completion_operation_id(upload_id, &completion_digest),
     };
-    let response = write_object(
+    let response = commit_written_object(
         request_id,
         config,
         bucket,
@@ -1803,7 +1872,8 @@ async fn complete_multipart_upload(
         &completion_auth,
         upload.content_type,
         upload.metadata,
-        Bytes::from(assembled),
+        composed.size,
+        composed.sha256,
         now,
     )
     .await;
@@ -1974,28 +2044,6 @@ async fn delete_object(
         }
         Err(error) => storage_error(request_id, error),
     }
-}
-
-async fn read_bytes(
-    config: &S3ProductConfig,
-    bucket: &Bucket,
-    object: &ObjectMetadata,
-) -> Result<Bytes, (StatusCode, &'static str)> {
-    config
-        .bytes
-        .get_logical_object(
-            config.scope,
-            &bucket.id.to_string(),
-            &hex_bytes(&object.sha256),
-            object.size,
-            config.max_object_bytes,
-        )
-        .await
-        .map_err(|error| match error {
-            FileStorageError::LimitExceeded => (StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge"),
-            FileStorageError::Corruption => (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"),
-            _ => (StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable"),
-        })
 }
 
 fn one_optional_query<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -2460,8 +2508,8 @@ mod tests {
                         abort_incomplete_after_days: None,
                     },
                     quota: BucketQuota {
-                        max_object_bytes: 1_024,
-                        max_total_bytes: 4_096,
+                        max_object_bytes: 8 * 1_048_576,
+                        max_total_bytes: 32 * 1_048_576,
                         max_objects: 10,
                     },
                 },
@@ -2504,7 +2552,8 @@ mod tests {
             service: service.clone(),
             bytes: FileObjectStore::filesystem(&directory.path().join("objects")).await?,
             logical_region: "runku".to_owned(),
-            max_object_bytes: 1_024,
+            max_single_put_bytes: 5 * 1_048_576,
+            max_object_bytes: 8 * 1_048_576,
         })?;
 
         let put = router
@@ -2688,20 +2737,42 @@ mod tests {
         let upload_id = super::xml_text(&initiated, "UploadId")
             .map_err(|()| "multipart response omitted UploadId")?
             .to_owned();
-        let part_uri = format!("/s3/media/uploads/multipart.txt?partNumber=1&uploadId={upload_id}");
-        let part = router
+        let first_part_uri =
+            format!("/s3/media/uploads/multipart.txt?partNumber=1&uploadId={upload_id}");
+        let first_part_bytes = vec![b'm'; 5 * 1_048_576];
+        let first_part = router
             .clone()
             .oneshot(signed_request(
                 Method::PUT,
-                &part_uri,
-                b"multipart",
+                &first_part_uri,
+                &first_part_bytes,
                 issued.metadata.id,
                 &secret,
                 &[],
             )?)
             .await?;
-        assert_eq!(part.status(), StatusCode::OK);
-        let part_etag = part
+        assert_eq!(first_part.status(), StatusCode::OK);
+        let first_part_etag = first_part
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .ok_or("multipart part etag missing")?
+            .to_owned();
+        let second_part_uri =
+            format!("/s3/media/uploads/multipart.txt?partNumber=2&uploadId={upload_id}");
+        let second_part = router
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &second_part_uri,
+                b"tail",
+                issued.metadata.id,
+                &secret,
+                &[],
+            )?)
+            .await?;
+        assert_eq!(second_part.status(), StatusCode::OK);
+        let second_part_etag = second_part
             .headers()
             .get("etag")
             .and_then(|value| value.to_str().ok())
@@ -2709,7 +2780,7 @@ mod tests {
             .to_owned();
         let complete_uri = format!("/s3/media/uploads/multipart.txt?uploadId={upload_id}");
         let complete_body = format!(
-            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{first_part_etag}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{second_part_etag}</ETag></Part></CompleteMultipartUpload>"
         );
         let completed = router
             .clone()
@@ -2723,6 +2794,18 @@ mod tests {
             )?)
             .await?;
         assert_eq!(completed.status(), StatusCode::OK);
+        let completed_retry = router
+            .clone()
+            .oneshot(signed_request(
+                Method::POST,
+                &complete_uri,
+                complete_body.as_bytes(),
+                issued.metadata.id,
+                &secret,
+                &[("content-type", "application/xml")],
+            )?)
+            .await?;
+        assert_eq!(completed_retry.status(), StatusCode::OK);
         let multipart = router
             .clone()
             .oneshot(signed_request(
@@ -2735,7 +2818,26 @@ mod tests {
             )?)
             .await?;
         assert_eq!(multipart.status(), StatusCode::OK);
-        assert_eq!(to_bytes(multipart.into_body(), 32).await?, "multipart");
+        let multipart = to_bytes(multipart.into_body(), 6 * 1_048_576).await?;
+        assert_eq!(multipart.len(), 5 * 1_048_576 + 4);
+        assert!(multipart[..5 * 1_048_576].iter().all(|byte| *byte == b'm'));
+        assert_eq!(&multipart[5 * 1_048_576..], b"tail");
+        let multipart_range = router
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                "/s3/media/uploads/multipart.txt",
+                &[],
+                issued.metadata.id,
+                &secret,
+                &[("range", "bytes=5242878-5242881")],
+            )?)
+            .await?;
+        assert_eq!(multipart_range.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            to_bytes(multipart_range.into_body(), 8).await?,
+            b"mmta".as_slice()
+        );
 
         let presigned_uri =
             presigned_get_uri("/s3/media/uploads/hello.txt", issued.metadata.id, &secret)?;
@@ -2900,6 +3002,7 @@ mod tests {
             service: service.clone(),
             bytes: FileObjectStore::filesystem(&directory.path().join("aws-cli-objects")).await?,
             logical_region: "runku".to_owned(),
+            max_single_put_bytes: 5 * 1_048_576,
             max_object_bytes: 16 * 1_048_576,
         })?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

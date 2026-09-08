@@ -7,6 +7,12 @@ throttling failures, and incomplete multipart growth reported by the provider. H
 surfaces. Never record transfer tokens, user filenames, object keys, or File IDs as unrestricted
 labels. See [Storage operational signals](../self-hosting/storage-configuration.md#operational-signals-and-incidents).
 
+For Runku Object Storage, separate single-PUT/part admission rejection from completed-object/bucket
+quota rejection. Alert on completion latency/failure, active upload age/count, provider multipart
+abort backlog, deterministic staging growth, terminal download-stream corruption, and range-resume
+rate. Object keys, upload IDs, part digests, and access keys are investigation fields behind bounded
+authorization, never metric labels.
+
 This page defines signal ownership and the minimum dashboards/alerts. The storage, streaming,
 retention, HA, recovery, and exact configuration runbook is
 [Operational Log storage and administration](operational-logs.md).

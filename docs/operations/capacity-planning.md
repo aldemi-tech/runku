@@ -42,6 +42,10 @@ names, arguments, or secret values as metric labels.
 | Environment application file capacity | 10 GiB default |
 | One file | 256 MiB default |
 | Bytes copied into one Action | 2 MiB default |
+| Object Storage Management/console PUT | 64 MiB |
+| Object Storage Product PUT / multipart part | 64 MiB per request |
+| Object Storage completed multipart object | bucket quota, at most 5 TiB |
+| Multipart completion document | 4 MiB / 10,000 ordered parts |
 | Concurrent uploads/downloads | 16 / 64 default |
 | Live upload grants | 4096 default |
 | File metadata rows | 100000 default |
@@ -64,9 +68,13 @@ One slow Action can occupy admission even if its external service is the bottlen
 ### Memory
 
 Include runtime workers, artifact cache, active request/Realtime state, PostgreSQL connections,
-download/upload buffers, DuckDB historical queries, and container/OS overhead. File transfers are
-streamed, but concurrency still consumes per-stream state. Keep enough margin for a second Release
-during a weighted rollout.
+download/upload buffers, multipart writers, DuckDB historical queries, and container/OS overhead.
+File and Object Storage downloads/composition are streamed, but concurrency still consumes
+per-stream state. One object composition runs at a time per physical adapter. Its provider part is
+`max(5 MiB, ceil(object bytes / 10,000))` (about 524.3 MiB at 5 TiB), with one upload in flight plus
+an accumulating writer buffer and backend read chunk. Single PUT/UploadPart still buffers at most
+its 64 MiB request ceiling for current SigV4 verification. Keep enough margin for concurrent
+transfers and a second Release during a weighted rollout.
 
 ### Disk and I/O
 

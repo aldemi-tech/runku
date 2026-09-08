@@ -46,6 +46,9 @@ const TOKEN_VERSION: &str = "rfs1";
 const TOKEN_DOMAIN: &[u8] = b"RUNKU_FILE_TRANSFER_GRANT_V1\0";
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 const MULTIPART_CHUNK_BYTES: usize = 5 * 1024 * 1024;
+const LOGICAL_COMPOSE_IN_FLIGHT_CHUNKS: usize = 1;
+const LOGICAL_COMPOSE_CONCURRENCY: usize = 1;
+const MAX_PROVIDER_MULTIPART_PARTS: u64 = 10_000;
 const MAX_S3_PREFIX_BYTES: usize = 256;
 
 /// Byte stream accepted by the upload service without collecting the request body.
@@ -55,6 +58,32 @@ pub type FileUploadStream =
 /// Byte stream returned by the download service without collecting the object.
 pub type FileDownloadStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, FileStorageError>> + Send + 'static>>;
+
+/// One immutable content-addressed part used to compose a logical Object Storage object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicalObjectPart {
+    /// Lowercase SHA-256 digest locating the immutable part.
+    pub digest_hex: String,
+    /// Exact expected part size.
+    pub size: u64,
+}
+
+/// Result of composing immutable logical Object Storage parts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ComposedLogicalObject {
+    /// Exact total object size.
+    pub size: u64,
+    /// SHA-256 of the complete ordered object.
+    pub sha256: [u8; 32],
+}
+
+/// Verified logical-object response stream and its exact returned range.
+pub struct LogicalObjectDownload {
+    /// Inclusive-exclusive range represented by the stream.
+    pub range: std::ops::Range<u64>,
+    /// Bounded backend byte stream.
+    pub stream: FileDownloadStream,
+}
 
 /// Validated limits for one Environment's application file storage.
 #[derive(Clone, Copy, Debug)]
@@ -250,6 +279,7 @@ pub struct FileObjectStore {
     operation_timeout: Duration,
     backend: &'static str,
     filesystem_root: Option<PathBuf>,
+    logical_compose_admission: Arc<tokio::sync::Semaphore>,
 }
 
 struct ObjectReadExpectation<'a> {
@@ -294,6 +324,9 @@ impl FileObjectStore {
             operation_timeout: Duration::from_secs(30),
             backend: "filesystem",
             filesystem_root: Some(root),
+            logical_compose_admission: Arc::new(tokio::sync::Semaphore::new(
+                LOGICAL_COMPOSE_CONCURRENCY,
+            )),
         })
     }
 
@@ -329,6 +362,9 @@ impl FileObjectStore {
             operation_timeout: config.operation_timeout,
             backend: "s3",
             filesystem_root: None,
+            logical_compose_admission: Arc::new(tokio::sync::Semaphore::new(
+                LOGICAL_COMPOSE_CONCURRENCY,
+            )),
         })
     }
 
@@ -571,6 +607,324 @@ impl FileObjectStore {
         }
     }
 
+    /// Composes immutable logical Object Storage parts without collecting the complete object.
+    ///
+    /// Bytes are streamed into a deterministic staging object, hashed while copying, and then
+    /// streamed through a second bounded multipart writer to the final content-addressed path.
+    /// This avoids relying on a provider's single-request server-side copy ceiling. Promotion only
+    /// finishes after the staging stream has passed size and digest verification. Repeating the
+    /// same composition identity and parts is safe. A cancelled or failed attempt aborts the active
+    /// backend multipart writer and removes a completed staging object when possible.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation, limit, cancellation, timeout, availability, or corruption
+    /// error. A cleanup failure after another error is intentionally left as unreachable staging
+    /// data for bounded operator/provider lifecycle cleanup.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub async fn compose_logical_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: &str,
+        composition_id: &str,
+        parts: &[LogicalObjectPart],
+        maximum: u64,
+        deadline: Instant,
+        cancellation: CancellationToken,
+    ) -> Result<ComposedLogicalObject, FileStorageError> {
+        validate_logical_object_locator(bucket_id, composition_id)?;
+        if parts.is_empty() {
+            return Err(FileStorageError::InvalidRequest);
+        }
+        let mut expected_total = 0_u64;
+        for part in parts {
+            validate_logical_object_locator(bucket_id, &part.digest_hex)?;
+            if part.size == 0 {
+                return Err(FileStorageError::InvalidRequest);
+            }
+            expected_total = expected_total
+                .checked_add(part.size)
+                .ok_or(FileStorageError::LimitExceeded)?;
+            if expected_total > maximum {
+                return Err(FileStorageError::LimitExceeded);
+            }
+        }
+        let _admission = wait(
+            deadline,
+            &cancellation,
+            Arc::clone(&self.logical_compose_admission).acquire_owned(),
+        )
+        .await?
+        .map_err(|_| FileStorageError::Unavailable)?;
+        self.ensure_filesystem_capacity(expected_total.saturating_mul(2), 0)?;
+        let writer_chunk_bytes = logical_compose_chunk_bytes(expected_total)?;
+        let staging = self.logical_object_staging_path(scope, bucket_id, composition_id);
+        let upload = wait(
+            deadline,
+            &cancellation,
+            tokio::time::timeout(self.operation_timeout, self.store.put_multipart(&staging)),
+        )
+        .await?
+        .map_err(|_| FileStorageError::Unavailable)?
+        .map_err(map_object_error)?;
+        let mut writer = Some(WriteMultipart::new_with_chunk_size(
+            upload,
+            writer_chunk_bytes,
+        ));
+        let mut total = 0_u64;
+        let mut total_hash = Sha256::new();
+
+        for part in parts {
+            let source = self.logical_object_path(scope, bucket_id, &part.digest_hex);
+            let result = match wait(
+                deadline,
+                &cancellation,
+                tokio::time::timeout(self.operation_timeout, self.store.get(&source)),
+            )
+            .await
+            {
+                Ok(Ok(Ok(result))) => result,
+                Ok(Ok(Err(error))) => {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(map_object_error(error));
+                }
+                Ok(Err(_)) => {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(FileStorageError::Unavailable);
+                }
+                Err(error) => {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(error);
+                }
+            };
+            if result.meta.size != part.size {
+                abort_writer(writer.take(), self.operation_timeout).await;
+                return Err(FileStorageError::Corruption);
+            }
+            let mut stream = result.into_stream();
+            let mut part_size = 0_u64;
+            let mut part_hash = Sha256::new();
+            loop {
+                let next = match wait(
+                    deadline,
+                    &cancellation,
+                    tokio::time::timeout(self.operation_timeout, stream.next()),
+                )
+                .await
+                {
+                    Ok(Ok(next)) => next,
+                    Ok(Err(_)) => {
+                        abort_writer(writer.take(), self.operation_timeout).await;
+                        return Err(FileStorageError::Unavailable);
+                    }
+                    Err(error) => {
+                        abort_writer(writer.take(), self.operation_timeout).await;
+                        return Err(error);
+                    }
+                };
+                let Some(chunk) = next else { break };
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        abort_writer(writer.take(), self.operation_timeout).await;
+                        return Err(map_object_error(error));
+                    }
+                };
+                let chunk_size =
+                    u64::try_from(chunk.len()).map_err(|_| FileStorageError::LimitExceeded)?;
+                part_size = part_size
+                    .checked_add(chunk_size)
+                    .ok_or(FileStorageError::LimitExceeded)?;
+                total = total
+                    .checked_add(chunk_size)
+                    .ok_or(FileStorageError::LimitExceeded)?;
+                if part_size > part.size || total > maximum {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(FileStorageError::Corruption);
+                }
+                part_hash.update(&chunk);
+                total_hash.update(&chunk);
+                if let Err(error) = put_logical_compose_chunk(
+                    &mut writer,
+                    chunk,
+                    writer_chunk_bytes,
+                    deadline,
+                    &cancellation,
+                )
+                .await
+                {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(error);
+                }
+            }
+            if part_size != part.size || hex(&part_hash.finalize()) != part.digest_hex {
+                abort_writer(writer.take(), self.operation_timeout).await;
+                return Err(FileStorageError::Corruption);
+            }
+        }
+        if total != expected_total {
+            abort_writer(writer.take(), self.operation_timeout).await;
+            return Err(FileStorageError::Corruption);
+        }
+        let digest: [u8; 32] = total_hash.finalize().into();
+        let digest_hex = hex(&digest);
+        let active = writer.take().ok_or(FileStorageError::Unavailable)?;
+        let finish = wait(
+            deadline,
+            &cancellation,
+            tokio::time::timeout(self.operation_timeout, active.finish()),
+        )
+        .await;
+        match finish {
+            Ok(Ok(Ok(_))) => {}
+            Ok(Ok(Err(error))) => return Err(map_object_error(error)),
+            Ok(Err(_)) => return Err(FileStorageError::Unavailable),
+            Err(error) => return Err(error),
+        }
+        let final_path = self.logical_object_path(scope, bucket_id, &digest_hex);
+        self.promote_logical_staging(
+            &staging,
+            &final_path,
+            total,
+            &digest_hex,
+            writer_chunk_bytes,
+            deadline,
+            &cancellation,
+        )
+        .await?;
+        Ok(ComposedLogicalObject {
+            size: total,
+            sha256: digest,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn promote_logical_staging(
+        &self,
+        staging: &Path,
+        final_path: &Path,
+        expected_size: u64,
+        expected_digest: &str,
+        writer_chunk_bytes: usize,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+    ) -> Result<(), FileStorageError> {
+        let existing = wait(
+            deadline,
+            cancellation,
+            tokio::time::timeout(self.operation_timeout, self.store.head(final_path)),
+        )
+        .await?
+        .map_err(|_| FileStorageError::Unavailable)?;
+        match existing {
+            Ok(metadata) => {
+                if metadata.size != expected_size {
+                    return Err(FileStorageError::Corruption);
+                }
+                let _ =
+                    tokio::time::timeout(self.operation_timeout, self.store.delete(staging)).await;
+                return Ok(());
+            }
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(map_object_error(error)),
+        }
+
+        let staged = wait(
+            deadline,
+            cancellation,
+            tokio::time::timeout(self.operation_timeout, self.store.get(staging)),
+        )
+        .await?
+        .map_err(|_| FileStorageError::Unavailable)?
+        .map_err(map_object_error)?;
+        if staged.meta.size != expected_size {
+            return Err(FileStorageError::Corruption);
+        }
+        let upload = wait(
+            deadline,
+            cancellation,
+            tokio::time::timeout(self.operation_timeout, self.store.put_multipart(final_path)),
+        )
+        .await?
+        .map_err(|_| FileStorageError::Unavailable)?
+        .map_err(map_object_error)?;
+        let mut writer = Some(WriteMultipart::new_with_chunk_size(
+            upload,
+            writer_chunk_bytes,
+        ));
+        let mut stream = staged.into_stream();
+        let mut size = 0_u64;
+        let mut digest = Sha256::new();
+        loop {
+            let next = match wait(
+                deadline,
+                cancellation,
+                tokio::time::timeout(self.operation_timeout, stream.next()),
+            )
+            .await
+            {
+                Ok(Ok(next)) => next,
+                Ok(Err(_)) => {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(FileStorageError::Unavailable);
+                }
+                Err(error) => {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(error);
+                }
+            };
+            let Some(chunk) = next else { break };
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    abort_writer(writer.take(), self.operation_timeout).await;
+                    return Err(map_object_error(error));
+                }
+            };
+            let chunk_size =
+                u64::try_from(chunk.len()).map_err(|_| FileStorageError::LimitExceeded)?;
+            size = size
+                .checked_add(chunk_size)
+                .ok_or(FileStorageError::LimitExceeded)?;
+            if size > expected_size {
+                abort_writer(writer.take(), self.operation_timeout).await;
+                return Err(FileStorageError::Corruption);
+            }
+            digest.update(&chunk);
+            if let Err(error) = put_logical_compose_chunk(
+                &mut writer,
+                chunk,
+                writer_chunk_bytes,
+                deadline,
+                cancellation,
+            )
+            .await
+            {
+                abort_writer(writer.take(), self.operation_timeout).await;
+                return Err(error);
+            }
+        }
+        if size != expected_size || hex(&digest.finalize()) != expected_digest {
+            abort_writer(writer.take(), self.operation_timeout).await;
+            return Err(FileStorageError::Corruption);
+        }
+        let active = writer.take().ok_or(FileStorageError::Unavailable)?;
+        match wait(
+            deadline,
+            cancellation,
+            tokio::time::timeout(self.operation_timeout, active.finish()),
+        )
+        .await
+        {
+            Ok(Ok(Ok(_))) => {}
+            Ok(Ok(Err(error))) => return Err(map_object_error(error)),
+            Ok(Err(_)) => return Err(FileStorageError::Unavailable),
+            Err(error) => return Err(error),
+        }
+        let _ = tokio::time::timeout(self.operation_timeout, self.store.delete(staging)).await;
+        Ok(())
+    }
+
     /// Reads and verifies one immutable content-addressed logical object.
     ///
     /// # Errors
@@ -584,31 +938,198 @@ impl FileObjectStore {
         expected_size: u64,
         maximum: u64,
     ) -> Result<Bytes, FileStorageError> {
+        let download = self
+            .get_logical_object_stream(
+                scope,
+                bucket_id,
+                digest_hex,
+                expected_size,
+                None,
+                maximum,
+                Instant::now() + self.operation_timeout,
+                CancellationToken::new(),
+            )
+            .await?;
+        let chunks = download.stream.collect::<Vec<_>>().await;
+        let chunks = chunks.into_iter().collect::<Result<Vec<_>, _>>()?;
+        Ok(chunks.concat().into())
+    }
+
+    /// Opens a bounded logical Object Storage stream, optionally for one byte range.
+    ///
+    /// Full-object streams verify SHA-256 before their terminal end. Range streams verify exact
+    /// length and physical object size; a range cannot independently recompute the digest of bytes
+    /// outside that range.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation, limit, not-found, availability, cancellation, timeout, or
+    /// corruption error. Integrity failures discovered after response admission surface as a
+    /// terminal stream error.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub async fn get_logical_object_stream(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: &str,
+        digest_hex: &str,
+        expected_size: u64,
+        range: Option<std::ops::Range<u64>>,
+        maximum: u64,
+        deadline: Instant,
+        cancellation: CancellationToken,
+    ) -> Result<LogicalObjectDownload, FileStorageError> {
         validate_logical_object_locator(bucket_id, digest_hex)?;
         if expected_size > maximum {
             return Err(FileStorageError::LimitExceeded);
         }
-        let result = tokio::time::timeout(
+        let requested_range = range.unwrap_or(0..expected_size);
+        if requested_range.start > requested_range.end || requested_range.end > expected_size {
+            return Err(FileStorageError::InvalidRequest);
+        }
+        let full = requested_range.start == 0 && requested_range.end == expected_size;
+        let result = wait(
+            deadline,
+            &cancellation,
+            tokio::time::timeout(
+                self.operation_timeout,
+                self.store.get_opts(
+                    &self.logical_object_path(scope, bucket_id, digest_hex),
+                    GetOptions {
+                        range: (!full).then(|| GetRange::Bounded(requested_range.clone())),
+                        ..GetOptions::default()
+                    },
+                ),
+            ),
+        )
+        .await?
+        .map_err(|_| FileStorageError::Unavailable)?
+        .map_err(map_object_error)?;
+        if result.meta.size != expected_size || result.range != requested_range {
+            return Err(FileStorageError::Corruption);
+        }
+        let expected_hash = full.then(|| digest_hex.to_owned());
+        let operation_timeout = self.operation_timeout;
+        let stream = futures_util::stream::unfold(
+            (
+                Box::pin(result.into_stream()),
+                requested_range.end - requested_range.start,
+                expected_hash.as_ref().map(|_| Sha256::new()),
+                expected_hash,
+                cancellation,
+                false,
+            ),
+            move |(mut inner, mut remaining, mut hash, expected_hash, cancellation, terminal)| async move {
+                if terminal {
+                    return None;
+                }
+                let next = wait(
+                    deadline,
+                    &cancellation,
+                    tokio::time::timeout(operation_timeout, inner.next()),
+                )
+                .await;
+                match next {
+                    Err(error) => Some((
+                        Err(error),
+                        (inner, remaining, hash, expected_hash, cancellation, true),
+                    )),
+                    Ok(Err(_)) => Some((
+                        Err(FileStorageError::Unavailable),
+                        (inner, remaining, hash, expected_hash, cancellation, true),
+                    )),
+                    Ok(Ok(Some(Err(error)))) => Some((
+                        Err(map_object_error(error)),
+                        (inner, remaining, hash, expected_hash, cancellation, true),
+                    )),
+                    Ok(Ok(Some(Ok(chunk)))) => {
+                        let chunk_size = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+                        if chunk_size > remaining {
+                            return Some((
+                                Err(FileStorageError::Corruption),
+                                (inner, remaining, hash, expected_hash, cancellation, true),
+                            ));
+                        }
+                        remaining -= chunk_size;
+                        if let Some(hash) = &mut hash {
+                            hash.update(&chunk);
+                        }
+                        Some((
+                            Ok(chunk),
+                            (inner, remaining, hash, expected_hash, cancellation, false),
+                        ))
+                    }
+                    Ok(Ok(None)) => {
+                        let valid_hash = match (hash, expected_hash.as_deref()) {
+                            (Some(hash), Some(expected)) => hex(&hash.finalize()) == expected,
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        if remaining == 0 && valid_hash {
+                            None
+                        } else {
+                            Some((
+                                Err(FileStorageError::Corruption),
+                                (inner, remaining, None, None, cancellation, true),
+                            ))
+                        }
+                    }
+                }
+            },
+        );
+        Ok(LogicalObjectDownload {
+            range: requested_range,
+            stream: Box::pin(stream),
+        })
+    }
+
+    /// Verifies that an immutable logical object exists with the expected physical size.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation, limit, not-found, availability, or corruption error.
+    pub async fn verify_logical_object(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: &str,
+        digest_hex: &str,
+        expected_size: u64,
+        maximum: u64,
+    ) -> Result<(), FileStorageError> {
+        validate_logical_object_locator(bucket_id, digest_hex)?;
+        if expected_size > maximum {
+            return Err(FileStorageError::LimitExceeded);
+        }
+        let metadata = tokio::time::timeout(
             self.operation_timeout,
             self.store
-                .get(&self.logical_object_path(scope, bucket_id, digest_hex)),
+                .head(&self.logical_object_path(scope, bucket_id, digest_hex)),
         )
         .await
         .map_err(|_| FileStorageError::Unavailable)?
         .map_err(map_object_error)?;
-        if result.meta.size != expected_size {
-            return Err(FileStorageError::Corruption);
+        if metadata.size == expected_size {
+            Ok(())
+        } else {
+            Err(FileStorageError::Corruption)
         }
-        let bytes = tokio::time::timeout(self.operation_timeout, result.bytes())
-            .await
-            .map_err(|_| FileStorageError::Unavailable)?
-            .map_err(map_object_error)?;
-        if u64::try_from(bytes.len()).map_err(|_| FileStorageError::LimitExceeded)? != expected_size
-            || hex_sha256(&bytes) != digest_hex
-        {
-            return Err(FileStorageError::Corruption);
-        }
-        Ok(bytes)
+    }
+
+    fn logical_object_staging_path(
+        &self,
+        scope: EnvironmentScope,
+        bucket_id: &str,
+        composition_id: &str,
+    ) -> Path {
+        let relative = format!(
+            "v1/projects/{}/environments/{}/object-storage-staging/{bucket_id}/{composition_id}",
+            scope.project_id(),
+            scope.environment_id(),
+        );
+        Path::from(if self.prefix.is_empty() {
+            relative
+        } else {
+            format!("{}/{relative}", self.prefix)
+        })
     }
 
     fn logical_object_path(
@@ -2674,6 +3195,144 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn logical_object_composition_streams_retries_ranges_and_cancels()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let five_tib = 5_u64 * 1024 * 1024 * 1024 * 1024;
+        let maximum_chunk = logical_compose_chunk_bytes(five_tib)?;
+        assert_eq!(maximum_chunk, 549_755_814);
+        assert_eq!(
+            logical_compose_chunk_bytes(12 * 1024 * 1024)?,
+            5 * 1024 * 1024
+        );
+        assert_eq!(LOGICAL_COMPOSE_IN_FLIGHT_CHUNKS, 1);
+        assert_eq!(LOGICAL_COMPOSE_CONCURRENCY, 1);
+        assert!(five_tib.div_ceil(u64::try_from(maximum_chunk)?) <= MAX_PROVIDER_MULTIPART_PARTS);
+
+        let temporary = TempDir::new()?;
+        let root = temporary.path().join("objects");
+        let store = FileObjectStore::filesystem(&root).await?;
+        let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+        let bucket = format!("bkt_{}", Ulid::generate());
+        let part_size = 6 * 1024 * 1024;
+        let first = Bytes::from(vec![0x11; part_size]);
+        let second = Bytes::from(vec![0x22; part_size]);
+        let first_digest = hex_sha256(&first);
+        let second_digest = hex_sha256(&second);
+        store
+            .put_logical_object(
+                scope,
+                &bucket,
+                &first_digest,
+                first.clone(),
+                part_size as u64,
+            )
+            .await?;
+        store
+            .put_logical_object(
+                scope,
+                &bucket,
+                &second_digest,
+                second.clone(),
+                part_size as u64,
+            )
+            .await?;
+        let parts = vec![
+            LogicalObjectPart {
+                digest_hex: first_digest,
+                size: part_size as u64,
+            },
+            LogicalObjectPart {
+                digest_hex: second_digest,
+                size: part_size as u64,
+            },
+        ];
+        let composition_id = hex_sha256(b"stable completion request");
+        let composed = store
+            .compose_logical_object(
+                scope,
+                &bucket,
+                &composition_id,
+                &parts,
+                (2 * part_size) as u64,
+                deadline(),
+                CancellationToken::new(),
+            )
+            .await?;
+        let mut expected_hash = Sha256::new();
+        expected_hash.update(&first);
+        expected_hash.update(&second);
+        assert_eq!(composed.size, (2 * part_size) as u64);
+        assert_eq!(composed.sha256, <[u8; 32]>::from(expected_hash.finalize()));
+
+        let replay = store
+            .compose_logical_object(
+                scope,
+                &bucket,
+                &composition_id,
+                &parts,
+                composed.size,
+                deadline(),
+                CancellationToken::new(),
+            )
+            .await?;
+        assert_eq!(replay, composed);
+
+        let digest = hex(&composed.sha256);
+        let range = (part_size as u64 - 4)..(part_size as u64 + 4);
+        let download = store
+            .get_logical_object_stream(
+                scope,
+                &bucket,
+                &digest,
+                composed.size,
+                Some(range.clone()),
+                composed.size,
+                deadline(),
+                CancellationToken::new(),
+            )
+            .await?;
+        assert_eq!(download.range, range);
+        let chunks = download.stream.collect::<Vec<_>>().await;
+        assert_eq!(
+            chunks.into_iter().collect::<Result<Vec<_>, _>>()?.concat(),
+            [vec![0x11; 4], vec![0x22; 4]].concat()
+        );
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            store
+                .compose_logical_object(
+                    scope,
+                    &bucket,
+                    &hex_sha256(b"cancelled completion"),
+                    &parts,
+                    composed.size,
+                    deadline(),
+                    cancelled,
+                )
+                .await,
+            Err(FileStorageError::Cancelled)
+        );
+        assert_eq!(
+            store
+                .compose_logical_object(
+                    scope,
+                    &bucket,
+                    &hex_sha256(b"over limit completion"),
+                    &parts,
+                    composed.size - 1,
+                    deadline(),
+                    CancellationToken::new(),
+                )
+                .await,
+            Err(FileStorageError::LimitExceeded)
+        );
+        Ok(())
+    }
 }
 
 async fn wait<T>(
@@ -2694,6 +3353,39 @@ async fn abort_writer(writer: Option<WriteMultipart>, timeout: Duration) {
     if let Some(writer) = writer {
         let _ = tokio::time::timeout(timeout, writer.abort()).await;
     }
+}
+
+fn logical_compose_chunk_bytes(total: u64) -> Result<usize, FileStorageError> {
+    let minimum =
+        u64::try_from(MULTIPART_CHUNK_BYTES).map_err(|_| FileStorageError::LimitExceeded)?;
+    let bytes = total.div_ceil(MAX_PROVIDER_MULTIPART_PARTS).max(minimum);
+    usize::try_from(bytes).map_err(|_| FileStorageError::LimitExceeded)
+}
+
+async fn put_logical_compose_chunk(
+    writer: &mut Option<WriteMultipart>,
+    mut chunk: Bytes,
+    writer_chunk_bytes: usize,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> Result<(), FileStorageError> {
+    while !chunk.is_empty() {
+        let length = chunk.len().min(writer_chunk_bytes);
+        let next = chunk.split_to(length);
+        let active = writer.as_mut().ok_or(FileStorageError::Unavailable)?;
+        match wait(
+            deadline,
+            cancellation,
+            active.wait_for_capacity(LOGICAL_COMPOSE_IN_FLIGHT_CHUNKS),
+        )
+        .await
+        {
+            Ok(Ok(())) => active.put(next),
+            Ok(Err(error)) => return Err(map_object_error(error)),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)]

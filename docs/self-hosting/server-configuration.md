@@ -122,6 +122,13 @@ Limits must be positive and internally ordered: Action ≤ file ≤ Environment.
 `1..=10000`; file/grant/event counts have validated ceilings; TTLs are one second through 24 hours.
 Changing a limit affects new admission, not the identity or digest of already committed files.
 
+Runku Object Storage bucket quotas are administered per bucket rather than through additional
+server environment variables. The Product S3 route admits at most 64 MiB for one PUT or UploadPart,
+4 MiB for the completion XML, 10,000 ordered parts, and 5 TiB for the composed object before the
+narrower bucket quotas apply. The authenticated Management/console PUT remains 64 MiB. Large
+objects therefore use the Product S3 multipart protocol; reverse proxies must stream responses and
+must not impose 64 MiB on the completed GET object.
+
 ### External S3-compatible byte backend
 
 | Variable | Required/default | Contract |

@@ -162,7 +162,9 @@ Also configure:
 ## Logical quota and admission parameters
 
 These limits govern Application Files. Object Storage additionally enforces each logical bucket's
-own object/count/byte quotas and a 64 MiB single-request Runku Object Storage PUT ceiling.
+own object/count/byte quotas. One Product S3 PUT or UploadPart request is capped at 64 MiB; multipart
+completion can compose an object up to the smaller of 5 TiB and the bucket quotas. The
+Management/console object PUT remains a separate 64 MiB administrative path.
 
 | Variable | Default | Valid contract |
 |---|---:|---|
@@ -197,6 +199,16 @@ physical bytes
    + provider/filesystem overhead
    + recovery and growth headroom
 ```
+
+Multipart completion does not allocate the complete object in `runku-server`. One composition runs
+at a time per physical adapter. It streams verified parts into staging and then streams staging to
+the final content address. Each pass uses at most 10,000 provider parts: the writer chunk is
+`max(5 MiB, ceil(object bytes / 10,000))`, and one part upload is in flight at a time. This works
+beyond a provider's single-request server-side copy ceiling, but at the 5 TiB ceiling one writer
+part is about 524.3 MiB. Allow memory for that part, the accumulating writer buffer and the backend
+read chunk. An external S3-compatible adapter may temporarily require source parts, staging, and
+final provider objects at once. Size provider capacity and incomplete-upload lifecycle for that
+peak.
 
 `RUNKU_FILE_STORAGE_ENVIRONMENT_BYTES` does not cap Runku Object Storage buckets. Conversely,
 bucket quotas do not reserve disk for Application Files. Sum both product workloads when sizing the
@@ -238,8 +250,12 @@ must prove actual operations:
 4. delete it and verify it is unavailable;
 5. create a logical bucket and scoped key;
 6. use an official AWS-compatible client to PUT/HEAD/GET/list/copy/delete within the allowed prefix;
-7. prove another bucket/prefix and disallowed operation are denied;
-8. observe expected metrics/logs without credential or object-key leakage.
+7. upload at least two parts whose completed object is larger than 64 MiB, list parts, complete,
+   retry the identical completion, range-read across a part boundary, and verify the SHA-256;
+8. interrupt a multipart upload and abort it, then confirm registry cleanup and account for
+   provider-side incomplete/staging bytes;
+9. prove another bucket/prefix and disallowed operation are denied;
+10. observe expected metrics/logs without credential or object-key leakage.
 
 Repeat the canary after credential rotation, provider policy changes, binary upgrade, and restore.
 
@@ -330,6 +346,13 @@ Alert on:
 - backend request latency, timeouts, 4xx/5xx, throttling, multipart abort backlog;
 - `FILE_STORAGE_UNAVAILABLE`, `FILE_STORAGE_CORRUPT`, unexpected not-found, or checksum mismatch;
 - growing physical bytes not explained by current logical usage/retained-version policy.
+
+An uncertain completion is retried only with the same upload ID and byte-identical completion XML.
+The deterministic claim and operation identity reconcile the same result. A failed/cancelled
+composition attempts to abort its backend writer; failure after staging commit may leave
+unreachable staging bytes. Do not remove those bytes by filename or age alone. Until a published
+reachability garbage collector exists, provider lifecycle/manual cleanup must prove that no active
+or completing multipart upload and no immutable object version references them.
 
 When corruption/mismatch appears:
 

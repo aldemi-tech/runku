@@ -83,6 +83,15 @@ method, destination, port, DNS resolution, redirects, private infrastructure ran
 response size, and deadline. Validate remote responses and use their idempotency mechanism when an
 effect may need reconciliation.
 
+The current broker contract copies request and response bodies as bounded byte arrays and retains a
+16 MiB hard ceiling. Raising that ceiling would consume Function/broker memory and is not the
+large-payload path. A future production HTTPS profile must add an Environment-scoped immutable
+Application File/Object handle request and response mode, stream without exposing physical
+credentials, enforce independent network/storage capabilities and quotas, propagate cancellation,
+verify length/digest, and document uncertain external-effect reconciliation. That handle/stream
+contract and compact HTTPS broker are not implemented in this release. Use Application File grants
+or Runku Object Storage multipart outside the Function envelope where the workflow permits it.
+
 ## Scheduling
 
 Mutation or Action with `scheduler:create` may create durable work:

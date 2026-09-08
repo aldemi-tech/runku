@@ -75,9 +75,11 @@ then commits quota/current/version metadata plus operation and audit in one seri
 transaction. A pre-commit conflict may leave an unreachable content-addressed blob, which is safe
 for later garbage collection. A lost commit acknowledgement is reconciled through the separate
 object operation journal. Download resolves metadata first and then verifies both physical size and
-SHA-256 before returning bytes. Delete removes logical visibility but retains immutable physical
-content and version evidence for recovery/garbage collection. The authenticated console transport
-is bounded to 64 MiB per object; bucket quota may be lower.
+SHA-256 while streaming a complete body. A range verifies the exact physical object and returned
+length but cannot independently recompute the digest of bytes outside that range. Delete removes
+logical visibility but retains immutable physical content and version evidence for recovery/garbage
+collection. The authenticated Management/console PUT remains bounded to 64 MiB per request; use the
+Product S3 multipart path for larger objects.
 
 Create, update, and archive use an `OperationId`. The repository hashes the complete canonical
 client intent and exact scope; server-generated IDs, secret material, and processing timestamps do
@@ -169,12 +171,20 @@ physical adapter. An exact signed single-object retry maps to one deterministic 
 ID, so the metadata journal resolves a lost acknowledgement instead of inventing a second logical
 intent.
 
-The per-request and completed-object bound is 64 MiB in server composition. A multipart upload has
-at most 10,000 ordered parts; every non-final completed part is at least 5 MiB. Parts are immutable
-content addresses and may be replaced while the upload is active. Completion first validates the
-complete part set, durably claims a digest of the exact completion body, assembles and verifies the
-bytes, commits through an object operation deterministically derived from upload ID plus completion
-digest, and then marks the upload complete.
+One PUT or UploadPart request is bounded to 64 MiB in server composition. A completed object may be
+as large as 5 TiB, further restricted by the bucket's `maxObjectBytes` and `maxTotalBytes`. A
+multipart upload has at most 10,000 ordered parts; every non-final completed part is at least 5 MiB,
+and the completion XML is bounded to 4 MiB. Parts are immutable content addresses and may be
+replaced while the upload is active. Completion first validates and totals the complete part set,
+durably claims a digest of the exact completion body, streams each verified part through a bounded
+multipart writer into deterministic staging, and computes the complete SHA-256. It then streams
+that verified staging object through a second bounded multipart writer to the immutable content
+address instead of relying on a provider single-request copy operation, commits through an object
+operation deterministically derived from upload ID plus completion digest, and marks the upload
+complete. One composition runs at a time per physical adapter. Each pass uses at most 10,000
+provider parts: its writer chunk is `max(5 MiB, ceil(object bytes / 10,000))`, with one part upload
+in flight at a time. The accumulating writer buffer and backend read chunk remain separately
+bounded; at the 5 TiB ceiling one provider part is about 524.3 MiB.
 An identical completion retry reconciles; a different completion body, part mutation after claim,
 abort during completion, or completion after abort fails closed. Bucket lifecycle execution can
 expire current objects, expire non-current versions, and abort incomplete uploads in batches of at
@@ -338,9 +348,11 @@ send a partial patch.
 Lifecycle fields accept `null` or an integer from 1 through 36,500 days. Non-current expiry is
 invalid when versioning is disabled.
 
-**Current limitation:** Runku stores and validates lifecycle configuration but does not execute it.
-Do not rely on these fields to delete objects, old versions, or incomplete multipart uploads. The
-Runku Storage data plane does not support multipart in this release.
+Lifecycle rules execute only when an authenticated Product request enters the bounded lifecycle
+reconciler. Treat them as eventual cleanup, not a wall-clock deletion guarantee. Incomplete
+multipart registry state is processed in batches of at most 100; immutable part blobs and abandoned
+composition staging remain physical garbage until a separately reviewed reachability cleanup or
+provider lifecycle removes them.
 
 ## Quotas and effective limits
 
@@ -348,13 +360,14 @@ Quota values are unsigned decimal strings to avoid JavaScript precision loss:
 
 | Field | Rule |
 |---|---|
-| `maxObjectBytes` | positive and ≤ `maxTotalBytes` |
+| `maxObjectBytes` | positive, ≤ `maxTotalBytes`, and effectively capped at 5 TiB by Product composition |
 | `maxTotalBytes` | positive and ≤ 2^60 bytes |
 | `maxObjects` | positive and ≤ 1,000,000,000 current objects |
 
-The Product server accepts at most 64 MiB in one Runku Storage PUT. The effective per-object limit
-is therefore the smaller of `maxObjectBytes` and 64 MiB. Multipart is unavailable, so objects over
-that effective limit cannot be uploaded through the current Product route.
+The Product server accepts at most 64 MiB in one PUT or UploadPart request. Single-request PUT is
+therefore limited to the smaller of `maxObjectBytes` and 64 MiB. Multipart can compose a larger
+object up to the smaller of `maxObjectBytes`, remaining `maxTotalBytes`, and 5 TiB without loading
+the complete body into process memory.
 
 Quotas count the logical current namespace. Retained versions still have physical capacity and
 recovery consequences even where they no longer count as current objects. Operators must monitor
@@ -564,7 +577,9 @@ plane.
 | stale bucket/key revision | re-read and reconcile; never overwrite blindly |
 | operation response uncertain | query the exact operation endpoint before retrying |
 | one-time key response lost | rotate/revoke; secret is intentionally unrecoverable |
-| quota/body limit exceeded | reduce object or change reviewed quota; multipart is unavailable |
+| single PUT/part limit exceeded | split the object into multipart parts no larger than 64 MiB |
+| completed-object/bucket quota exceeded | reduce the object or change a reviewed bucket quota; identical retry will not change admission |
+| completion connection lost | repeat the exact completion XML and upload ID; a changed part list conflicts |
 | signature rejected | verify region `runku`, endpoint path, clock, key split, signed headers, scope |
 | object hash/size mismatch | treat as storage corruption and stop serving affected object |
 | unsupported protocol operation | redesign around the explicit subset; do not assume complete Amazon S3 parity |
@@ -585,3 +600,23 @@ and the [production-readiness contract](../self-hosting/production-readiness.md)
 Runku SaaS can validate Runku Object Storage application behavior where the capability is enabled, but it
 does not validate the recovery, encryption, capacity, or credential storage of your Self-Hosted
 installation.
+
+### Multipart interruption and staging recovery
+
+- uploaded parts remain addressable by the upload until completion, abort, or lifecycle state
+  transition; list parts before resuming an interrupted client;
+- repeating the same part number safely replaces that active part, while completion freezes the
+  claimed set;
+- repeat an uncertain completion with the byte-identical XML body; the deterministic completion
+  identity returns/reconciles the same logical version;
+- a failure before the staging writer finishes aborts the physical multipart writer when the
+  backend permits it;
+- a cancellation or provider failure after staging commit can leave an unreachable deterministic
+  staging object. The identical completion retry overwrites/reconciles that staging identity;
+- do not delete staging, part, or content-addressed blobs merely from age. Until a published
+  reachability garbage collector exists, provider lifecycle/manual cleanup must first prove that no
+  active/completing upload or object version references the bytes.
+
+For large downloads, consume the response stream and treat a terminal body error or truncation as
+failure. Resume with a new signed range request from the last durably verified offset; a range
+response does not prove the SHA-256 of the bytes outside the requested range.

@@ -120,6 +120,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 const CONSOLE_OBJECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const S3_MULTIPART_OBJECT_MAX_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
 /// One configured Product Environment and its lazily started serving process.
 pub struct ProductAdapter {
@@ -424,7 +425,8 @@ impl ProductAdapter {
             service: self.storage.clone(),
             bytes: self.object_bytes.clone(),
             logical_region: "runku".to_owned(),
-            max_object_bytes: CONSOLE_OBJECT_MAX_BYTES,
+            max_single_put_bytes: CONSOLE_OBJECT_MAX_BYTES,
+            max_object_bytes: S3_MULTIPART_OBJECT_MAX_BYTES,
         })
     }
 
