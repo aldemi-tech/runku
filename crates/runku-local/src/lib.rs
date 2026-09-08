@@ -26,8 +26,8 @@ pub use identity::{
 };
 pub use lifecycle::{
     LocalChannelExpectation, LocalChannelStatus, LocalCodeResolution, LocalCompatibilityDiagnostic,
-    LocalReleaseError, LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatus,
-    LocalReleaseStatusReport,
+    LocalCompatibilityReport, LocalReleaseDiff, LocalReleaseError, LocalReleaseInspection,
+    LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatus, LocalReleaseStatusReport,
 };
 pub use logs::{LocalLogError, LocalLogManager};
 pub use otel::{LocalOtlpError, LocalOtlpExporter, LocalOtlpReport};

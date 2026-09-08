@@ -109,10 +109,22 @@ flowchart LR
   Stable -->|regression| Rollback[Move policy to eligible prior Release]
 ```
 
-Before promotion, require schema/index/Cron compatibility, artifact integrity, application tests,
-and enough capacity for all weighted Releases. During observation, segment signals by exact Release
-without unbounded labels. Rollback changes traffic policy; it does not undo data mutations, external
-Action effects, configuration rotations, or a server schema migration.
+Before promotion, read the delivery/status snapshot and run the revision-bound
+`POST .../serving-policy/preflight` against the candidate. Require an empty blocker list, artifact
+integrity, application tests, and enough capacity for all weighted Releases. A conflict means the
+Release/Channel or policy revision advanced; repeat the read and review rather than reusing stale
+evidence. During observation, segment signals by exact Release without unbounded labels. Rollback
+changes traffic policy; it does not undo data mutations, external Action effects, configuration
+rotations, or a server schema migration.
+
+An optional document field may coexist across old/new Releases: reads are Release-projected and an
+old full replace preserves fields outside its view. Required additions and index/Cron changes remain
+blocked until their data/backfill/readiness prerequisite is explicit. Verify rollback through both
+old and new exact targets before changing traffic weights.
+
+After the agreed rollback window, remove the old Release from Channels and policy, disable its Cron
+activations, and drain or cancel pending Scheduled Invocations. Retire it using the exact revisions
+from `GET .../delivery`; a conflict means a reference or revision changed and must be reviewed.
 
 ## Identity administration
 

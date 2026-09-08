@@ -16,7 +16,9 @@ artifacts. Publishing the same inputs produces the same build identity. Artifact
 and digest.
 
 Promotion changes a Channel pointer after compatibility and readiness checks. Rollback selects a
-previous immutable Release; it does not rebuild source.
+previous immutable Release; it does not rebuild source. Freeze and every Channel move check the
+complete `servable`/`active` Release closure, including exact-target reachability; a null baseline
+or newly created Channel is not a compatibility bypass.
 
 The current product also includes a [weighted serving policy](../concepts/serving-policy.md).
 It records atomic or gradual desired intent, rejects incompatible Release sets, and resolves
@@ -64,9 +66,15 @@ outcomes. Development credentials cannot invoke Functions.
 ## Compatibility and data evolution
 
 Compatibility covers Function kinds/visibility/contracts, schema/index requirements,
-runtime/artifact support, and pinned work. Shared data requires expand → migrate/backfill → contract.
+runtime/artifact support, and pinned work. Optional schema fields may differ across Releases: reads
+use the selected Release projection, and full replace preserves fields outside that Release view.
+Shared data still requires expand → migrate/backfill → contract for required fields, types, and
+indexes.
 Do not expose code requiring unavailable data/indexes or remove a contract while a Release,
 subscription, Cron activation, or scheduled invocation can still use it.
+`servable`, `active`, and `deprecated` Releases therefore remain in compatibility preflight. After
+the rollback window, the Management retirement operation fails closed until Channels, serving
+policy, Cron activations, and pending/running schedules no longer retain the exact Release.
 
 ## Explicit local lifecycle
 

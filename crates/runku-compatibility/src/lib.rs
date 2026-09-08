@@ -202,6 +202,77 @@ impl CompatibilityEngine {
             diagnostics,
         })
     }
+
+    /// Proves that `candidate` can replace `base` for callers of the same Channel.
+    ///
+    /// This comparison covers the public Function surface only. Environment data coexistence is
+    /// an independent symmetric proof performed by [`Self::coexist`]. Keeping the decisions
+    /// separate permits a rollback to an older read view after an optional schema expansion while
+    /// still rejecting an API change that would break callers of the moved Channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input/limit error. Semantic incompatibility is returned as diagnostics.
+    pub fn compare_api(
+        base: &ReleasePackage,
+        candidate: &ReleasePackage,
+    ) -> Result<CompatibilityReport, CompatibilityError> {
+        validate_pair(base, candidate)?;
+        let mut diagnostics = Vec::new();
+        compare_functions(base, candidate, &mut diagnostics)?;
+        Ok(finish_report(diagnostics))
+    }
+
+    /// Proves symmetric coexistence of two immutable Release data views in one Environment.
+    ///
+    /// A field present in only one view is safe only when optional. Fields present in both views
+    /// must accept the same value set. Logical indexes and Cron declarations remain exact until
+    /// their independent build/activation lifecycles carry durable readiness evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input/limit error. Semantic incompatibility is returned as diagnostics.
+    pub fn coexist(
+        left: &ReleasePackage,
+        right: &ReleasePackage,
+    ) -> Result<CompatibilityReport, CompatibilityError> {
+        validate_pair(left, right)?;
+        let mut diagnostics = Vec::new();
+        compare_schema_coexistence(left, right, &mut diagnostics)?;
+        if left.manifest.index_contract_hash != right.manifest.index_contract_hash {
+            push_diagnostic(
+                &mut diagnostics,
+                "INDEX_CONTRACT_CHANGE_REQUIRES_READINESS",
+                "release",
+            )?;
+        }
+        if left.manifest.cron_definitions != right.manifest.cron_definitions {
+            push_diagnostic(&mut diagnostics, "CRON_DECLARATIONS_DIVERGED", "release")?;
+        }
+        Ok(finish_report(diagnostics))
+    }
+}
+
+fn validate_pair(
+    base: &ReleasePackage,
+    candidate: &ReleasePackage,
+) -> Result<(), CompatibilityError> {
+    if base.manifest.project_id != candidate.manifest.project_id
+        || base.manifest.release_id == candidate.manifest.release_id
+    {
+        Err(CompatibilityError::InvalidRelease)
+    } else {
+        Ok(())
+    }
+}
+
+fn finish_report(mut diagnostics: Vec<CompatibilityDiagnostic>) -> CompatibilityReport {
+    diagnostics.sort();
+    diagnostics.dedup();
+    CompatibilityReport {
+        compatible: diagnostics.is_empty(),
+        diagnostics,
+    }
 }
 
 fn compare_functions(
@@ -287,6 +358,115 @@ fn compare_schema(
         }
     }
     Ok(())
+}
+
+fn compare_schema_coexistence(
+    left: &ReleasePackage,
+    right: &ReleasePackage,
+    diagnostics: &mut Vec<CompatibilityDiagnostic>,
+) -> Result<(), CompatibilityError> {
+    match (&left.schema, &right.schema) {
+        (Some(left), Some(right)) => {
+            let right_tables: BTreeMap<TableId, _> =
+                right.tables.iter().map(|table| (table.id, table)).collect();
+            for table in &left.tables {
+                let Some(other) = right_tables.get(&table.id) else {
+                    continue;
+                };
+                let subject = table.id.to_string();
+                if table.name != other.name {
+                    push_diagnostic(diagnostics, "SCHEMA_TABLE_ID_RENAMED", &subject)?;
+                    continue;
+                }
+                if !contracts_can_coexist(&table.document_contract, &other.document_contract)? {
+                    push_diagnostic(diagnostics, "SCHEMA_VIEWS_CANNOT_COEXIST", &subject)?;
+                }
+            }
+        }
+        (None, None) => {}
+        (None, Some(_)) | (Some(_), None) => {
+            push_diagnostic(diagnostics, "SCHEMA_VIEW_UNAVAILABLE", "release")?;
+        }
+    }
+    Ok(())
+}
+
+fn contracts_can_coexist(left: &Contract, right: &Contract) -> Result<bool, CompatibilityError> {
+    let mut steps = 0_usize;
+    contracts_can_coexist_at(left, right, &mut steps)
+}
+
+fn contracts_can_coexist_at(
+    left: &Contract,
+    right: &Contract,
+    steps: &mut usize,
+) -> Result<bool, CompatibilityError> {
+    *steps = steps.saturating_add(1);
+    if *steps > MAX_RELATION_STEPS {
+        return Err(CompatibilityError::LimitExceeded);
+    }
+    match (left, right) {
+        (
+            Contract::Object {
+                fields: left_fields,
+                optional: left_optional,
+            },
+            Contract::Object {
+                fields: right_fields,
+                optional: right_optional,
+            },
+        ) => {
+            for (name, contract) in left_fields {
+                match right_fields.get(name) {
+                    Some(other) => {
+                        if left_optional.contains(name) != right_optional.contains(name)
+                            || !contracts_can_coexist_at(contract, other, steps)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    None if left_optional.contains(name) => {}
+                    None => return Ok(false),
+                }
+            }
+            Ok(right_fields
+                .keys()
+                .all(|name| left_fields.contains_key(name) || right_optional.contains(name)))
+        }
+        (
+            Contract::Array {
+                items: left_items,
+                minimum_items: left_minimum,
+                maximum_items: left_maximum,
+            },
+            Contract::Array {
+                items: right_items,
+                minimum_items: right_minimum,
+                maximum_items: right_maximum,
+            },
+        ) => Ok(left_minimum == right_minimum
+            && left_maximum == right_maximum
+            && contracts_can_coexist_at(left_items, right_items, steps)?),
+        (Contract::Union { variants: left }, Contract::Union { variants: right }) => {
+            if left.len() != right.len() {
+                return Ok(false);
+            }
+            for variant in left {
+                let mut matched = false;
+                for other in right {
+                    if contract_subset(variant, other)? && contract_subset(other, variant)? {
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        _ => Ok(contract_subset(left, right)? && contract_subset(right, left)?),
+    }
 }
 
 fn push_diagnostic(
@@ -707,6 +887,66 @@ mod tests {
                 "SCHEMA_DOCUMENT_NARROWED",
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn storage_coexistence_accepts_optional_add_hide_and_rejects_required_add() -> TestResult {
+        let project = ProjectId::from_ulid(ulid::Ulid::from(602));
+        let string = Contract::String {
+            minimum_bytes: None,
+            maximum_bytes: Some(100),
+        };
+        let old_document = Contract::Object {
+            fields: BTreeMap::from([("name".to_owned(), string.clone())]),
+            optional: BTreeSet::new(),
+        };
+        let optional_document = Contract::Object {
+            fields: BTreeMap::from([
+                ("avatar".to_owned(), string.clone()),
+                ("name".to_owned(), string.clone()),
+            ]),
+            optional: BTreeSet::from(["avatar".to_owned()]),
+        };
+        let required_document = Contract::Object {
+            fields: BTreeMap::from([
+                ("avatar".to_owned(), string),
+                ("name".to_owned(), Contract::Any),
+            ]),
+            optional: BTreeSet::new(),
+        };
+        let arguments = Contract::Any;
+        let result = Contract::Any;
+        let old = package(
+            project,
+            5,
+            &arguments,
+            &result,
+            &old_document,
+            AuthPolicy::None,
+        )?;
+        let optional = package(
+            project,
+            6,
+            &arguments,
+            &result,
+            &optional_document,
+            AuthPolicy::None,
+        )?;
+        let required = package(
+            project,
+            7,
+            &arguments,
+            &result,
+            &required_document,
+            AuthPolicy::None,
+        )?;
+
+        assert!(CompatibilityEngine::coexist(&old, &optional)?.compatible);
+        assert!(CompatibilityEngine::coexist(&optional, &old)?.compatible);
+        let blocked = CompatibilityEngine::coexist(&old, &required)?;
+        assert!(!blocked.compatible);
+        assert_eq!(blocked.diagnostics[0].code, "SCHEMA_VIEWS_CANNOT_COEXIST");
         Ok(())
     }
 }

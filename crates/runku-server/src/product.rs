@@ -61,6 +61,7 @@ use runku_management_service::{
     ManagementBucketArchive, ManagementBucketConfiguration, ManagementBucketCorsRule,
     ManagementBucketCreate, ManagementBucketLifecycle, ManagementBucketPage, ManagementBucketQuota,
     ManagementBucketResult, ManagementBucketUpdate, ManagementCatalogQuery,
+    ManagementCompatibilityDiagnostic, ManagementCompatibilityQuery,
     ManagementConfigurationAuditEntry, ManagementConfigurationDelete, ManagementConfigurationEntry,
     ManagementConfigurationHistory, ManagementConfigurationHistoryQuery,
     ManagementConfigurationResult, ManagementConfigurationSet, ManagementConfigurationSnapshot,
@@ -68,8 +69,8 @@ use runku_management_service::{
     ManagementCronActivationResult, ManagementCronActivationSet, ManagementCronCatalog,
     ManagementCronEntry, ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
-    ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementEnvironment,
-    ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
+    ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementDeliverySnapshot,
+    ManagementEnvironment, ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
     ManagementEnvironmentLifecycleChange, ManagementEnvironmentOperation,
     ManagementEnvironmentResult, ManagementEnvironmentUpdate, ManagementFunctionEntry,
     ManagementFunctionPage, ManagementHealthComponent, ManagementInstanceHealth,
@@ -77,14 +78,16 @@ use runku_management_service::{
     ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery, ManagementMetric,
     ManagementMetrics, ManagementObject, ManagementObjectDownload, ManagementObjectPage,
     ManagementObjectPut, ManagementObjectResult, ManagementProduct, ManagementProductError,
-    ManagementReleaseOutcome, ManagementReleaseStatus, ManagementResolvedTarget,
-    ManagementScheduledInvocation, ManagementScheduledPage, ManagementSchemaIndex,
-    ManagementSchemaPage, ManagementSchemaTable, ManagementServingCompatibility,
-    ManagementServingOperation, ManagementServingPolicy, ManagementServingPolicyResult,
-    ManagementServingPolicySet, ManagementServingRelease, ManagementStorageAccessKey,
-    ManagementStorageAccessKeyConfiguration, ManagementStorageAccessKeyIssue,
-    ManagementStorageAccessKeyPage, ManagementStorageAccessKeyRevoke,
-    ManagementStorageAccessKeyRotate, ManagementStorageOperation, ManagementWorkspacePublish,
+    ManagementReleaseDetail, ManagementReleaseDiff, ManagementReleaseDiffRequest,
+    ManagementReleaseOutcome, ManagementReleaseRetireRequest, ManagementReleaseStatus,
+    ManagementResolvedTarget, ManagementScheduledInvocation, ManagementScheduledPage,
+    ManagementSchemaIndex, ManagementSchemaPage, ManagementSchemaTable,
+    ManagementServingCompatibility, ManagementServingOperation, ManagementServingPolicy,
+    ManagementServingPolicyResult, ManagementServingPolicySet, ManagementServingPreflightRequest,
+    ManagementServingRelease, ManagementStorageAccessKey, ManagementStorageAccessKeyConfiguration,
+    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyPage,
+    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, ManagementStorageOperation,
+    ManagementWorkspacePublish,
 };
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
@@ -110,7 +113,7 @@ use runku_runtime::{
 use runku_schema::{SchemaCatalog, decode_schema_catalog};
 use runku_serving::{
     ServingCommandKind, ServingMode, ServingOperation, ServingPolicy, ServingPolicyError,
-    ServingPolicyRecord, ServingPolicyService,
+    ServingPolicyRecord, ServingPolicyService, canonical_cron_declarations_hash,
 };
 use runku_serving_repository::{ServingRepositoryConfig, SqlServingPolicyRepository};
 use runku_value::{CanonicalValue, IndexKey, IndexValue, TimestampMicros};
@@ -130,6 +133,7 @@ pub struct ProductAdapter {
     log_journal: Option<NatsLogJournal>,
     process_config: LocalProcessConfig,
     process: Mutex<Option<LocalProcess>>,
+    delivery_mutations: Mutex<()>,
     data_store: Arc<dyn LogicalStore>,
     identity: LocalIdentityManager,
     environments: EnvironmentService,
@@ -372,6 +376,7 @@ impl ProductAdapter {
                 ..LocalProcessConfig::default()
             },
             process: Mutex::new(None),
+            delivery_mutations: Mutex::new(()),
             data_store,
             identity,
             environments: EnvironmentService::new(Arc::new(environment_repository)),
@@ -666,13 +671,24 @@ impl ProductAdapter {
                     .schema
                     .validate_document(table.id, &value)
                     .map_err(|_| ManagementProductError::Validation)?;
-                self.verify_previous_value(
-                    table.id,
-                    document_id,
-                    expected_revision,
-                    &previous_value,
-                )
-                .await?;
+                let stored = self
+                    .verify_previous_value(
+                        table.id,
+                        document_id,
+                        expected_revision,
+                        &previous_value,
+                        &catalog.schema,
+                    )
+                    .await?;
+                let value = stored.as_ref().map_or_else(
+                    || Ok(value.clone()),
+                    |stored| {
+                        catalog
+                            .schema
+                            .preserve_unknown_document_fields(table.id, stored, &value)
+                            .map_err(|_| ManagementProductError::Validation)
+                    },
+                )?;
                 (
                     DocumentMutation::Upsert {
                         table_id: table.id,
@@ -680,7 +696,7 @@ impl ProductAdapter {
                         expected: ExpectedRevision::Exact(expected_revision),
                         value,
                     },
-                    Some(previous_value),
+                    stored.or(Some(previous_value)),
                 )
             }
             DataWrite::Delete {
@@ -691,20 +707,22 @@ impl ProductAdapter {
                     .schema
                     .validate_document(table.id, &previous_value)
                     .map_err(|_| ManagementProductError::Validation)?;
-                self.verify_previous_value(
-                    table.id,
-                    document_id,
-                    expected_revision,
-                    &previous_value,
-                )
-                .await?;
+                let stored = self
+                    .verify_previous_value(
+                        table.id,
+                        document_id,
+                        expected_revision,
+                        &previous_value,
+                        &catalog.schema,
+                    )
+                    .await?;
                 (
                     DocumentMutation::Delete {
                         table_id: table.id,
                         document_id,
                         expected_revision,
                     },
-                    Some(previous_value),
+                    stored.or(Some(previous_value)),
                 )
             }
         };
@@ -757,7 +775,8 @@ impl ProductAdapter {
         document_id: DocumentId,
         expected_revision: u64,
         previous_value: &CanonicalValue,
-    ) -> Result<(), ManagementProductError> {
+        schema: &DocumentSchemaV1,
+    ) -> Result<Option<CanonicalValue>, ManagementProductError> {
         let mut snapshot = self
             .data_store
             .begin_read(self.scope)
@@ -768,12 +787,18 @@ impl ProductAdapter {
             .await
             .map_err(map_store)?;
         snapshot.close().await.map_err(map_store)?;
-        if current.as_ref().is_some_and(|current| {
-            current.revision == expected_revision && current.value != *previous_value
-        }) {
-            return Err(ManagementProductError::Conflict);
+        if let Some(current) = current
+            && current.revision == expected_revision
+        {
+            let projected = schema
+                .project_document(table_id, &current.value)
+                .map_err(|_| ManagementProductError::Validation)?;
+            if projected != *previous_value {
+                return Err(ManagementProductError::Conflict);
+            }
+            return Ok(Some(current.value));
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -1516,6 +1541,13 @@ impl ManagementProduct for ProductAdapter {
     async fn serving_compatibility(
         &self,
     ) -> Result<ManagementServingCompatibility, ManagementProductError> {
+        let release_serving_revision = LocalReleaseManager::open(&self.root)
+            .await
+            .map_err(map_release)?
+            .status()
+            .await
+            .map_err(map_release)?
+            .serving_revision;
         let record = self
             .serving
             .get(self.scope)
@@ -1530,8 +1562,9 @@ impl ManagementProduct for ProductAdapter {
             .ok_or(ManagementProductError::Corruption)?;
         let contracts = first.contracts();
         Ok(ManagementServingCompatibility {
-            version: 1,
+            version: 2,
             policy_revision: record.policy_revision,
+            release_serving_revision,
             compatible: true,
             converged: record.is_converged(),
             schema_contract_hash: contracts.schema.to_string(),
@@ -1547,7 +1580,117 @@ impl ManagementProduct for ProductAdapter {
                 })
                 .collect(),
             diagnostics: Vec::new(),
+            candidate_release_id: None,
+            active_release_ids: record
+                .desired_policy
+                .releases()
+                .iter()
+                .map(|entry| entry.release_id().to_string())
+                .collect(),
+            diagnostic_details: Vec::new(),
         })
+    }
+
+    async fn serving_candidate_compatibility(
+        &self,
+        query: &ManagementCompatibilityQuery,
+    ) -> Result<ManagementServingCompatibility, ManagementProductError> {
+        let Some(candidate) = query.candidate_release_id.as_deref() else {
+            return self.serving_compatibility().await;
+        };
+        let candidate = candidate
+            .parse::<ReleaseId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let against = query
+            .against_channel
+            .as_deref()
+            .map(ChannelName::from_str)
+            .transpose()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let manager = LocalReleaseManager::open(&self.root)
+            .await
+            .map_err(map_release)?;
+        let report = manager
+            .preflight(candidate, against.as_ref())
+            .await
+            .map_err(map_release)?;
+        let policy = self.serving.get(self.scope).await.map_err(map_serving)?;
+        let (policy_revision, converged, releases) = policy.as_ref().map_or_else(
+            || (0, false, Vec::new()),
+            |record| {
+                (
+                    record.policy_revision,
+                    record.is_converged(),
+                    record
+                        .desired_policy
+                        .releases()
+                        .iter()
+                        .map(|entry| ManagementServingRelease {
+                            release_id: entry.release_id().to_string(),
+                            weight_percent: entry.weight_percent(),
+                        })
+                        .collect(),
+                )
+            },
+        );
+        let diagnostic_details = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| ManagementCompatibilityDiagnostic {
+                code: diagnostic.code.to_owned(),
+                subject: diagnostic.subject.clone(),
+                against_release_id: diagnostic.against_release_id.to_string(),
+                kind: diagnostic.compatibility_kind.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        Ok(ManagementServingCompatibility {
+            version: 2,
+            policy_revision,
+            release_serving_revision: report.serving_revision,
+            compatible: report.compatible,
+            converged,
+            schema_contract_hash: report.candidate_schema_id,
+            index_contract_hash: report.candidate_index_id,
+            cron_declarations_hash: report.candidate_cron_id,
+            releases,
+            diagnostics: diagnostic_details
+                .iter()
+                .map(|diagnostic| diagnostic.code.clone())
+                .collect(),
+            candidate_release_id: Some(report.candidate_release_id.to_string()),
+            active_release_ids: report
+                .active_release_ids
+                .into_iter()
+                .map(|release_id| release_id.to_string())
+                .collect(),
+            diagnostic_details,
+        })
+    }
+
+    async fn serving_preflight(
+        &self,
+        request: &ManagementServingPreflightRequest,
+    ) -> Result<ManagementServingCompatibility, ManagementProductError> {
+        let policy_revision = self
+            .serving
+            .get(self.scope)
+            .await
+            .map_err(map_serving)?
+            .map_or(0, |record| record.policy_revision);
+        if policy_revision != request.expected_policy_revision {
+            return Err(ManagementProductError::Conflict);
+        }
+        let query = ManagementCompatibilityQuery {
+            candidate_release_id: Some(request.candidate_release_id.clone()),
+            against_channel: request.against_channel.clone(),
+        };
+        let response = self.serving_candidate_compatibility(&query).await?;
+        if response.release_serving_revision != request.expected_release_serving_revision
+            || response.policy_revision != request.expected_policy_revision
+        {
+            return Err(ManagementProductError::Conflict);
+        }
+        Ok(response)
     }
 
     async fn serving_policy_set(
@@ -1556,6 +1699,7 @@ impl ManagementProduct for ProductAdapter {
         actor: OperatorId,
         request: &ManagementServingPolicySet,
     ) -> Result<ManagementServingPolicyResult, ManagementProductError> {
+        let _delivery_guard = self.delivery_mutations.lock().await;
         if request.expected_revision == Some(0) {
             return Err(ManagementProductError::Invalid);
         }
@@ -1577,6 +1721,13 @@ impl ManagementProduct for ProductAdapter {
                 .resolve_code(&CodeTarget::Release(release_id))
                 .await
                 .map_err(map_release)?;
+            let preflight = manager
+                .preflight(release_id, None)
+                .await
+                .map_err(map_release)?;
+            if !preflight.compatible {
+                return Err(ManagementProductError::Incompatible);
+            }
             manifests.push((resolved.manifest, entry.weight_percent));
         }
         let policy = ServingPolicy::from_manifests(
@@ -2358,11 +2509,202 @@ impl ManagementProduct for ProductAdapter {
         ))
     }
 
+    async fn retire_release(
+        &self,
+        release_id: &str,
+        request: &ManagementReleaseRetireRequest,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        let _delivery_guard = self.delivery_mutations.lock().await;
+        let release_id = release_id
+            .parse::<ReleaseId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let policy = self.serving.get(self.scope).await.map_err(map_serving)?;
+        let policy_revision = policy.as_ref().map_or(0, |record| record.policy_revision);
+        if policy_revision != request.expected_policy_revision
+            || policy.as_ref().is_some_and(|record| {
+                record
+                    .desired_policy
+                    .releases()
+                    .iter()
+                    .any(|entry| entry.release_id() == release_id)
+            })
+        {
+            return Err(ManagementProductError::Conflict);
+        }
+        let cron = self
+            .cron
+            .snapshot(self.cron_context)
+            .await
+            .map_err(map_cron)?;
+        if cron.activations.iter().any(
+            |activation| matches!(activation.pinned_code, PinnedCode::Release(id) if id == release_id),
+        ) {
+            return Err(ManagementProductError::Conflict);
+        }
+        let mut read = self
+            .data_store
+            .begin_read(self.scope)
+            .await
+            .map_err(map_store)?;
+        let mut after = None;
+        loop {
+            let page = read.list_scheduled(after, 200).await.map_err(map_store)?;
+            if page.iter().any(|scheduled| {
+                matches!(
+                    scheduled.status,
+                    ScheduleStatus::Pending | ScheduleStatus::Running
+                ) && matches!(scheduled.pinned_code, PinnedCode::Release(id) if id == release_id)
+            }) {
+                return Err(ManagementProductError::Conflict);
+            }
+            if page.len() < 200 {
+                break;
+            }
+            after = page.last().map(|scheduled| scheduled.id);
+        }
+        read.close().await.map_err(map_store)?;
+        let manager = LocalReleaseManager::open(&self.root)
+            .await
+            .map_err(map_release)?;
+        Ok(outcome(
+            manager
+                .retire(release_id, request.expected_release_serving_revision)
+                .await
+                .map_err(map_release)?,
+        ))
+    }
+
     async fn status(&self) -> Result<ManagementReleaseStatus, ManagementProductError> {
         let manager = LocalReleaseManager::open(&self.root)
             .await
             .map_err(map_release)?;
-        Ok(status(manager.status().await.map_err(map_release)?))
+        let local = manager.status().await.map_err(map_release)?;
+        let serving = self.serving.get(self.scope).await.map_err(map_serving)?;
+        Ok(status(local, serving.as_ref()))
+    }
+
+    async fn delivery(&self) -> Result<ManagementDeliverySnapshot, ManagementProductError> {
+        for _ in 0..3 {
+            let manager = LocalReleaseManager::open(&self.root)
+                .await
+                .map_err(map_release)?;
+            let first_local = manager.status().await.map_err(map_release)?;
+            let first_policy = self.serving.get(self.scope).await.map_err(map_serving)?;
+            let second_local = manager.status().await.map_err(map_release)?;
+            let second_policy = self.serving.get(self.scope).await.map_err(map_serving)?;
+            if first_local.serving_revision == second_local.serving_revision
+                && first_policy.as_ref().map(|record| record.policy_revision)
+                    == second_policy.as_ref().map(|record| record.policy_revision)
+            {
+                return Ok(ManagementDeliverySnapshot {
+                    version: 1,
+                    status: status(second_local, second_policy.as_ref()),
+                    serving_policy: second_policy.as_ref().map(management_serving_policy),
+                });
+            }
+        }
+        Err(ManagementProductError::Conflict)
+    }
+
+    async fn release_detail(
+        &self,
+        release_id: &str,
+    ) -> Result<ManagementReleaseDetail, ManagementProductError> {
+        let release_id = release_id
+            .parse::<ReleaseId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let manager = LocalReleaseManager::open(&self.root)
+            .await
+            .map_err(map_release)?;
+        let inspection = manager
+            .inspect_release(release_id)
+            .await
+            .map_err(map_release)?;
+        let status = manager.status().await.map_err(map_release)?;
+        let release_status = status
+            .releases
+            .iter()
+            .find(|entry| entry.release_id == release_id)
+            .ok_or(ManagementProductError::Corruption)?;
+        let serving = self.serving.get(self.scope).await.map_err(map_serving)?;
+        let weight_percent = serving.as_ref().and_then(|record| {
+            record
+                .desired_policy
+                .releases()
+                .iter()
+                .find(|entry| entry.release_id() == release_id)
+                .map(|entry| entry.weight_percent())
+        });
+        let functions = inspection
+            .manifest
+            .functions
+            .iter()
+            .map(|function| {
+                json!({
+                    "argumentsContractHash": function.arguments_contract_hash.to_string(),
+                    "auth": auth_policy(function.auth_policy),
+                    "capabilities": function.capabilities.iter().map(capability).collect::<Vec<_>>(),
+                    "functionId": function.id.to_string(),
+                    "kind": function_type(function.function_type),
+                    "name": function.name.to_string(),
+                    "resultContractHash": function.result_contract_hash.to_string(),
+                    "runtime": runtime_class(function.runtime_class),
+                    "visibility": function_visibility(function.visibility),
+                })
+            })
+            .collect();
+        Ok(ManagementReleaseDetail {
+            release_id: release_id.to_string(),
+            status: inspection.status.as_str().to_owned(),
+            build_id: inspection.manifest.build_id.to_string(),
+            created_at_micros: inspection.manifest.created_at.get().to_string(),
+            runtime_version: inspection.manifest.runtime_version.to_string(),
+            schema_id: inspection.manifest.schema_contract_hash.to_string(),
+            index_id: inspection.manifest.index_contract_hash.to_string(),
+            cron_id: canonical_cron_declarations_hash(&inspection.manifest)
+                .map_err(map_serving)?
+                .to_string(),
+            functions,
+            active_reasons: release_status.active_reasons.clone(),
+            weight_percent,
+        })
+    }
+
+    async fn release_diff(
+        &self,
+        request: &ManagementReleaseDiffRequest,
+    ) -> Result<ManagementReleaseDiff, ManagementProductError> {
+        let base = request
+            .base_release_id
+            .parse::<ReleaseId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let candidate = request
+            .candidate_release_id
+            .parse::<ReleaseId>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        let diff = LocalReleaseManager::open(&self.root)
+            .await
+            .map_err(map_release)?
+            .diff(base, candidate)
+            .await
+            .map_err(map_release)?;
+        Ok(ManagementReleaseDiff {
+            version: 1,
+            base_release_id: diff.base_release_id.to_string(),
+            candidate_release_id: diff.candidate_release_id.to_string(),
+            api_compatible: diff.api_compatible,
+            storage_compatible: diff.storage_compatible,
+            diagnostics: diff
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| ManagementCompatibilityDiagnostic {
+                    code: diagnostic.code.to_owned(),
+                    subject: diagnostic.subject,
+                    against_release_id: diagnostic.against_release_id.to_string(),
+                    kind: diagnostic.compatibility_kind.to_owned(),
+                })
+                .collect(),
+        })
     }
 
     async fn functions(
@@ -2454,7 +2796,11 @@ impl ManagementProduct for ProductAdapter {
             .await
             .map_err(map_store)?;
         snapshot.close().await.map_err(map_store)?;
-        let document = result.ok_or(ManagementProductError::NotFound)?;
+        let mut document = result.ok_or(ManagementProductError::NotFound)?;
+        document.value = catalog
+            .schema
+            .project_document(table.id, &document.value)
+            .map_err(|_| ManagementProductError::Validation)?;
         data_document(table.name.as_str(), &document)
     }
 
@@ -2517,7 +2863,7 @@ impl ManagementProduct for ProductAdapter {
             if entry.table_id != table.id {
                 return Err(ManagementProductError::Corruption);
             }
-            let document = snapshot
+            let mut document = snapshot
                 .get_document(table.id, entry.document_id)
                 .await
                 .map_err(map_store)?
@@ -2525,6 +2871,10 @@ impl ManagementProduct for ProductAdapter {
             if document.revision != entry.document_revision {
                 return Err(ManagementProductError::Corruption);
             }
+            document.value = catalog
+                .schema
+                .project_document(table.id, &document.value)
+                .map_err(|_| ManagementProductError::Validation)?;
             documents.push(data_document(table.name.as_str(), &document)?);
         }
         snapshot.close().await.map_err(map_store)?;
@@ -3237,7 +3587,10 @@ fn outcome(value: LocalReleaseOutcome) -> ManagementReleaseOutcome {
     }
 }
 
-fn status(value: LocalReleaseStatusReport) -> ManagementReleaseStatus {
+fn status(
+    value: LocalReleaseStatusReport,
+    serving: Option<&ServingPolicyRecord>,
+) -> ManagementReleaseStatus {
     ManagementReleaseStatus {
         serving_revision: value.serving_revision,
         default_channel: value.default_channel.map(|channel| channel.to_string()),
@@ -3245,10 +3598,27 @@ fn status(value: LocalReleaseStatusReport) -> ManagementReleaseStatus {
             .releases
             .into_iter()
             .map(|release| {
+                let weight_percent = serving.and_then(|record| {
+                    record
+                        .desired_policy
+                        .releases()
+                        .iter()
+                        .find(|entry| entry.release_id() == release.release_id)
+                        .map(|entry| entry.weight_percent())
+                });
+                let mut active_reasons = release.active_reasons;
+                if weight_percent.is_some() {
+                    active_reasons.push("servingPolicy".to_owned());
+                    active_reasons.sort();
+                }
                 json!({
+                    "active": !active_reasons.is_empty(),
+                    "activeReasons": active_reasons,
                     "releaseId": release.release_id.to_string(),
                     "runtimeVersion": release.runtime_version,
+                    "schemaId": release.schema_id,
                     "status": release.status.as_str(),
+                    "weightPercent": weight_percent,
                 })
             })
             .collect(),
@@ -3338,6 +3708,30 @@ const fn function_type(value: FunctionType) -> &'static str {
         FunctionType::Query => "query",
         FunctionType::Mutation => "mutation",
         FunctionType::Action => "action",
+    }
+}
+
+const fn auth_policy(value: AuthPolicy) -> &'static str {
+    match value {
+        AuthPolicy::None => "none",
+        AuthPolicy::Optional => "optional",
+        AuthPolicy::Guest => "guest",
+        AuthPolicy::User => "user",
+        AuthPolicy::Service => "service",
+    }
+}
+
+const fn runtime_class(value: RuntimeClass) -> &'static str {
+    match value {
+        RuntimeClass::SafeV8 => "safeV8",
+        RuntimeClass::FullNode => "fullNode",
+    }
+}
+
+const fn function_visibility(value: FunctionVisibility) -> &'static str {
+    match value {
+        FunctionVisibility::Public => "public",
+        FunctionVisibility::Internal => "internal",
     }
 }
 
@@ -4649,6 +5043,7 @@ export const hourly = cron({
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn console_serving_policy_uses_manifest_evidence_cas_and_operation_replay() -> TestResult
     {
         let directory = tempfile::tempdir()?;
@@ -4664,6 +5059,39 @@ export const hourly = cron({
             .and_then(Value::as_str)
             .ok_or("missing release ID")?
             .to_owned();
+        let initial_status = product.status().await?;
+        let initial_delivery = product.delivery().await?;
+        assert_eq!(initial_delivery.version, 1);
+        assert_eq!(initial_delivery.status, initial_status);
+        assert_eq!(initial_delivery.serving_policy, None);
+        let candidate = product
+            .serving_candidate_compatibility(&ManagementCompatibilityQuery {
+                candidate_release_id: Some(release_id.clone()),
+                against_channel: None,
+            })
+            .await?;
+        assert!(candidate.compatible);
+        assert_eq!(candidate.policy_revision, 0);
+        assert!(candidate.releases.is_empty());
+        assert_eq!(candidate.schema_contract_hash.len(), 64);
+        assert_eq!(candidate.index_contract_hash.len(), 64);
+        assert_eq!(candidate.cron_declarations_hash.len(), 64);
+        assert_eq!(candidate.active_release_ids, Vec::<String>::new());
+        assert_eq!(
+            candidate.release_serving_revision,
+            initial_status.serving_revision
+        );
+        assert_eq!(
+            product
+                .serving_preflight(&ManagementServingPreflightRequest {
+                    candidate_release_id: release_id.clone(),
+                    against_channel: None,
+                    expected_release_serving_revision: initial_status.serving_revision,
+                    expected_policy_revision: 0,
+                })
+                .await?,
+            candidate
+        );
         let released = product.release(&release_id, None).await?;
         assert_eq!(released.status, "servable");
         let request = ManagementServingPolicySet {
@@ -4713,6 +5141,27 @@ export const hourly = cron({
         assert!(replay.replayed);
         assert_eq!(replay.policy, first.policy);
         assert_eq!(product.serving_policy().await?, first.policy);
+        let delivery = product.delivery().await?;
+        assert_eq!(delivery.status.serving_revision, released.serving_revision);
+        assert_eq!(delivery.serving_policy, Some(first.policy.clone()));
+        assert_eq!(
+            delivery.status.releases[0]
+                .get("weightPercent")
+                .and_then(Value::as_u64),
+            Some(100)
+        );
+        assert_eq!(
+            product
+                .retire_release(
+                    &release_id,
+                    &ManagementReleaseRetireRequest {
+                        expected_release_serving_revision: released.serving_revision,
+                        expected_policy_revision: 1,
+                    },
+                )
+                .await,
+            Err(ManagementProductError::Conflict)
+        );
         let compatibility = product.serving_compatibility().await?;
         assert!(compatibility.compatible);
         assert!(compatibility.converged);

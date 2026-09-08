@@ -14,6 +14,7 @@ use runku_releases::{
     ReleaseManifestV1, ReleaseRepository, ReleaseRouter, ReleaseStatus, ServingSnapshot,
     encode_release_manifest,
 };
+use runku_serving::canonical_cron_declarations_hash;
 use runku_value::TimestampMicros;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -64,6 +65,55 @@ pub struct LocalCompatibilityDiagnostic {
     pub code: &'static str,
     /// Canonical bounded logical subject.
     pub subject: String,
+    /// Existing exact Release against which the candidate was checked.
+    pub against_release_id: ReleaseId,
+    /// `api` for one Channel caller surface or `storage` for Environment data coexistence.
+    pub compatibility_kind: &'static str,
+}
+
+/// Candidate-aware compatibility result for operator preflight.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalCompatibilityReport {
+    /// Immutable candidate Release.
+    pub candidate_release_id: ReleaseId,
+    /// Candidate immutable schema contract digest.
+    pub candidate_schema_id: String,
+    /// Candidate immutable logical-index contract digest.
+    pub candidate_index_id: String,
+    /// Candidate immutable ordered Cron-declaration contract digest.
+    pub candidate_cron_id: String,
+    /// Coherent Release/Channel repository revision used to derive the closure.
+    pub serving_revision: u64,
+    /// Every servable/active exact Release included in the Environment closure.
+    pub active_release_ids: Vec<ReleaseId>,
+    /// True when the candidate can coexist and satisfies the selected Channel API baseline.
+    pub compatible: bool,
+    /// Stable, structured blockers including their existing Release and compatibility dimension.
+    pub diagnostics: Vec<LocalCompatibilityDiagnostic>,
+}
+
+/// Pairwise directional API and symmetric storage compatibility reports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalReleaseDiff {
+    /// Existing/base Release.
+    pub base_release_id: ReleaseId,
+    /// Candidate Release.
+    pub candidate_release_id: ReleaseId,
+    /// Whether callers of the base Channel can use the candidate.
+    pub api_compatible: bool,
+    /// Whether both Releases can safely share Environment data.
+    pub storage_compatible: bool,
+    /// Structured diagnostics for both dimensions.
+    pub diagnostics: Vec<LocalCompatibilityDiagnostic>,
+}
+
+/// Immutable manifest and lifecycle state for one published Release.
+#[derive(Clone, Debug)]
+pub struct LocalReleaseInspection {
+    /// Current lifecycle state.
+    pub status: ReleaseStatus,
+    /// Verified immutable manifest.
+    pub manifest: ReleaseManifestV1,
 }
 
 /// Result of validating or moving one Release.
@@ -92,6 +142,10 @@ pub struct LocalReleaseStatus {
     pub status: ReleaseStatus,
     /// Platform runtime/API version.
     pub runtime_version: String,
+    /// Immutable schema contract digest used as the Release schema identity.
+    pub schema_id: String,
+    /// Stable reasons why this Release remains reachable.
+    pub active_reasons: Vec<String>,
 }
 
 /// Read-only Channel entry for local status output.
@@ -185,8 +239,8 @@ impl LocalReleaseManager {
 
     /// Validates one published candidate and advances it to `SERVABLE` if compatible.
     ///
-    /// `against` selects an exact Channel baseline. When absent, the configured default Channel
-    /// is used; an environment with Channels but no default requires an explicit baseline.
+    /// `against` optionally selects an exact Channel API baseline. When absent, compatibility is
+    /// still evaluated against the complete explicitly-invocable Environment closure.
     ///
     /// # Errors
     ///
@@ -215,7 +269,7 @@ impl LocalReleaseManager {
                 Vec::new(),
             ));
         }
-        let baseline = select_baseline(&initial, against)?;
+        let baseline = selected_baseline(&initial, against)?;
         self.advance_if(release_id, entry.status, ReleaseStatus::Building)
             .await?;
         let mut snapshot = self.snapshot().await?;
@@ -228,7 +282,9 @@ impl LocalReleaseManager {
             ReleaseStatus::Building | ReleaseStatus::CompatibilityBlocked
         ) {
             if status == ReleaseStatus::CompatibilityBlocked {
-                let report = self.compatibility_report(release_id, baseline).await?;
+                let report = self
+                    .compatibility_report(release_id, baseline, &snapshot)
+                    .await?;
                 if !report.compatible {
                     return Ok(outcome(
                         release_id,
@@ -236,7 +292,7 @@ impl LocalReleaseManager {
                         status,
                         snapshot.revision(),
                         true,
-                        diagnostics(report),
+                        report.diagnostics,
                     ));
                 }
             }
@@ -245,7 +301,9 @@ impl LocalReleaseManager {
             status = ReleaseStatus::Validating;
         }
         if status == ReleaseStatus::Validating {
-            let report = self.compatibility_report(release_id, baseline).await?;
+            let report = self
+                .compatibility_report(release_id, baseline, &snapshot)
+                .await?;
             if !report.compatible {
                 self.transition(
                     release_id,
@@ -260,7 +318,7 @@ impl LocalReleaseManager {
                     ReleaseStatus::CompatibilityBlocked,
                     snapshot.revision(),
                     false,
-                    diagnostics(report),
+                    report.diagnostics,
                 ));
             }
             self.transition(release_id, ReleaseStatus::Validating, ReleaseStatus::Ready)
@@ -284,6 +342,82 @@ impl LocalReleaseManager {
             false,
             Vec::new(),
         ))
+    }
+
+    /// Computes candidate compatibility against the complete exact-Release serving closure
+    /// without changing lifecycle or routing state.
+    ///
+    /// `against` optionally selects the Channel whose caller-facing API must remain compatible.
+    /// A missing selection still checks every servable/active Release as a storage coexistence
+    /// baseline, so an empty Channel or exact Release target cannot bypass data safety.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown candidates/Channels and invalid or unavailable artifacts.
+    pub async fn preflight(
+        &self,
+        release_id: ReleaseId,
+        against: Option<&ChannelName>,
+    ) -> Result<LocalCompatibilityReport, LocalReleaseError> {
+        let snapshot = self.snapshot().await?;
+        let baseline = selected_baseline(&snapshot, against)?;
+        self.compatibility_report(release_id, baseline, &snapshot)
+            .await
+    }
+
+    /// Compares two published Releases without changing lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown/corrupt Release packages or bounded comparison failures.
+    pub async fn diff(
+        &self,
+        base_release_id: ReleaseId,
+        candidate_release_id: ReleaseId,
+    ) -> Result<LocalReleaseDiff, LocalReleaseError> {
+        let base = self.package(base_release_id).await?;
+        let candidate = self.package(candidate_release_id).await?;
+        let api = CompatibilityEngine::compare_api(&base, &candidate).map_err(map_compatibility)?;
+        let storage = CompatibilityEngine::coexist(&base, &candidate).map_err(map_compatibility)?;
+        let mut combined = diagnostics(api.clone(), base_release_id, "api");
+        combined.extend(diagnostics(storage.clone(), base_release_id, "storage"));
+        combined.sort_by(|left, right| {
+            (left.compatibility_kind, left.code, &left.subject).cmp(&(
+                right.compatibility_kind,
+                right.code,
+                &right.subject,
+            ))
+        });
+        combined.dedup();
+        Ok(LocalReleaseDiff {
+            base_release_id,
+            candidate_release_id,
+            api_compatible: api.compatible,
+            storage_compatible: storage.compatible,
+            diagnostics: combined,
+        })
+    }
+
+    /// Loads one published Release manifest plus its current lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown Releases and manifest integrity/storage failures.
+    pub async fn inspect_release(
+        &self,
+        release_id: ReleaseId,
+    ) -> Result<LocalReleaseInspection, LocalReleaseError> {
+        let snapshot = self.snapshot().await?;
+        let status = snapshot
+            .release(release_id)
+            .ok_or(LocalReleaseError::NotFound)?
+            .status;
+        let manifest = self
+            .repository
+            .manifest(self.state.scope(), release_id)
+            .await
+            .map_err(map_repository)?;
+        Ok(LocalReleaseInspection { status, manifest })
     }
 
     /// Moves one Channel to a compatible servable Release using repository CAS.
@@ -326,6 +460,72 @@ impl LocalReleaseManager {
         .await
     }
 
+    /// Removes one unreferenced Release from the exact-target serving closure.
+    ///
+    /// The caller must first remove every Channel and serving-policy reference. The expected
+    /// serving revision fences concurrent Channel movement; once deprecation begins, repository
+    /// lifecycle validation prevents the Release from being rebound to a Channel.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale revisions, referenced/invalid lifecycle states, or storage failures.
+    pub async fn retire(
+        &self,
+        release_id: ReleaseId,
+        expected_serving_revision: u64,
+    ) -> Result<LocalReleaseOutcome, LocalReleaseError> {
+        let snapshot = self.snapshot().await?;
+        if snapshot.revision() != expected_serving_revision {
+            return Err(LocalReleaseError::Conflict);
+        }
+        let release = snapshot
+            .release(release_id)
+            .ok_or(LocalReleaseError::NotFound)?;
+        if snapshot
+            .channels()
+            .any(|binding| binding.release_id == release_id)
+        {
+            return Err(LocalReleaseError::Conflict);
+        }
+        match release.status {
+            ReleaseStatus::Retired => {
+                return Ok(outcome(
+                    release_id,
+                    None,
+                    ReleaseStatus::Retired,
+                    snapshot.revision(),
+                    true,
+                    Vec::new(),
+                ));
+            }
+            ReleaseStatus::Servable => {
+                self.transition(
+                    release_id,
+                    ReleaseStatus::Servable,
+                    ReleaseStatus::Deprecated,
+                )
+                .await?;
+            }
+            ReleaseStatus::Deprecated => {}
+            _ => return Err(LocalReleaseError::Conflict),
+        }
+        self.transition(
+            release_id,
+            ReleaseStatus::Deprecated,
+            ReleaseStatus::Retired,
+        )
+        .await?;
+        let revision = self.snapshot().await?.revision();
+        Ok(outcome(
+            release_id,
+            None,
+            ReleaseStatus::Retired,
+            revision,
+            false,
+            Vec::new(),
+        ))
+    }
+
     /// Returns one coherent read-only Release/Channel status report.
     ///
     /// # Errors
@@ -345,16 +545,28 @@ impl LocalReleaseManager {
             Err(error) => return Err(error),
         };
         let default_channel = snapshot.default_channel().cloned();
-        let releases = snapshot
-            .releases()
-            .map(|release| LocalReleaseStatus {
+        let channels = snapshot.channels().collect::<Vec<_>>();
+        let mut releases = Vec::new();
+        for release in snapshot.releases() {
+            let manifest = self
+                .repository
+                .manifest(self.state.scope(), release.release_id)
+                .await
+                .map_err(map_repository)?;
+            releases.push(LocalReleaseStatus {
                 release_id: release.release_id,
                 status: release.status,
                 runtime_version: release.runtime_version.to_string(),
-            })
-            .collect();
-        let channels = snapshot
-            .channels()
+                schema_id: manifest.schema_contract_hash.to_string(),
+                active_reasons: release_active_reasons(
+                    release.release_id,
+                    release.status,
+                    &channels,
+                ),
+            });
+        }
+        let channels = channels
+            .into_iter()
             .map(|binding| LocalChannelStatus {
                 default: default_channel.as_ref() == Some(&binding.channel),
                 channel: binding.channel,
@@ -473,21 +685,18 @@ impl LocalReleaseManager {
                 Vec::new(),
             ));
         }
-        if let Some(base_id) = current {
-            let base = self.package(base_id).await?;
-            let candidate = self.package(release_id).await?;
-            let report =
-                CompatibilityEngine::compare(&base, &candidate).map_err(map_compatibility)?;
-            if !report.compatible {
-                return Ok(outcome(
-                    release_id,
-                    Some(channel),
-                    target.status,
-                    snapshot.revision(),
-                    false,
-                    diagnostics(report),
-                ));
-            }
+        let report = self
+            .compatibility_report(release_id, current, &snapshot)
+            .await?;
+        if !report.compatible {
+            return Ok(outcome(
+                release_id,
+                Some(channel),
+                target.status,
+                snapshot.revision(),
+                false,
+                report.diagnostics,
+            ));
         }
         self.repository
             .apply(
@@ -601,19 +810,61 @@ impl LocalReleaseManager {
     async fn compatibility_report(
         &self,
         release_id: ReleaseId,
-        baseline: Option<ReleaseId>,
-    ) -> Result<CompatibilityReport, LocalReleaseError> {
+        api_baseline: Option<ReleaseId>,
+        snapshot: &ServingSnapshot,
+    ) -> Result<LocalCompatibilityReport, LocalReleaseError> {
         let candidate = self.package(release_id).await?;
-        match baseline {
-            Some(base_id) if base_id != release_id => {
-                let base = self.package(base_id).await?;
-                CompatibilityEngine::compare(&base, &candidate).map_err(map_compatibility)
-            }
-            _ => Ok(CompatibilityReport {
-                compatible: true,
-                diagnostics: Vec::new(),
-            }),
+        let mut active_release_ids = snapshot
+            .releases()
+            .filter(|release| {
+                release.release_id != release_id && release.status.explicitly_invocable()
+            })
+            .map(|release| release.release_id)
+            .collect::<Vec<_>>();
+        active_release_ids.sort_unstable();
+        let mut all_diagnostics = Vec::new();
+        for active_release_id in &active_release_ids {
+            let active = self.package(*active_release_id).await?;
+            let storage_report =
+                CompatibilityEngine::coexist(&active, &candidate).map_err(map_compatibility)?;
+            all_diagnostics.extend(diagnostics(storage_report, *active_release_id, "storage"));
+            let api_report =
+                CompatibilityEngine::compare_api(&active, &candidate).map_err(map_compatibility)?;
+            all_diagnostics.extend(diagnostics(api_report, *active_release_id, "api"));
         }
+        if let Some(base_id) = api_baseline.filter(|base_id| *base_id != release_id) {
+            let base = self.package(base_id).await?;
+            let report =
+                CompatibilityEngine::compare_api(&base, &candidate).map_err(map_compatibility)?;
+            all_diagnostics.extend(diagnostics(report, base_id, "api"));
+        }
+        all_diagnostics.sort_by(|left, right| {
+            (
+                left.against_release_id,
+                left.compatibility_kind,
+                left.code,
+                &left.subject,
+            )
+                .cmp(&(
+                    right.against_release_id,
+                    right.compatibility_kind,
+                    right.code,
+                    &right.subject,
+                ))
+        });
+        all_diagnostics.dedup();
+        Ok(LocalCompatibilityReport {
+            candidate_release_id: release_id,
+            candidate_schema_id: candidate.manifest().schema_contract_hash.to_string(),
+            candidate_index_id: candidate.manifest().index_contract_hash.to_string(),
+            candidate_cron_id: canonical_cron_declarations_hash(candidate.manifest())
+                .map_err(|_| LocalReleaseError::Corruption)?
+                .to_string(),
+            serving_revision: snapshot.revision(),
+            active_release_ids,
+            compatible: all_diagnostics.is_empty(),
+            diagnostics: all_diagnostics,
+        })
     }
 
     async fn reconcile_cron(&self, release_id: ReleaseId) -> Result<(), LocalReleaseError> {
@@ -642,7 +893,7 @@ impl LocalReleaseManager {
     }
 }
 
-fn select_baseline(
+fn selected_baseline(
     snapshot: &ServingSnapshot,
     selected: Option<&ChannelName>,
 ) -> Result<Option<ReleaseId>, LocalReleaseError> {
@@ -652,28 +903,41 @@ fn select_baseline(
             .map(Some)
             .ok_or(LocalReleaseError::NotFound);
     }
-    if let Some(channel) = snapshot.default_channel() {
-        return snapshot
-            .channel_release(channel)
-            .map(Some)
-            .ok_or(LocalReleaseError::Corruption);
-    }
-    if snapshot.channels().len() == 0 {
-        Ok(None)
-    } else {
-        Err(LocalReleaseError::InvalidRequest)
-    }
+    Ok(None)
 }
 
-fn diagnostics(report: CompatibilityReport) -> Vec<LocalCompatibilityDiagnostic> {
+fn diagnostics(
+    report: CompatibilityReport,
+    against_release_id: ReleaseId,
+    compatibility_kind: &'static str,
+) -> Vec<LocalCompatibilityDiagnostic> {
     report
         .diagnostics
         .into_iter()
         .map(|diagnostic| LocalCompatibilityDiagnostic {
             code: diagnostic.code,
             subject: diagnostic.subject,
+            against_release_id,
+            compatibility_kind,
         })
         .collect()
+}
+
+fn release_active_reasons(
+    release_id: ReleaseId,
+    status: ReleaseStatus,
+    channels: &[runku_releases::ChannelBinding],
+) -> Vec<String> {
+    let mut reasons = channels
+        .iter()
+        .filter(|binding| binding.release_id == release_id)
+        .map(|binding| format!("channel:{}", binding.channel))
+        .collect::<Vec<_>>();
+    if status.explicitly_invocable() {
+        reasons.push("exactReleaseTarget".to_owned());
+    }
+    reasons.sort();
+    reasons
 }
 
 fn outcome(
@@ -821,10 +1085,18 @@ fn current_timestamp() -> Result<TimestampMicros, LocalReleaseError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, str::FromStr};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        net::SocketAddr,
+        str::FromStr,
+    };
 
+    use runku_contracts::{
+        Contract, DocumentSchemaV1, DocumentTableContract, encode_contract, encode_document_schema,
+    };
     use runku_core::{
-        BuildId, ChannelName, FunctionId, PinnedCode, ProjectId, ReleaseId, WorkspaceRef,
+        BuildId, ChannelName, CodeTarget, FunctionId, PinnedCode, ProjectId, ReleaseId,
+        WorkspaceRef,
     };
     use runku_cron::{CronContext, CronRepository, CronRepositoryConfig, SqlCronRepository};
     use runku_development::DevelopmentActor;
@@ -833,6 +1105,7 @@ mod tests {
         ReleaseManifestV1, ReleaseStatus, RuntimeClass, SafeEsmBundleV1, Sha256Digest,
         encode_release_manifest, encode_safe_esm_bundle,
     };
+    use runku_schema::{SchemaCatalog, encode_schema_catalog};
     use runku_value::TimestampMicros;
     use tempfile::tempdir;
 
@@ -924,6 +1197,73 @@ mod tests {
                 function: "actions.cron".parse()?,
                 args: runku_value::CanonicalValue::Null,
             }],
+        };
+        Ok(Package {
+            release_id,
+            manifest: encode_release_manifest(&manifest)?,
+            artifact,
+        })
+    }
+
+    fn schema_package(
+        project_id: ProjectId,
+        sequence: u128,
+        avatar: Option<bool>,
+    ) -> Result<Package, Box<dyn std::error::Error>> {
+        let source = format!("export default () => ({sequence});");
+        let arguments_bytes = encode_contract(&Contract::Null)?;
+        let result_bytes = encode_contract(&Contract::Any)?;
+        let string = Contract::String {
+            minimum_bytes: Some(1),
+            maximum_bytes: Some(100),
+        };
+        let mut fields = BTreeMap::from([("name".to_owned(), string.clone())]);
+        let mut optional = BTreeSet::new();
+        if let Some(optional_avatar) = avatar {
+            fields.insert("avatar".to_owned(), string);
+            if optional_avatar {
+                optional.insert("avatar".to_owned());
+            }
+        }
+        let schema = DocumentSchemaV1::new(vec![DocumentTableContract {
+            id: runku_core::TableId::from_ulid(ulid::Ulid::from(777_u128)),
+            name: "users".to_owned(),
+            document_contract: Contract::Object { fields, optional },
+        }])?;
+        let schema_bytes = encode_document_schema(&schema)?;
+        let indexes = encode_schema_catalog(&SchemaCatalog::new(project_id, Vec::new())?)?;
+        let bundle = SafeEsmBundleV1::from_sources([
+            source.clone(),
+            String::from_utf8(arguments_bytes.clone())?,
+            String::from_utf8(result_bytes.clone())?,
+            String::from_utf8(schema_bytes.clone())?,
+            String::from_utf8(indexes.clone())?,
+        ])?;
+        let artifact = encode_safe_esm_bundle(&bundle)?;
+        let release_id = ReleaseId::from_ulid(ulid::Ulid::from(sequence + 100));
+        let manifest = ReleaseManifestV1 {
+            release_id,
+            project_id,
+            build_id: BuildId::from_ulid(ulid::Ulid::from(sequence + 200)),
+            created_at: TimestampMicros::new(i64::try_from(sequence)?),
+            runtime_version: "runku-js-1".parse()?,
+            artifact: bundle.descriptor()?,
+            function_contract_hash: Sha256Digest::of(b"function-set"),
+            schema_contract_hash: Sha256Digest::of(&schema_bytes),
+            index_contract_hash: Sha256Digest::of(&indexes),
+            functions: vec![FunctionManifest {
+                id: FunctionId::from_ulid(ulid::Ulid::from(990_u128)),
+                name: "queries.version".parse()?,
+                function_type: FunctionType::Query,
+                visibility: FunctionVisibility::Public,
+                auth_policy: AuthPolicy::None,
+                runtime_class: RuntimeClass::SafeV8,
+                implementation_hash: Sha256Digest::of(source.as_bytes()),
+                arguments_contract_hash: Sha256Digest::of(&arguments_bytes),
+                result_contract_hash: Sha256Digest::of(&result_bytes),
+                capabilities: Vec::new(),
+            }],
+            cron_definitions: Vec::new(),
         };
         Ok(Package {
             release_id,
@@ -1052,10 +1392,18 @@ mod tests {
         publish(directory.path(), &workspace, &incompatible).await?;
         let blocked = manager.release(incompatible.release_id, None).await?;
         assert_eq!(blocked.status, ReleaseStatus::CompatibilityBlocked);
-        assert_eq!(blocked.diagnostics.len(), 1);
+        assert_eq!(blocked.diagnostics.len(), 2);
+        assert!(blocked.diagnostics.iter().all(|diagnostic| {
+            diagnostic.code == "PUBLIC_FUNCTION_METADATA_CHANGED"
+                && diagnostic.compatibility_kind == "api"
+        }));
         assert_eq!(
-            blocked.diagnostics[0].code,
-            "PUBLIC_FUNCTION_METADATA_CHANGED"
+            blocked
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.against_release_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([first.release_id, second.release_id])
         );
         let blocked_revision = blocked.serving_revision;
         let blocked_replay = manager.release(incompatible.release_id, None).await?;
@@ -1071,6 +1419,105 @@ mod tests {
                 .await,
             Err(LocalReleaseError::Conflict)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optional_schema_views_share_channels_and_rollback_while_required_addition_blocks()
+    -> TestResult {
+        let directory = tempdir()?;
+        let workspace = WorkspaceRef::from_str("default")?;
+        let (state, _) = initialize_local(
+            directory.path(),
+            workspace.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 3291)),
+            TimestampMicros::new(10),
+        )
+        .await?;
+        let stable = ChannelName::from_str("stable")?;
+        let preview = ChannelName::from_str("preview")?;
+        let first = schema_package(state.project_id, 30, None)?;
+        publish(directory.path(), &workspace, &first).await?;
+        let manager = LocalReleaseManager::open(directory.path()).await?;
+        assert_eq!(
+            manager.release(first.release_id, None).await?.status,
+            ReleaseStatus::Servable
+        );
+        manager
+            .promote(
+                stable.clone(),
+                first.release_id,
+                LocalChannelExpectation::Empty,
+            )
+            .await?;
+
+        let second = schema_package(state.project_id, 31, Some(true))?;
+        publish(directory.path(), &workspace, &second).await?;
+        let preflight = manager.preflight(second.release_id, None).await?;
+        assert!(preflight.compatible);
+        assert_eq!(preflight.active_release_ids, vec![first.release_id]);
+        assert_eq!(
+            manager.release(second.release_id, None).await?.status,
+            ReleaseStatus::Servable
+        );
+        assert_eq!(
+            manager
+                .promote(preview, second.release_id, LocalChannelExpectation::Empty,)
+                .await?
+                .status,
+            ReleaseStatus::Active
+        );
+        manager
+            .promote(
+                stable.clone(),
+                second.release_id,
+                LocalChannelExpectation::Release(first.release_id),
+            )
+            .await?;
+        assert_eq!(
+            manager
+                .rollback(stable.clone(), second.release_id, first.release_id)
+                .await?
+                .status,
+            ReleaseStatus::Active
+        );
+        manager
+            .promote(
+                stable,
+                second.release_id,
+                LocalChannelExpectation::Release(first.release_id),
+            )
+            .await?;
+        let before_retire = manager.status().await?;
+        assert_eq!(
+            manager
+                .retire(first.release_id, before_retire.serving_revision)
+                .await?
+                .status,
+            ReleaseStatus::Retired
+        );
+        assert!(matches!(
+            manager
+                .resolve_code(&CodeTarget::Release(first.release_id))
+                .await,
+            Err(LocalReleaseError::InvalidRequest)
+        ));
+
+        let required = schema_package(state.project_id, 32, Some(false))?;
+        publish(directory.path(), &workspace, &required).await?;
+        assert_eq!(
+            manager
+                .preflight(required.release_id, None)
+                .await?
+                .active_release_ids,
+            vec![second.release_id]
+        );
+        let blocked = manager.release(required.release_id, None).await?;
+        assert_eq!(blocked.status, ReleaseStatus::CompatibilityBlocked);
+        assert!(blocked.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "SCHEMA_VIEWS_CANNOT_COEXIST"
+                && diagnostic.compatibility_kind == "storage"
+        }));
         Ok(())
     }
 }

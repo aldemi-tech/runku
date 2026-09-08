@@ -145,7 +145,9 @@ impl ServingPolicy {
     ///
     /// # Errors
     ///
-    /// Rejects duplicates, invalid weights/counts, invalid mode shape, and incompatible contracts.
+    /// Rejects duplicates, invalid weights/counts, invalid mode shape, and index/Cron divergence.
+    /// Schema coexistence is proven from immutable artifact contracts by the Product lifecycle
+    /// before this hash-only durable policy value is constructed.
     pub fn new(
         project_id: ProjectId,
         mode: ServingMode,
@@ -209,7 +211,9 @@ impl ServingPolicy {
                 .checked_add(u16::from(entry.weight_percent))
                 .ok_or(ServingPolicyError::LimitExceeded)?;
             previous = Some(entry.release_id);
-            if entry.contracts != baseline {
+            if entry.contracts.indexes != baseline.indexes
+                || entry.contracts.cron_declarations != baseline.cron_declarations
+            {
                 return Err(ServingPolicyError::IncompatibleContracts);
             }
         }
@@ -1064,10 +1068,19 @@ mod tests {
     }
 
     #[test]
-    fn every_required_contract_hash_blocks_mixed_serving() -> Result<(), Box<dyn Error>> {
+    fn schema_hash_may_differ_after_preflight_but_indexes_and_cron_must_match()
+    -> Result<(), Box<dyn Error>> {
         let baseline = manifest(1, 10, 11, Some("0 0 * * *"))?;
+        let schema_evolved = manifest(2, 12, 11, Some("0 0 * * *"))?;
+        assert!(
+            ServingPolicy::from_manifests(
+                scope(),
+                ServingMode::Gradual,
+                [(&baseline, 50), (&schema_evolved, 50)],
+            )
+            .is_ok()
+        );
         for incompatible in [
-            manifest(2, 12, 11, Some("0 0 * * *"))?,
             manifest(3, 10, 13, Some("0 0 * * *"))?,
             manifest(4, 10, 11, Some("0 1 * * *"))?,
         ] {

@@ -246,6 +246,40 @@ impl Contract {
         self.validate_value_at(value, &mut steps)
     }
 
+    /// Projects one stored canonical value into this Release's read view.
+    ///
+    /// Object keys unknown to this contract are omitted without changing the stored value. Known
+    /// keys and array items are projected recursively. Missing required fields and incompatible
+    /// scalar values fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same bounded mismatch categories as validation when no safe view exists.
+    pub fn project_value(&self, value: &CanonicalValue) -> Result<CanonicalValue, ValidationError> {
+        let mut steps = 0_usize;
+        self.project_value_at(value, &mut steps)
+    }
+
+    /// Merges a Release-authored replacement with fields owned only by other compatible Release
+    /// views.
+    ///
+    /// `replacement` must already satisfy this contract. Object keys absent from this contract are
+    /// copied from `stored`; known keys remain fully controlled by the replacement. This makes an
+    /// old Release's full replace non-destructive for fields introduced by a newer Release.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid replacement or an adversarially complex value.
+    pub fn preserve_unknown_fields(
+        &self,
+        stored: &CanonicalValue,
+        replacement: &CanonicalValue,
+    ) -> Result<CanonicalValue, ValidationError> {
+        self.validate_value(replacement)?;
+        let mut steps = 0_usize;
+        self.preserve_unknown_fields_at(stored, replacement, &mut steps)
+    }
+
     fn validate_definition_at(&self, depth: usize, nodes: &mut usize) -> Result<(), ContractError> {
         *nodes = nodes.saturating_add(1);
         if depth > CONTRACT_MAX_DEPTH || *nodes > CONTRACT_MAX_NODES {
@@ -332,6 +366,117 @@ impl Contract {
                 Ok(())
             }
             Self::Any | Self::Null | Self::Boolean | Self::Timestamp => Ok(()),
+        }
+    }
+
+    fn project_value_at(
+        &self,
+        value: &CanonicalValue,
+        steps: &mut usize,
+    ) -> Result<CanonicalValue, ValidationError> {
+        *steps = steps.saturating_add(1);
+        if *steps > VALIDATION_MAX_STEPS {
+            return Err(ValidationError::BoundViolation);
+        }
+        match (self, value) {
+            (Self::Any, value) => Ok(value.clone()),
+            (Self::Object { fields, optional }, CanonicalValue::Object(stored)) => {
+                let mut projected = BTreeMap::new();
+                for (name, contract) in fields {
+                    match stored.get(name) {
+                        Some(value) => {
+                            projected
+                                .insert(name.clone(), contract.project_value_at(value, steps)?);
+                        }
+                        None if optional.contains(name) => {}
+                        None => return Err(ValidationError::ObjectShape),
+                    }
+                }
+                Ok(CanonicalValue::Object(projected))
+            }
+            (Self::Array { items, .. }, CanonicalValue::Array(values)) => {
+                let projected = values
+                    .iter()
+                    .map(|value| items.project_value_at(value, steps))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result = CanonicalValue::Array(projected);
+                self.validate_value(&result)?;
+                Ok(result)
+            }
+            (Self::Union { variants }, value) => {
+                for variant in variants {
+                    if let Ok(projected) = variant.project_value_at(value, steps)
+                        && variant.validate_value(&projected).is_ok()
+                    {
+                        return Ok(projected);
+                    }
+                }
+                Err(ValidationError::UnionMismatch)
+            }
+            (_, value) => {
+                self.validate_value(value)?;
+                Ok(value.clone())
+            }
+        }
+    }
+
+    fn preserve_unknown_fields_at(
+        &self,
+        stored: &CanonicalValue,
+        replacement: &CanonicalValue,
+        steps: &mut usize,
+    ) -> Result<CanonicalValue, ValidationError> {
+        *steps = steps.saturating_add(1);
+        if *steps > VALIDATION_MAX_STEPS {
+            return Err(ValidationError::BoundViolation);
+        }
+        match (self, stored, replacement) {
+            (
+                Self::Object { fields, .. },
+                CanonicalValue::Object(stored),
+                CanonicalValue::Object(replacement),
+            ) => {
+                let mut merged = replacement.clone();
+                for (name, value) in stored {
+                    match (fields.get(name), replacement.get(name)) {
+                        (None, _) => {
+                            merged.insert(name.clone(), value.clone());
+                        }
+                        (Some(contract), Some(next)) => {
+                            merged.insert(
+                                name.clone(),
+                                contract.preserve_unknown_fields_at(value, next, steps)?,
+                            );
+                        }
+                        (Some(_), None) => {}
+                    }
+                }
+                Ok(CanonicalValue::Object(merged))
+            }
+            (
+                Self::Array { items, .. },
+                CanonicalValue::Array(stored),
+                CanonicalValue::Array(replacement),
+            ) => Ok(CanonicalValue::Array(
+                replacement
+                    .iter()
+                    .enumerate()
+                    .map(|(index, next)| {
+                        stored.get(index).map_or_else(
+                            || Ok(next.clone()),
+                            |value| items.preserve_unknown_fields_at(value, next, steps),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            (Self::Union { variants }, stored, replacement) => {
+                let variant = variants
+                    .iter()
+                    .find(|variant| variant.validate_value(replacement).is_ok())
+                    .ok_or(ValidationError::UnionMismatch)?;
+                variant.preserve_unknown_fields_at(stored, replacement, steps)
+            }
+            (_, _, replacement) => Ok(replacement.clone()),
         }
     }
 
@@ -492,6 +637,43 @@ impl DocumentSchemaV1 {
             .ok_or(ValidationError::UnknownTable)?
             .document_contract
             .validate_value(value)
+    }
+
+    /// Returns the selected Release's non-destructive view of one stored document.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown table or stored data that cannot satisfy required visible fields.
+    pub fn project_document(
+        &self,
+        table_id: TableId,
+        value: &CanonicalValue,
+    ) -> Result<CanonicalValue, ValidationError> {
+        self.table(table_id)?.document_contract.project_value(value)
+    }
+
+    /// Preserves fields outside the selected Release's view during a full replacement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown table, an invalid replacement, or excessive recursive work.
+    pub fn preserve_unknown_document_fields(
+        &self,
+        table_id: TableId,
+        stored: &CanonicalValue,
+        replacement: &CanonicalValue,
+    ) -> Result<CanonicalValue, ValidationError> {
+        self.table(table_id)?
+            .document_contract
+            .preserve_unknown_fields(stored, replacement)
+    }
+
+    fn table(&self, table_id: TableId) -> Result<&DocumentTableContract, ValidationError> {
+        self.tables
+            .binary_search_by_key(&table_id, |table| table.id)
+            .ok()
+            .and_then(|index| self.tables.get(index))
+            .ok_or(ValidationError::UnknownTable)
     }
 }
 

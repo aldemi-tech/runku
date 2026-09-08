@@ -49,6 +49,13 @@ revision so Runku can derive removals from trusted schema metadata and reconstru
 batch after an uncertain response. A stale revision or mismatched observed value returns a
 conflict. Validation failures return `PRODUCT_DATA_VALIDATION_FAILED` without echoing stored data.
 
+Each Release schema is a read/write view over the Environment's canonical document. Reads project
+out fields unknown to the selected Release without rewriting storage. A full replace controls every
+field declared by that Release but recursively preserves stored fields known only to another
+compatible active Release. This permits an optional-field expansion, concurrent old/new traffic,
+and Channel rollback without an old writer erasing the new field. Explicit delete still deletes the
+complete document. A missing required visible field or incompatible stored scalar fails closed.
+
 Catalog reads use `GET /functions` and `GET /schema/tables` with `target`, `after`, and `limit`
 (`1..=200`) under `releases:read`. Responses include both the requested target and immutable
 resolved pin, Release identity, serving revision, and schema digest. This lets a console retain an
@@ -83,6 +90,11 @@ one Mutation intent across retry/replay and cannot be reused for different argum
 Index scans use explicit bounds and a bounded limit. Schema evolution must make an index ready
 before code assumes it and retire it only after live Releases/subscriptions/schedules no longer
 reference it.
+
+The current Release coexistence gate keeps index contracts byte-identical; persisted
+building/ready/backfill state is not yet implemented. Optional document-field evolution is
+supported, but adding/changing an index remains a blocked rollout rather than an inferred safe
+operation.
 
 ## Realtime delivery model
 

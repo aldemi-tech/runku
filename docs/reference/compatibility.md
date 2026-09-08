@@ -36,6 +36,20 @@ active writer per Environment: it does not provide same-Environment active-activ
 scheduler fencing, or a Kubernetes control plane. Provider fleets may prefer the currently
 assigned warm member, but must fence it before replacement.
 
+Version 0.5.1 adds Release-scoped document read views and non-destructive full replace semantics.
+Freeze and Channel movement check every `servable`/`active`/`deprecated` Release, including
+Releases reachable only by an explicit target. Optional field addition/hiding can coexist across named Channels and a
+weighted policy; reads project the selected view and an older replacement preserves newer unknown
+fields. Required additions and shared field-contract changes fail closed. Logical index and Cron
+contract changes still require an atomic staged operation because durable index readiness is not
+implemented in this version.
+
+Management compatibility evidence is v2. Candidate preflight is available before freeze and a
+revision-bound POST prevents applying evidence after Release/Channel or serving-policy state has
+advanced. This is an additive Management surface but a behavioral hardening of Release activation:
+a candidate that previously bypassed comparison through a null baseline or empty Channel is now
+blocked when any active-closure member is incompatible.
+
 Version 0.4.5 adds only additive auth response fields and endpoints. A 0.4.5 CLI can still link
 non-interactively to an older server with explicit IDs; parameterless interactive linking requires
 the new resource catalog. Managed enrollment is disabled unless both gateway and server configure
@@ -224,14 +238,15 @@ it is adopted. The authenticated Management routes and `configuration:read`/
 
 | Class | Examples | Deployment consequence |
 |---|---|---|
-| additive | new Function, optional field, new table/index | old callers can continue, but serving-policy hash rules may still block mixed Releases |
+| additive | new Function, optional field, new table | optional schema views may coexist after full active-closure preflight; caller API compatibility still applies |
 | behavioral | changed auth, permission, limit, retry/effect/timing | coordinate callers/operations even when TypeScript shape is unchanged |
 | breaking | removed Function, required field, incompatible return, renamed table/index | staged migration or atomic cutover; rollback may be limited |
 | security fix | newly rejects formerly accepted behavior | prioritize safety; communicate intentional incompatibility |
 
-The current gradual serving policy requires byte-identical schema, index, and Cron contract hashes
-for every Release in the weighted set. “Logically compatible” optional additions still produce a
-different hash and therefore require an atomic cutover in that policy version.
+The current gradual serving policy permits different schema hashes only after immutable artifact
+preflight proves symmetric Release-view coexistence. Index and Cron contract hashes remain
+byte-identical. Required-field additions, type/bound changes, Table-ID renames, and unready index
+changes remain blocked.
 
 For durable schema, use expand → backfill → contract and preserve backward reads through the entire
 rollout/rollback window. Channel rollback never rewrites stored documents.
@@ -246,12 +261,14 @@ this portable Product desired state.
 The standalone serving-policy registry is another compatible additive source-line capability. Its
 schema v1 adds only namespaced policy, weighted-Release, operation, audit, and migration tables.
 Each policy stores canonical schema, logical-index, and Cron-declaration hashes derived from
-validated Release Manifest v1 values. Multiple Releases fail closed unless all three hashes are
-byte-identical. The compact gateway attaches exactly converged policies to
+validated Release Manifest v1 values. Product lifecycle validates schema pairs from verified
+artifacts before persisting a policy; logical-index and Cron hashes remain identical. The compact gateway attaches exactly converged policies to
 `environment:default`: request/subscription identity selects Query, Action, and Realtime traffic,
-while Mutation selection derives from `OperationId`. Explicit Release, Channel, and Workspace
-targets retain their existing semantics. Safe coexistence beyond the current exact-hash rule and
-distributed-runtime qualification remain separate compatibility gates.
+while Mutation selection derives from `OperationId`. Explicit Release and Channel targets
+participate in the same invocable closure until an explicitly fenced retirement verifies that no
+Channel, policy, Cron activation, or nonterminal Scheduled Invocation retains the Release;
+Workspace targets remain development-scoped.
+Index-build readiness and distributed-runtime qualification remain separate compatibility gates.
 
 ## Target compatibility
 

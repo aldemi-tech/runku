@@ -148,8 +148,9 @@ impl ManagementProduct for DataProbeProduct {
     ) -> Result<ManagementServingCompatibility, ManagementProductError> {
         self.compatibility_reads.fetch_add(1, Ordering::SeqCst);
         Ok(ManagementServingCompatibility {
-            version: 1,
+            version: 2,
             policy_revision: 2,
+            release_serving_revision: 3,
             compatible: true,
             converged: true,
             schema_contract_hash:
@@ -163,6 +164,9 @@ impl ManagementProduct for DataProbeProduct {
                 weight_percent: 100,
             }],
             diagnostics: Vec::new(),
+            candidate_release_id: None,
+            active_release_ids: vec!["rel_00000000000000000000000001".to_owned()],
+            diagnostic_details: Vec::new(),
         })
     }
 

@@ -21,7 +21,9 @@ Base path:
 | read current policy | `GET <base>/serving-policy` | `releases:read` |
 | replace policy | `PUT <base>/serving-policy` | `channels:promote` |
 | reconcile uncertain operation | `GET <base>/serving-policy-operations/{opn_*}` | `releases:read` |
-| inspect compatibility | `GET <base>/schemas/compatibility` | `releases:read` |
+| inspect candidate compatibility | `GET <base>/schemas/compatibility?candidateReleaseId=rel_*&againstChannel=stable` | `releases:read` |
+| revision-bound preflight | `POST <base>/serving-policy/preflight` | `releases:read` |
+| compare two Releases | `POST <base>/releases/diff` | `releases:read` |
 
 All calls use an operator `rk_at_v1_*` bearer. PUT also requires one canonical
 `Idempotency-Key: opn_*` and current compare-and-set revision.
@@ -122,15 +124,22 @@ that new revision before evaluating rollout metrics.
 
 ## Compatibility gate
 
-A multi-Release policy requires every Release to have identical:
+Every `servable`, `active`, or `deprecated` Release belongs to the Environment-wide active closure
+because an explicit `release:*` target can invoke it. Freeze, a new empty Channel, Channel movement,
+rollback, and weighted-policy replacement cannot bypass that closure.
 
-1. schema contract hash;
-2. logical index contract hash;
-3. complete ordered Cron declaration hash.
+Schema hashes may differ when the immutable schemas prove symmetric storage-view coexistence:
 
-If any differs, PUT fails with `SERVING_POLICY_INCOMPATIBLE_CONTRACTS` and does not change desired
-state. This is deliberately conservative: adding even a compatible optional schema field/index/
-Cron declaration prevents those Releases from sharing one gradual policy in the current contract.
+- a field present in only one Release must be optional there;
+- a field present in both Releases has the same required/optional status and accepted value set;
+- a shared Table ID cannot change its logical name;
+- fields/tables hidden by one view are projected out on reads, not physically deleted;
+- a full replace preserves recursively stored fields unknown to the writing Release.
+
+Adding a required field, changing a shared field contract, or renaming a Table ID is blocked.
+Index and complete ordered Cron hashes must still be identical. A changed index remains blocked
+until a future persisted building/ready/retiring lifecycle proves backfill readiness; this release
+does not infer readiness from an index declaration.
 
 Use:
 
@@ -140,9 +149,15 @@ curl --fail-with-body \
   "${RUNKU_MANAGEMENT_URL}/v1/projects/${RUNKU_PROJECT_ID}/environments/${RUNKU_ENVIRONMENT_ID}/schemas/compatibility"
 ```
 
-to inspect shared hashes, Releases, diagnostics, and convergence for the persisted policy. Hash
-equality does not replace Release ownership, lifecycle, artifact-integrity, runtime, or
-authorization checks.
+to inspect persisted policy evidence. Add `candidateReleaseId` and optional `againstChannel` to
+preflight an unpublished-to-serving candidate. Candidate responses are v2 and include
+`releaseServingRevision`, `activeReleaseIds`, and structured `diagnosticDetails`.
+
+Immediately before a rollout mutation, POST the same candidate plus the exact observed
+`expectedReleaseServingRevision` and `expectedPolicyRevision` to `<base>/serving-policy/preflight`.
+Either revision changing produces a conflict; read and review the new closure rather than applying
+stale compatibility evidence. Policy revision zero with `releases: []` is valid for the first
+Release and still returns the candidate's three nonempty canonical hashes.
 
 ## How a Release is selected
 
@@ -194,7 +209,11 @@ operation ID. Example finish:
 ```
 
 Retain the prior Release and data compatibility through the rollback window. Removing it from the
-policy does not retire/delete it automatically.
+policy does not retire/delete it automatically. When the rollback window closes, first remove all
+Channel and policy references, disable its Cron activations, and drain/cancel pending work. Then
+`POST <base>/releases/{release_id}/retire` with both observed revisions. Retirement is conflict-safe
+and is the explicit boundary after which exact invocation is rejected and compatibility no longer
+needs to include that historical Release; artifact retention is a separate concern.
 
 ## Roll back traffic
 

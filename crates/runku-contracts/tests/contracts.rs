@@ -191,6 +191,95 @@ fn document_schema_is_sorted_unique_canonical_and_fail_closed() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn release_views_project_reads_and_old_replacements_preserve_new_fields() -> TestResult {
+    let profile = Contract::Object {
+        fields: BTreeMap::from([("displayName".to_owned(), string(Some(1), Some(100)))]),
+        optional: BTreeSet::new(),
+    };
+    let old = DocumentSchemaV1::new(vec![DocumentTableContract {
+        id: table(7),
+        name: "users".to_owned(),
+        document_contract: Contract::Object {
+            fields: BTreeMap::from([
+                ("name".to_owned(), string(Some(1), Some(100))),
+                ("profile".to_owned(), profile),
+            ]),
+            optional: BTreeSet::new(),
+        },
+    }])?;
+    let stored = CanonicalValue::Object(BTreeMap::from([
+        (
+            "avatar".to_owned(),
+            CanonicalValue::String("s3://avatars/new".to_owned()),
+        ),
+        ("name".to_owned(), CanonicalValue::String("Ada".to_owned())),
+        (
+            "profile".to_owned(),
+            CanonicalValue::Object(BTreeMap::from([
+                (
+                    "displayName".to_owned(),
+                    CanonicalValue::String("Ada".to_owned()),
+                ),
+                (
+                    "theme".to_owned(),
+                    CanonicalValue::String("dark".to_owned()),
+                ),
+            ])),
+        ),
+    ]));
+
+    let projected = old.project_document(table(7), &stored)?;
+    assert_eq!(
+        projected,
+        CanonicalValue::Object(BTreeMap::from([
+            ("name".to_owned(), CanonicalValue::String("Ada".to_owned())),
+            (
+                "profile".to_owned(),
+                CanonicalValue::Object(BTreeMap::from([(
+                    "displayName".to_owned(),
+                    CanonicalValue::String("Ada".to_owned()),
+                )])),
+            ),
+        ]))
+    );
+
+    let old_replacement = CanonicalValue::Object(BTreeMap::from([
+        (
+            "name".to_owned(),
+            CanonicalValue::String("Ada Lovelace".to_owned()),
+        ),
+        (
+            "profile".to_owned(),
+            CanonicalValue::Object(BTreeMap::from([(
+                "displayName".to_owned(),
+                CanonicalValue::String("Countess".to_owned()),
+            )])),
+        ),
+    ]));
+    let merged = old.preserve_unknown_document_fields(table(7), &stored, &old_replacement)?;
+    let stored_avatar = match &stored {
+        CanonicalValue::Object(value) => value.get("avatar"),
+        _ => None,
+    };
+    let CanonicalValue::Object(merged) = merged else {
+        return Err("merged document is not an object".into());
+    };
+    assert_eq!(merged.get("avatar"), stored_avatar);
+    let CanonicalValue::Object(profile) = merged.get("profile").ok_or("profile missing")? else {
+        return Err("profile is not an object".into());
+    };
+    assert_eq!(
+        profile.get("theme"),
+        Some(&CanonicalValue::String("dark".to_owned()))
+    );
+    assert_eq!(
+        profile.get("displayName"),
+        Some(&CanonicalValue::String("Countess".to_owned()))
+    );
+    Ok(())
+}
+
 proptest! {
     #[test]
     fn bounded_string_contract_round_trips_and_matches_length(

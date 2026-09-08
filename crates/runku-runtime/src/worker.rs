@@ -416,10 +416,22 @@ async fn op_runku_data_get(
         .data
         .as_ref()
         .ok_or_else(|| deno_error::JsErrorBox::generic("DATA_BROKER_UNAVAILABLE"))?;
-    data.get(request, platform.deadline, platform.cancellation.clone())
+    let document = data
+        .get(request, platform.deadline, platform.cancellation.clone())
         .await
-        .map(|document| document.map(Into::into))
-        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))?;
+    document
+        .map(|mut document| {
+            if let Some(schema) = &platform.document_schema {
+                document.value = schema
+                    .project_document(document.table_id, &document.value)
+                    .map_err(|_| {
+                        deno_error::JsErrorBox::generic("DATA_READ_DOCUMENT_INCOMPATIBLE")
+                    })?;
+            }
+            Ok(document.into())
+        })
+        .transpose()
 }
 
 #[op2]
@@ -537,11 +549,33 @@ async fn op_runku_data_replace(
 ) -> Result<(), deno_error::JsErrorBox> {
     let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
     platform.budget.take()?;
-    let writer = data_writer(&platform)?;
     let revision = positive_revision(&request.expected_revision)?;
-    let value = from_wire(request.value)
+    let replacement = from_wire(request.value)
         .map_err(|_| deno_error::JsErrorBox::generic("DATA_WRITE_VALUE_INVALID"))?;
-    validate_document(&platform, request.table_id, &value)?;
+    validate_document(&platform, request.table_id, &replacement)?;
+    let writer = Arc::clone(data_writer(&platform)?);
+    let current = platform
+        .data
+        .as_ref()
+        .ok_or_else(|| deno_error::JsErrorBox::generic("DATA_BROKER_UNAVAILABLE"))?
+        .get(
+            DataGetRequest {
+                table_id: request.table_id,
+                document_id: request.document_id,
+            },
+            platform.deadline,
+            platform.cancellation.clone(),
+        )
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))?
+        .ok_or_else(|| deno_error::JsErrorBox::generic("DATA_WRITE_DOCUMENT_MISSING"))?;
+    let value = if let Some(schema) = &platform.document_schema {
+        schema
+            .preserve_unknown_document_fields(request.table_id, &current.value, &replacement)
+            .map_err(|_| deno_error::JsErrorBox::generic("DATA_WRITE_DOCUMENT_INVALID"))?
+    } else {
+        replacement
+    };
     writer
         .replace(request.table_id, request.document_id, revision, value)
         .await

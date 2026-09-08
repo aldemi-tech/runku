@@ -1,7 +1,7 @@
 //! Safe Runtime adversarial and behavioral conformance.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     sync::{
         Arc, Mutex,
@@ -600,6 +600,79 @@ struct MockMutationData {
     deletes: AtomicU64,
 }
 
+#[derive(Debug)]
+struct SchemaEvolutionData {
+    stored: CanonicalValue,
+    replacement: Mutex<Option<CanonicalValue>>,
+}
+
+#[async_trait]
+impl DataRead for SchemaEvolutionData {
+    async fn get(
+        &self,
+        request: DataGetRequest,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<Option<DataDocument>, DataReadError> {
+        Ok(Some(DataDocument {
+            table_id: request.table_id,
+            document_id: request.document_id,
+            revision: 7,
+            commit_sequence: 11,
+            created_at: TimestampMicros::new(10),
+            updated_at: TimestampMicros::new(20),
+            value: self.stored.clone(),
+        }))
+    }
+
+    async fn scan(
+        &self,
+        _request: DataScanRequest,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<Vec<DataIndexEntry>, DataReadError> {
+        Err(DataReadError::InvalidRequest)
+    }
+}
+
+#[async_trait]
+impl DataWrite for SchemaEvolutionData {
+    async fn insert(
+        &self,
+        _table_id: TableId,
+        _document_id: DocumentId,
+        _value: CanonicalValue,
+    ) -> Result<(), DataReadError> {
+        Err(DataReadError::InvalidRequest)
+    }
+
+    async fn replace(
+        &self,
+        _table_id: TableId,
+        _document_id: DocumentId,
+        expected_revision: u64,
+        value: CanonicalValue,
+    ) -> Result<(), DataReadError> {
+        if expected_revision != 7 {
+            return Err(DataReadError::InvalidRequest);
+        }
+        *self
+            .replacement
+            .lock()
+            .map_err(|_| DataReadError::Storage)? = Some(value);
+        Ok(())
+    }
+
+    async fn delete(
+        &self,
+        _table_id: TableId,
+        _document_id: DocumentId,
+        _expected_revision: u64,
+    ) -> Result<(), DataReadError> {
+        Err(DataReadError::InvalidRequest)
+    }
+}
+
 #[async_trait]
 impl DataRead for MockDataRead {
     async fn get(
@@ -923,6 +996,80 @@ async fn mutation_data_bridge_is_typed_and_capability_scoped() -> Result<(), Box
     assert_eq!(
         supervisor.invoke(query).await?,
         CanonicalValue::Boolean(true)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_schema_view_projects_reads_and_preserves_unknown_fields_on_replace()
+-> Result<(), Box<dyn Error>> {
+    let supervisor = RuntimeSupervisor::start(RuntimeLimits::builder(1, 8).build()?)?;
+    let table = TableId::from_ulid(Ulid::from(24_u128));
+    let document = DocumentId::from_ulid(Ulid::from(25_u128));
+    let string = Contract::String {
+        minimum_bytes: Some(1),
+        maximum_bytes: Some(100),
+    };
+    let old_schema = DocumentSchemaV1::new(vec![DocumentTableContract {
+        id: table,
+        name: "users".to_owned(),
+        document_contract: Contract::Object {
+            fields: BTreeMap::from([("name".to_owned(), string)]),
+            optional: BTreeSet::default(),
+        },
+    }])?;
+    let data = Arc::new(SchemaEvolutionData {
+        stored: CanonicalValue::Object(BTreeMap::from([
+            (
+                "avatar".to_owned(),
+                CanonicalValue::String("new.png".to_owned()),
+            ),
+            ("name".to_owned(), CanonicalValue::String("Ada".to_owned())),
+        ])),
+        replacement: Mutex::new(None),
+    });
+    let source = format!(
+        r#"
+        export const contract = async (ctx) => {{
+          const current = await ctx.db.get("{table}", "{document}");
+          await ctx.db.replace("{table}", "{document}", current.revision, {{ name: "Grace" }});
+          return current.value;
+        }};
+        "#
+    );
+    let request = request_with_contracts(
+        &source,
+        CanonicalValue::Null,
+        FunctionType::Mutation,
+        vec![Capability::DbRead, Capability::DbWrite],
+        &Contract::Null,
+        &Contract::Any,
+        &old_schema,
+    )?
+    .with_mutation_data(data.clone())?;
+
+    assert_eq!(
+        supervisor.invoke(request).await?,
+        CanonicalValue::Object(BTreeMap::from([(
+            "name".to_owned(),
+            CanonicalValue::String("Ada".to_owned()),
+        )]))
+    );
+    assert_eq!(
+        *data
+            .replacement
+            .lock()
+            .map_err(|_| "replacement lock poisoned")?,
+        Some(CanonicalValue::Object(BTreeMap::from([
+            (
+                "avatar".to_owned(),
+                CanonicalValue::String("new.png".to_owned())
+            ),
+            (
+                "name".to_owned(),
+                CanonicalValue::String("Grace".to_owned())
+            ),
+        ])))
     );
     Ok(())
 }

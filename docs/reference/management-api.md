@@ -103,14 +103,47 @@ successful API response implies infrastructure materialization. See
 | `PUT <base>/channels/{channel}` | `channels:promote` | point a Channel through optional exact CAS |
 | `POST <base>/channels/{channel}/rollback` | `channels:promote` | move to an eligible history target with required current CAS |
 | `GET <base>/status` | `releases:read` | coherent Release/Channel snapshot |
+| `GET <base>/releases/{release_id}/detail` | `releases:read` | immutable contract IDs, Function manifest, lifecycle, references, and weight |
+| `POST <base>/releases/diff` | `releases:read` | directional API plus symmetric storage-view diff for two published Releases |
+| `POST <base>/releases/{release_id}/retire` | `channels:promote` | revision-fenced removal from exact serving after live pins are drained |
+| `GET <base>/delivery` | `releases:read` | coherent Release/Channel status plus desired/observed serving policy |
 | `GET/PUT <base>/serving-policy` | read / `channels:promote` | read or completely replace atomic/weighted desired policy |
+| `POST <base>/serving-policy/preflight` | `releases:read` | candidate-vs-active closure check bound to Release and policy revisions |
 | `GET <base>/serving-policy-operations/{operation_id}` | `releases:read` | reconcile desired/materialized serving operation |
-| `GET <base>/schemas/compatibility` | `releases:read` | schema/index/Cron hash evidence for desired Release set |
+| `GET <base>/schemas/compatibility` | `releases:read` | persisted policy evidence or candidate preflight with `candidateReleaseId` and optional `againstChannel` |
 
 `PUT serving-policy` requires `Idempotency-Key`, exact current policy revision, complete canonically
 weighted Release set, and mode. The server rejects incompatible sets before persistence and serves
 `environment:default` only from the converged policy. An API success for desired intent and an
 observed ready revision are distinct signals.
+
+Status Release entries expose `schemaId`, `active`, `activeReasons`, and nullable
+`weightPercent` in addition to lifecycle/runtime identity. `exactReleaseTarget` is an active reason
+for every `servable`/`active`/`deprecated` Release because an explicit target remains callable even
+when no Channel or default policy references it. Serving-policy membership adds `servingPolicy`.
+
+Before freeze, Channel creation, or policy replacement, use revision-bound preflight:
+
+```json
+{
+  "candidateReleaseId": "rel_...",
+  "againstChannel": "stable",
+  "expectedReleaseServingRevision": 7,
+  "expectedPolicyRevision": 3
+}
+```
+
+The response contains the candidate schema/index/Cron digests, complete `activeReleaseIds`, and
+`diagnosticDetails` with `{code, subject, againstReleaseId, kind}`. `kind` is `api` or `storage`.
+A stale Release/Channel or policy revision returns conflict and requires a new read/preflight.
+For the first Release, policy revision zero, an empty weighted set, and three candidate 64-hex
+digests are explicit valid v2 evidence; empty digest strings are never emitted.
+
+After the rollback window, retire an unreferenced Release with
+`{"expectedReleaseServingRevision":7,"expectedPolicyRevision":3}`. Retirement conflicts while a
+Channel, desired serving policy, enabled Cron activation, or pending/running Scheduled Invocation
+still pins the Release. A successful response is the normal Release outcome with `status:
+"retired"`; exact invocation is rejected and the Release leaves future compatibility closures.
 
 Every selected request/subscription/work item pins one exact Release. See
 [Serving policy](../concepts/serving-policy.md) and

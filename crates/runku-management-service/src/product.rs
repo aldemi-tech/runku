@@ -289,13 +289,15 @@ pub struct ManagementServingPolicyResult {
 pub struct ManagementServingCompatibility {
     /// Wire version.
     pub version: u8,
-    /// Positive desired serving-policy revision.
+    /// Desired serving-policy revision, or zero before the first policy.
     pub policy_revision: u64,
-    /// True because incompatible desired sets are rejected before persistence.
+    /// Release/Channel repository revision used to compute the active closure.
+    pub release_serving_revision: u64,
+    /// Whether the persisted set or candidate closure is compatible.
     pub compatible: bool,
     /// Whether the exact desired revision is observed on the serving path.
     pub converged: bool,
-    /// Shared canonical schema contract hash.
+    /// Candidate schema hash during preflight, or canonical baseline hash for persisted evidence.
     pub schema_contract_hash: String,
     /// Shared canonical logical-index contract hash.
     pub index_contract_hash: String,
@@ -303,8 +305,54 @@ pub struct ManagementServingCompatibility {
     pub cron_declarations_hash: String,
     /// Canonical Release-ID-ordered weighted set.
     pub releases: Vec<ManagementServingRelease>,
-    /// Stable blocker codes; empty for every persisted v1 policy.
+    /// Stable blocker codes; empty for compatible persisted policy evidence.
     pub diagnostics: Vec<String>,
+    /// Candidate Release when this response is a preflight rather than a persisted-policy view.
+    pub candidate_release_id: Option<String>,
+    /// Complete explicitly-invocable Release closure checked by candidate preflight.
+    pub active_release_ids: Vec<String>,
+    /// Structured blocker evidence suitable for a rollout console.
+    pub diagnostic_details: Vec<ManagementCompatibilityDiagnostic>,
+}
+
+/// Candidate preflight selector for the schema compatibility endpoint.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCompatibilityQuery {
+    /// Optional immutable candidate Release. Absence reads persisted policy evidence.
+    #[serde(default)]
+    pub candidate_release_id: Option<String>,
+    /// Optional Channel whose existing caller-facing API is the movement baseline.
+    #[serde(default)]
+    pub against_channel: Option<String>,
+}
+
+/// Revision-bound candidate preflight request used immediately before rollout mutation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementServingPreflightRequest {
+    /// Immutable candidate Release.
+    pub candidate_release_id: String,
+    /// Optional Channel whose caller API must remain compatible.
+    pub against_channel: Option<String>,
+    /// Exact Release/Channel repository revision observed by the caller.
+    pub expected_release_serving_revision: u64,
+    /// Exact serving-policy revision observed by the caller, or zero when no policy exists.
+    pub expected_policy_revision: u64,
+}
+
+/// One stable candidate preflight blocker.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementCompatibilityDiagnostic {
+    /// Stable machine-readable reason.
+    pub code: String,
+    /// Canonical Function, Table ID, or `release` subject.
+    pub subject: String,
+    /// Existing Release that conflicts with the candidate.
+    pub against_release_id: String,
+    /// `api` or `storage` compatibility dimension.
+    pub kind: String,
 }
 
 /// Durable serving operation projection used after an uncertain response.
@@ -1277,6 +1325,16 @@ pub struct ManagementReleaseOutcome {
     pub diagnostics: Vec<String>,
 }
 
+/// Revision-fenced request to remove one Release from every new-invocation path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementReleaseRetireRequest {
+    /// Exact Release/Channel repository revision observed by the operator.
+    pub expected_release_serving_revision: u64,
+    /// Exact serving-policy revision observed by the operator, or zero before first policy.
+    pub expected_policy_revision: u64,
+}
+
 /// Coherent release and Channel snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1289,6 +1347,74 @@ pub struct ManagementReleaseStatus {
     pub releases: Vec<serde_json::Value>,
     /// Safe Channel entries encoded for the stable CLI contract.
     pub channels: Vec<serde_json::Value>,
+}
+
+/// Immutable Release detail for delivery consoles and audit tooling.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementReleaseDetail {
+    /// Immutable Release identity.
+    pub release_id: String,
+    /// Current lifecycle state.
+    pub status: String,
+    /// Immutable build identity.
+    pub build_id: String,
+    /// Canonical creation timestamp.
+    pub created_at_micros: String,
+    /// Runtime contract version.
+    pub runtime_version: String,
+    /// Schema contract identity.
+    pub schema_id: String,
+    /// Logical-index contract identity.
+    pub index_id: String,
+    /// Ordered Cron-declaration identity.
+    pub cron_id: String,
+    /// Public and internal Function manifest projections.
+    pub functions: Vec<serde_json::Value>,
+    /// Stable references retaining this Release.
+    pub active_reasons: Vec<String>,
+    /// Current default serving-policy weight, when present.
+    pub weight_percent: Option<u8>,
+}
+
+/// Pairwise Release diff request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementReleaseDiffRequest {
+    /// Existing/base Release.
+    pub base_release_id: String,
+    /// Candidate Release.
+    pub candidate_release_id: String,
+}
+
+/// Directional API and symmetric storage compatibility result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementReleaseDiff {
+    /// Wire version.
+    pub version: u8,
+    /// Existing/base Release.
+    pub base_release_id: String,
+    /// Candidate Release.
+    pub candidate_release_id: String,
+    /// Whether base callers can use the candidate.
+    pub api_compatible: bool,
+    /// Whether both Releases can share the Environment data authority.
+    pub storage_compatible: bool,
+    /// Structured blockers.
+    pub diagnostics: Vec<ManagementCompatibilityDiagnostic>,
+}
+
+/// Coherent delivery snapshot for one exact Environment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDeliverySnapshot {
+    /// Wire version.
+    pub version: u8,
+    /// Release/Channel snapshot enriched with reachability and policy weights.
+    pub status: ManagementReleaseStatus,
+    /// Desired/observed default serving policy, absent before first configuration.
+    pub serving_policy: Option<ManagementServingPolicy>,
 }
 
 /// Bounded exact-scope operational-log query.
@@ -1580,6 +1706,24 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         Err(ManagementProductError::NotFound)
     }
 
+    /// Preflights one candidate against the Environment-wide active Release closure.
+    async fn serving_candidate_compatibility(
+        &self,
+        query: &ManagementCompatibilityQuery,
+    ) -> Result<ManagementServingCompatibility, ManagementProductError> {
+        let _ = query;
+        self.serving_compatibility().await
+    }
+
+    /// Runs a revision-bound candidate preflight immediately before a rollout write.
+    async fn serving_preflight(
+        &self,
+        request: &ManagementServingPreflightRequest,
+    ) -> Result<ManagementServingCompatibility, ManagementProductError> {
+        let _ = request;
+        Err(ManagementProductError::NotFound)
+    }
+
     /// Creates or replaces the complete serving policy using CAS and idempotency.
     async fn serving_policy_set(
         &self,
@@ -1845,8 +1989,41 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         target: &str,
     ) -> Result<ManagementReleaseOutcome, ManagementProductError>;
 
+    /// Retires one Release after every live reference and durable code pin has been removed.
+    async fn retire_release(
+        &self,
+        release_id: &str,
+        request: &ManagementReleaseRetireRequest,
+    ) -> Result<ManagementReleaseOutcome, ManagementProductError> {
+        let _ = (release_id, request);
+        Err(ManagementProductError::NotFound)
+    }
+
     /// Reads one coherent release and Channel snapshot.
     async fn status(&self) -> Result<ManagementReleaseStatus, ManagementProductError>;
+
+    /// Reads a coherent delivery snapshot across Release/Channel and default policy authorities.
+    async fn delivery(&self) -> Result<ManagementDeliverySnapshot, ManagementProductError> {
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Reads one immutable Release detail with current reachability.
+    async fn release_detail(
+        &self,
+        release_id: &str,
+    ) -> Result<ManagementReleaseDetail, ManagementProductError> {
+        let _ = release_id;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Compares two immutable Releases without changing lifecycle state.
+    async fn release_diff(
+        &self,
+        request: &ManagementReleaseDiffRequest,
+    ) -> Result<ManagementReleaseDiff, ManagementProductError> {
+        let _ = request;
+        Err(ManagementProductError::NotFound)
+    }
 
     /// Lists Functions from one exact effective artifact.
     async fn functions(

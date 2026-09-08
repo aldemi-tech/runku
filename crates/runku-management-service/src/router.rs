@@ -43,14 +43,16 @@ use zeroize::Zeroizing;
 use crate::{
     ManagementApplicationClientCreate, ManagementApplicationCredentialCreate,
     ManagementApplicationCredentialRotate, ManagementBucketArchive, ManagementBucketCreate,
-    ManagementBucketUpdate, ManagementCatalogQuery, ManagementConfigurationDelete,
-    ManagementConfigurationHistoryQuery, ManagementConfigurationSet, ManagementCronActivationSet,
-    ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataInsertRequest,
-    ManagementDataQuery, ManagementDataReplaceRequest, ManagementEnvironmentCreate,
-    ManagementEnvironmentLifecycleChange, ManagementEnvironmentUpdate, ManagementLogPruneRequest,
-    ManagementLogQuery, ManagementObjectDownload, ManagementObjectPut, ManagementProduct,
-    ManagementProductError, ManagementServingPolicySet, ManagementStorageAccessKeyIssue,
-    ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, OidcClientConfiguration,
+    ManagementBucketUpdate, ManagementCatalogQuery, ManagementCompatibilityQuery,
+    ManagementConfigurationDelete, ManagementConfigurationHistoryQuery, ManagementConfigurationSet,
+    ManagementCronActivationSet, ManagementCronQuery, ManagementDataDeleteRequest,
+    ManagementDataInsertRequest, ManagementDataQuery, ManagementDataReplaceRequest,
+    ManagementEnvironmentCreate, ManagementEnvironmentLifecycleChange, ManagementEnvironmentUpdate,
+    ManagementLogPruneRequest, ManagementLogQuery, ManagementObjectDownload, ManagementObjectPut,
+    ManagementProduct, ManagementProductError, ManagementReleaseDiffRequest,
+    ManagementReleaseRetireRequest, ManagementServingPolicySet, ManagementServingPreflightRequest,
+    ManagementStorageAccessKeyIssue, ManagementStorageAccessKeyRevoke,
+    ManagementStorageAccessKeyRotate, OidcClientConfiguration,
 };
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -300,6 +302,18 @@ pub fn build_management_router_with_products(
             post(product_release),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/releases/{release_id}/detail",
+            get(product_release_detail),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/releases/{release_id}/retire",
+            post(product_release_retire),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/releases/diff",
+            post(product_release_diff),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{environment_id}/channels/{channel}",
             put(product_promote),
         )
@@ -312,8 +326,16 @@ pub fn build_management_router_with_products(
             get(product_status),
         )
         .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/delivery",
+            get(product_delivery),
+        )
+        .route(
             "/v1/projects/{project_id}/environments/{environment_id}/serving-policy",
             get(product_serving_policy).put(product_serving_policy_set),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/serving-policy/preflight",
+            post(product_serving_preflight),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/serving-policy-operations/{operation_id}",
@@ -627,6 +649,7 @@ async fn product_serving_compatibility(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Path((project, environment)): Path<(String, String)>,
+    Query(query): Query<ManagementCompatibilityQuery>,
 ) -> Response {
     let Ok(_permit) = state.admission.try_acquire() else {
         return failure(PlatformIdentityError::Unavailable);
@@ -643,7 +666,34 @@ async fn product_serving_compatibility(
         Ok(value) => value,
         Err(response) => return *response,
     };
-    match product.serving_compatibility().await {
+    match product.serving_candidate_compatibility(&query).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_serving_preflight(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementServingPreflightRequest>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.serving_preflight(&request).await {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }
@@ -1022,6 +1072,86 @@ async fn product_release(
     }
 }
 
+async fn product_release_detail(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, release_id)): Path<(String, String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.release_detail(&release_id).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_release_retire(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment, release_id)): Path<(String, String, String)>,
+    Json(request): Json<ManagementReleaseRetireRequest>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ChannelsPromote,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.retire_release(&release_id, &request).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_release_diff(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementReleaseDiffRequest>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.release_diff(&request).await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
 async fn product_promote(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -1133,6 +1263,32 @@ async fn product_serving_policy(
         Err(response) => return *response,
     };
     match product.serving_policy().await {
+        Ok(result) => json(StatusCode::OK, &result, false),
+        Err(error) => product_failure(error),
+    }
+}
+
+async fn product_delivery(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+) -> Response {
+    let Ok(_permit) = state.admission.try_acquire() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::ReleasesRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    match product.delivery().await {
         Ok(result) => json(StatusCode::OK, &result, false),
         Err(error) => product_failure(error),
     }
