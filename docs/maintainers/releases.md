@@ -107,12 +107,19 @@ Then run:
 pnpm install --frozen-lockfile
 pnpm check:packages
 pnpm check:release
+pnpm audit --audit-level=high
 cargo build --package runku-cli --release --locked
 target/release/runku --version
 target/release/runku --help
 make selfhost-package-check
 git diff --check
 ```
+
+`pnpm-workspace.yaml` records two exact, temporary `image-size` CVE exceptions for trusted
+repository-owned documentation images. Version `2.0.2` is the current upstream release and has no
+patched version for those denial-of-service advisories. Do not broaden these exceptions or treat
+them as runtime/package acceptance: every other high or critical JavaScript advisory remains a
+release blocker, and the exceptions must be removed when upstream publishes a fixed release.
 
 `scripts/verify-release.mjs` rejects divergent package/Cargo/help versions, native package metadata,
 launcher dependencies, and a tag that is not exactly `vX.Y.Z`.

@@ -20,8 +20,8 @@
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
   },
   "dependencies": {
-    "@runku/client": "0.1.0",
-    "@runku/server": "0.1.0",
+    "@runku/client": "workspace:*",
+    "@runku/server": "workspace:*",
     "better-auth": "1.7.2",
     "better-sqlite3": "12.11.1",
     "next": "16.3.3",

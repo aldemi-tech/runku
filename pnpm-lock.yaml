@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  serialize-javascript: 7.1.1
+
 importers:
 
   .: {}
@@ -11,11 +14,11 @@ importers:
   examples/chat-next:
     dependencies:
       '@runku/client':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: workspace:*
+        version: link:../../packages/client
       '@runku/server':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: workspace:*
+        version: link:../../packages/server
       better-auth:
         specifier: 1.7.2
         version: 1.7.2(better-sqlite3@12.11.1)(next@16.3.3(@babel/core@7.29.7)(@playwright/test@1.62.1)(@types/node@24.10.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -113,11 +116,11 @@ importers:
         version: 7.0.0
     devDependencies:
       '@runku/client':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: workspace:*
+        version: link:../../packages/client
       '@runku/server':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: workspace:*
+        version: link:../../packages/server
       '@types/node':
         specifier: 24.10.1
         version: 24.10.1
@@ -2328,14 +2331,6 @@ packages:
 
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
-
-  '@runku/client@0.1.0':
-    resolution: {integrity: sha512-rGUZXRD7k+9AZ8z3Ni1LKIj5DMaT9+i8iwjGwZMt2T/B18by9B6TKplAeqfg1l9GbZktR7q267IK2IFKLgvJag==}
-    engines: {node: '>=20'}
-
-  '@runku/server@0.1.0':
-    resolution: {integrity: sha512-odXDIY7gO/QI3Xsm0bKdNBPRtG2GDHpDkGVF3OsjLhqm2Lc/wjHyk7vtnxHdM8B6fMzDY8YmMfcIiWq0xgB2Ig==}
-    engines: {node: '>=20'}
 
   '@sideway/address@4.1.5':
     resolution: {integrity: sha512-IqO/DUQHUkPeixNQ8n0JA6102hT9CmaljNTPmQ1u8MEhBo/R4Q8eKLN/vGZxuebwOroDB4cbpjheD4+/sKFK4Q==}
@@ -6716,9 +6711,6 @@ packages:
     resolution: {integrity: sha512-WuyALRjWPDGtt/wzJiadO5AXY+8hZ80hVpe6MyivgraREW751X3SbhRvG3eLKOYN+8VEvqLcf3wdnt44Z4S4SA==}
     engines: {node: '>=10'}
 
-  randombytes@2.1.0:
-    resolution: {integrity: sha512-vYl3iOX+4CKUWuxGi9Ukhie6fsqXqS9FE2Zaic4tNFD2N2QQaXOMFbuKK4QmDHC0JO6B1Zp41J0LpT0oR68amQ==}
-
   range-parser@1.2.0:
     resolution: {integrity: sha512-kA5WQoNVo4t9lNx2kQNFCxKeBl5IbbSNBl1M/tLkw9WCn+hxNBAW5Qh8gdhs63CJnhjJ2zQWFoqPJP2sK1AV5A==}
     engines: {node: '>= 0.6'}
@@ -7029,8 +7021,9 @@ packages:
     resolution: {integrity: sha512-VMbMxbDeehAxpOtWJXlcUS5E8iXh6QmN+BkRX1GARS3wRaXEEgzCcB10gTQazO42tpNIya8xIyNx8fll1OFPrg==}
     engines: {node: '>= 0.8.0'}
 
-  serialize-javascript@6.0.2:
-    resolution: {integrity: sha512-Saa1xPByTTq2gdeFZYLLo+RFE35NHZkAbqZeWNd3BpzppeVisAqpDjcp8dyf6uIvEqJRd46jemmyA4iFIeVk8g==}
+  serialize-javascript@7.1.1:
+    resolution: {integrity: sha512-k3CMsaIvvdSwm8oLB4MXSl0wH2/cwlH7xGcnRd2DaeRmBkbzYmyT8j0tsX60DwD1eRwHTpNpH8ljKu9oUT1MeQ==}
+    engines: {node: '>=20.0.0'}
 
   serve-handler@6.1.7:
     resolution: {integrity: sha512-CinAq1xWb0vR3twAv9evEU8cNWkXCb9kd5ePAHUKJBkOsUpR1wt/CvGdeca7vqumL1U5cSaeVQ6zZMxiJ3yWsg==}
@@ -10970,10 +10963,6 @@ snapshots:
 
   '@rtsao/scc@1.1.0': {}
 
-  '@runku/client@0.1.0': {}
-
-  '@runku/server@0.1.0': {}
-
   '@sideway/address@4.1.5':
     dependencies:
       '@hapi/hoek': 9.3.0
@@ -12459,7 +12448,7 @@ snapshots:
       globby: 13.2.2
       normalize-path: 3.0.0
       schema-utils: 4.3.3
-      serialize-javascript: 6.0.2
+      serialize-javascript: 7.1.1
       webpack: 5.110.3(@swc/core@1.16.2(@swc/helpers@0.5.23))(clean-css@5.3.3)(cssnano@6.1.2(postcss@8.5.23))(html-minifier-terser@7.2.0)(postcss@8.5.23)
 
   core-js-compat@3.50.0:
@@ -12534,7 +12523,7 @@ snapshots:
       jest-worker: 29.7.0
       postcss: 8.5.23
       schema-utils: 4.3.3
-      serialize-javascript: 6.0.2
+      serialize-javascript: 7.1.1
       webpack: 5.110.3(@swc/core@1.16.2(@swc/helpers@0.5.23))(clean-css@5.3.3)(cssnano@6.1.2(postcss@8.5.23))(html-minifier-terser@7.2.0)(postcss@8.5.23)
     optionalDependencies:
       clean-css: 5.3.3
@@ -16016,10 +16005,6 @@ snapshots:
 
   quick-lru@5.1.1: {}
 
-  randombytes@2.1.0:
-    dependencies:
-      safe-buffer: 5.2.1
-
   range-parser@1.2.0: {}
 
   range-parser@1.2.1: {}
@@ -16436,9 +16421,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  serialize-javascript@6.0.2:
-    dependencies:
-      randombytes: 2.1.0
+  serialize-javascript@7.1.1: {}
 
   serve-handler@6.1.7:
     dependencies:

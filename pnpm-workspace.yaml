@@ -4,3 +4,12 @@ packages:
   - "website"
 
 linkWorkspacePackages: true
+
+# Docusaurus 3.10.2 build tooling currently resolves image-size 2.0.2, whose ICNS and
+# JXL/HEIF parsers have unpatched denial-of-service advisories. Documentation assets
+# are trusted repository inputs; keep these exact exceptions visible until upstream
+# publishes a fixed image-size release. Runtime/package advisories remain blocking.
+auditConfig:
+  ignoreCves:
+    - CVE-2025-71329
+    - CVE-2025-71330

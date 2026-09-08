@@ -10,6 +10,19 @@ const serverPackage = readJson("packages/server/package.json")
 const reactPackage = readJson("packages/react/package.json")
 const version = cliPackage.version
 
+for (const [example, dependencies] of [
+  ["examples/chat-next", ["@runku/client", "@runku/server"]],
+  ["examples/field-board-next", ["@runku/client", "@runku/react", "@runku/server"]],
+  ["examples/node-actions", ["@runku/client", "@runku/server"]],
+]) {
+  const examplePackage = readJson(`${example}/package.json`)
+  for (const dependency of dependencies) {
+    const specifier =
+      examplePackage.dependencies?.[dependency] ?? examplePackage.devDependencies?.[dependency]
+    assertVersion(`${example} ${dependency}`, specifier, "workspace:*")
+  }
+}
+
 assertVersion("root package", rootPackage.version, version)
 assertVersion("@runku/server", serverPackage.version, version)
 assertVersion(

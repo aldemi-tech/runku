@@ -32,9 +32,10 @@ ci-packages-check: js-install
 
 # Explicit networked advisory gate. Kept outside ci-check so the fast compile/package gate does not
 # clone RustSec or depend on a separately installed tool.
-security-audit:
+security-audit: js-install
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit is required: cargo install cargo-audit --locked"; exit 1; }
 	cargo audit
+	pnpm audit --audit-level=high
 
 fmt:
 	cargo fmt --all

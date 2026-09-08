@@ -19,8 +19,8 @@
     "pngjs": "7.0.0"
   },
   "devDependencies": {
-    "@runku/client": "0.1.0",
-    "@runku/server": "0.1.0",
+    "@runku/client": "workspace:*",
+    "@runku/server": "workspace:*",
     "@types/node": "24.10.1",
     "@types/pngjs": "6.0.5",
     "typescript": "7.0.2"
