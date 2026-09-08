@@ -12,10 +12,10 @@ silently falls back to `latest`, another Release, a weaker runtime, or a differe
 ## Current distribution matrix
 
 The latest published coordinated product distribution and frontend SDK pair report version
-`0.5.0`. The source tree is preparing an OCI-only `0.5.1` candidate; it is not a published SDK,
+`0.5.1`. The source tree is preparing an unpublished `0.5.2` candidate; it is not a published SDK,
 CLI, Git tag, GitHub Release, or final distribution. Neither track has established a general stable
 compatibility window. Version 0.3.0 is the first supported compact Docker installation floor;
-0.5.0 supports a deliberate forward upgrade from that floor.
+0.5.1 supports a deliberate forward upgrade from that floor.
 Product tags coordinate the CLI, Function SDK, Linux compact server binaries, and compact server
 image. Frontend SDK tags coordinate client and React only. Agent, distributed deployment, protocol,
 storage, and runtime support windows remain separate distribution gates.
@@ -38,14 +38,21 @@ active writer per Environment: it does not provide same-Environment active-activ
 scheduler fencing, or a Kubernetes control plane. Provider fleets may prefer the currently
 assigned warm member, but must fence it before replacement.
 
-The 0.5.1 candidate adds Release-scoped document read views and non-destructive full replace
-semantics.
+Version 0.5.1 adds Release-scoped document read views and non-destructive full replace semantics.
 Freeze and Channel movement check every `servable`/`active`/`deprecated` Release, including
 Releases reachable only by an explicit target. Optional field addition/hiding can coexist across named Channels and a
 weighted policy; reads project the selected view and an older replacement preserves newer unknown
 fields. Required additions and shared field-contract changes fail closed. Logical index and Cron
 contract changes still require an atomic staged operation because durable index readiness is not
 implemented in this version.
+
+The 0.5.2 candidate keeps Safe V8 in every Environment and adds optional trusted Full Node
+executors for dedicated cells: `dedicated-host` keeps bounded Node children in the server container,
+while `dedicated-worker` dispatches through JetStream to a separate container with a sanitized
+read-only Release/artifact projection. Both profiles share one trust domain and are not the VM-grade
+boundary required for mutually hostile tenants. The packaged separate worker does not yet attach a
+remote Environment configuration broker and rejects Node Actions with `variable:*` or `secret:*`
+during Release admission.
 
 Management compatibility evidence is v2. Candidate preflight is available before freeze and a
 revision-bound POST prevents applying evidence after Release/Channel or serving-policy state has
@@ -98,11 +105,11 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU glibc 2.31+/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout or 0.5.1 candidate is not identified by a published version alone |
+| Source CLI | Record the Git commit; a modified checkout or 0.5.2 candidate is not identified by a published version alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
-| Frontend SDK packages | `@runku/client` and `@runku/react` update together with exact peer versions; currently 0.5.0 |
-| Distribution JavaScript packages | `@runku/server` and `@runku/cli` remain coordinated with the product distribution; currently 0.5.0 |
+| Frontend SDK packages | `@runku/client` and `@runku/react` update together with exact peer versions; currently 0.5.1 |
+| Distribution JavaScript packages | `@runku/server` and `@runku/cli` remain coordinated with the product distribution; currently 0.5.1 |
 | HTTP/WebSocket | v1 envelopes; unknown versions rejected |
 | Values/index keys | v1 canonical encodings; existing vectors immutable |
 | Release/artifact | Version/digest/size/runtime descriptors verified |
@@ -117,9 +124,9 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Boundary | Current contract |
 |---|---|
 | CLI | tagged macOS/Linux GNU glibc 2.31+/Windows binaries for ARM64/x86-64 plus exact-version npm launcher |
-| Application authoring | `@runku/server@0.5.0` declaration/validator contract |
-| TypeScript application client | `@runku/client@0.5.0` HTTP/Realtime/file/reference contract |
-| React and Next.js bindings | `@runku/react@0.5.0` with exact `@runku/client@0.5.0` peer |
+| Application authoring | `@runku/server@0.5.1` declaration/validator contract |
+| TypeScript application client | `@runku/client@0.5.1` HTTP/Realtime/file/reference contract |
+| React and Next.js bindings | `@runku/react@0.5.1` with exact `@runku/client@0.5.1` peer |
 | Public API | strict HTTP/WebSocket v1 envelopes and canonical values |
 | Compact server | Linux GNU glibc 2.31+ ARM64/x86-64 binary and multi-platform non-root image |
 | Deployment | Docker Compose v2 compact profile or externally orchestrated cell member; PostgreSQL 16 Platform Identity, Safe runtime always, optional `dedicated-host` or `dedicated-worker` trusted Node, one active writer per Environment |
