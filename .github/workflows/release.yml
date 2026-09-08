@@ -49,6 +49,11 @@ jobs:
       - id: verify
         name: Verify tag and release-track versions
         run: |
+          if test '${{ inputs.candidate_image }}' = true \
+            && { test -n '${{ inputs.artifact_run_id }}' || test -n '${{ inputs.release_tag }}'; }; then
+            echo 'candidate_image cannot be combined with recovery publication inputs' >&2
+            exit 1
+          fi
           if test "$GITHUB_REF_TYPE" = tag && [[ "$GITHUB_REF_NAME" == sdk-v* ]]; then
             node scripts/verify-sdk-release.mjs --tag "$GITHUB_REF_NAME"
             echo 'kind=sdk' >> "$GITHUB_OUTPUT"
@@ -507,7 +512,7 @@ jobs:
           fi
 
   recover-release:
-    if: github.event_name == 'workflow_dispatch' && inputs.artifact_run_id != '' && inputs.release_tag != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.candidate_image != true && inputs.artifact_run_id != '' && inputs.release_tag != ''
     needs: metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 15
