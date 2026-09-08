@@ -2,8 +2,9 @@
 
 This is the decision and execution guide for the currently supported Runku Self-Hosted shape: one
 initialized Safe V8 Product Environment, one active Product writer, PostgreSQL-backed Platform
-Identity, and the released Docker Compose package. It is complete within that boundary; it is not a
-generic Kubernetes, active-active, or Full Node Agent installation.
+Identity, and the released Docker Compose package. An explicit dedicated-host option can run Full
+Node workers inside the same container when the whole installation is one trust domain. It is not
+a generic Kubernetes, active-active, or shared Full Node Agent installation.
 
 ## Decide whether this profile fits
 
@@ -11,7 +12,8 @@ Use the compact profile when all of these are true:
 
 - one Product Environment per installation is an acceptable administrative boundary;
 - one active writer and host-level maintenance windows fit the availability objective;
-- application Functions fit Safe V8 capabilities;
+- application Functions fit Safe V8 capabilities, or trusted Full Node Actions use the explicit
+  dedicated-host profile and its operator-enforced whole-instance limits;
 - the team can operate Docker/Compose, PostgreSQL, TLS, encrypted backups, and an optional external
   S3-compatible object-store backend;
 - the team accepts that Product-root authorities remain local even if Function data uses PostgreSQL;
@@ -138,6 +140,28 @@ present. See [Server configuration](server-configuration.md) for every supported
 Startup initializes the exact Product scope, prepares local credentials, checks/migrates storage,
 starts PostgreSQL and the server, and waits for Management readiness. It is idempotent for identical
 state and rejects divergent Product identity.
+
+Keep `RUNKU_FULL_NODE_PROFILE=disabled` for Safe-only applications. For trusted Node Actions on a
+host dedicated to this one Product trust domain, set these values in `.env` before start or during a
+controlled restart:
+
+```dotenv
+RUNKU_FULL_NODE_PROFILE=dedicated-host
+RUNKU_FULL_NODE_MAX_CONCURRENCY=1
+RUNKU_FULL_NODE_HEAP_MEGABYTES=256
+RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS=2000
+RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES=2147483648
+RUNKU_FULL_NODE_INSTANCE_PIDS=512
+```
+
+The last three values match the package defaults `RUNKU_CPU_LIMIT=2.0`,
+`RUNKU_MEMORY_LIMIT=2g`, and `RUNKU_PIDS_LIMIT=512`. Keep both sets aligned whenever one changes;
+the declarations do not create a second cgroup inside the server. Verify `./runku-selfhost status`, publish a
+Node built-in smoke Action, invoke it twice, and confirm both success and bounded worker reuse in
+diagnostics before admitting traffic. To roll back the capability, stop Node traffic, set the
+profile to `disabled`, restart, and verify that Safe Releases still serve while new Node publication
+is rejected. Existing Node Releases remain durable but cannot execute until a compatible runtime
+is restored.
 
 The initial-owner invitation is written under the data directory at
 `platform/bootstrap/initial-owner.code`. Protect and consume it through the procedure in

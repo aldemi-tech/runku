@@ -18,6 +18,7 @@ async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 runku-management-service = { path = "../runku-management-service" }
+runku-node-runtime = { path = "../runku-node-runtime" }
 runku-core = { path = "../runku-core" }
 runku-contracts = { path = "../runku-contracts" }
 runku-cron = { path = "../runku-cron" }

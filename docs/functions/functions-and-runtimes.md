@@ -56,12 +56,18 @@ Full Node uses the same `action()` and capability-scoped context as Safe. Query,
 remain Safe. A Safe module cannot reach a Node-only helper; a Node module cannot import a module
 declaring Safe Functions.
 
-Built-ins and production npm dependencies resolve from the application. Remote builds require
-`package-lock.json`, install with `npm ci --omit=dev` and lifecycle scripts disabled, and produce a
-digest-bound OCI descriptor. Runtime execution never installs dependencies.
+Node built-ins resolve in both local and dedicated-host execution. The CLI emits one canonical
+Node/hybrid ESM resource bundle and can send it directly to the selected Environment's Development
+API; that bundle does not contain `node_modules`, so its direct remote form supports built-ins and
+source bundled into the compiled module graph, not unresolved external npm package imports. A
+dedicated-host server verifies and materializes the bundle into an immutable cache before reuse.
+External production npm dependencies and distributed shared-untrusted publication continue to use
+the separate package-lock-bound, digest-bound OCI path. Runtime execution never installs
+dependencies.
 
-Local development uses the machine's Node.js. A dedicated host/VM/Pod may execute Node only when
-the complete unit is one trust domain. Shared untrusted Node code requires a VM-grade isolation
+Local development uses the machine's Node.js. `runku-server` may run bounded persistent Node worker
+processes inside its own container only in the explicit `dedicated-host` profile and only when the
+complete host/container unit is one trust domain. Shared untrusted Node code requires a VM-grade isolation
 profile with verified artifacts, single-flight workers, bounded resources, default-deny egress, and
 destructive replacement after timeout/cancellation/uncertain connection loss. Docker alone is not
 that isolation boundary.

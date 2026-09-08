@@ -39,7 +39,7 @@ use runku_gateway::{
 use runku_identity::{ApplicationCredentialResolver, KeyringCrypto, PrincipalEvidence};
 use runku_identity_provider::JwtProviderManager;
 use runku_identity_repository::{IdentityRepositoryConfig, SqlApplicationIdentityRepository};
-use runku_node_runtime::{LocalNodeRuntime, LocalNodeRuntimeConfig};
+use runku_node_runtime::{FullNodeActionRuntime, LocalNodeRuntime, LocalNodeRuntimeConfig};
 use runku_observability::{
     BufferedLogSink, JournalForwardOutcome, LogArchive, LogArchiveRunOutcome, LogArchiver,
     LogJournalForwarder, LogRepository, LogRepositoryConfig, LogSpoolConfig, NatsLogJournal,
@@ -78,6 +78,28 @@ pub enum LocalProcessListener {
     TrustedTlsTermination(SocketAddr),
 }
 
+/// Full Node executor selected by an embedding process.
+#[derive(Clone, Default)]
+pub enum LocalProcessFullNodeRuntime {
+    /// Use the developer machine's Node binary and local one-shot executor.
+    #[default]
+    Local,
+    /// Do not attach a Full Node executor.
+    Disabled,
+    /// Attach an explicitly composed server-side executor.
+    Provided(Arc<dyn FullNodeActionRuntime>),
+}
+
+impl fmt::Debug for LocalProcessFullNodeRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Local => "Local",
+            Self::Disabled => "Disabled",
+            Self::Provided(_) => "Provided",
+        })
+    }
+}
+
 /// Validated bounded local daemon policy.
 #[derive(Clone)]
 pub struct LocalProcessConfig {
@@ -108,6 +130,9 @@ pub struct LocalProcessConfig {
     pub environment_serving_resolver: Option<Arc<dyn EnvironmentServingResolver>>,
     /// Optional exact-Environment broker for manifest-authorized variables and secrets.
     pub configuration: Option<Arc<dyn ConfigurationRead>>,
+    /// Explicit Full Node executor policy. Local development remains enabled by default while
+    /// server compositions must opt into a production profile.
+    pub full_node_runtime: LocalProcessFullNodeRuntime,
     /// Environment, per-file, Action-memory, concurrency, and grant limits.
     pub file_storage_limits: FileStorageLimits,
     /// Optional at-least-once sink for authoritative application-file usage events.
@@ -133,6 +158,7 @@ impl Default for LocalProcessConfig {
             data_store: None,
             environment_serving_resolver: None,
             configuration: None,
+            full_node_runtime: LocalProcessFullNodeRuntime::Local,
             file_storage_limits: FileStorageLimits::DEFAULT,
             file_usage_sink: None,
             file_usage_interval: Duration::from_secs(5),
@@ -169,6 +195,7 @@ impl fmt::Debug for LocalProcessConfig {
                 "configuration",
                 &self.configuration.as_ref().map(|_| "configured"),
             )
+            .field("full_node_runtime", &self.full_node_runtime)
             .field("file_storage_limits", &self.file_storage_limits)
             .field(
                 "file_usage_sink",
@@ -610,13 +637,6 @@ impl LocalProcess {
             load_identity_pepper(&paths).await.map_err(map_state)?,
         ));
         let clock: Arc<dyn GatewayClock> = Arc::new(SystemGatewayClock);
-        let local_node = Arc::new(
-            LocalNodeRuntime::new(
-                LocalNodeRuntimeConfig::new(&paths.root, 16)
-                    .map_err(|_| LocalProcessError::InvalidConfiguration)?,
-            )
-            .map_err(|_| LocalProcessError::InvalidConfiguration)?,
-        );
         let mut service = ProductInvocationService::new(
             ProductInvocationConfig {
                 scope: state.scope(),
@@ -635,12 +655,28 @@ impl LocalProcess {
             action,
             None,
         )
-        .map_err(|_| LocalProcessError::Composition)?
-        .with_full_node_runtime(local_node)
-        .with_file_storage(files.clone())
-        .with_development_catalog(Arc::clone(&development_catalog))
-        .map_err(|_| LocalProcessError::Composition)?
-        .with_operational_logs(log_boundary);
+        .map_err(|_| LocalProcessError::Composition)?;
+        service = match config.full_node_runtime.clone() {
+            LocalProcessFullNodeRuntime::Local => {
+                let local_node = Arc::new(
+                    LocalNodeRuntime::new(
+                        LocalNodeRuntimeConfig::new(&paths.root, 16)
+                            .map_err(|_| LocalProcessError::InvalidConfiguration)?,
+                    )
+                    .map_err(|_| LocalProcessError::InvalidConfiguration)?,
+                );
+                service.with_full_node_runtime(local_node)
+            }
+            LocalProcessFullNodeRuntime::Disabled => service,
+            LocalProcessFullNodeRuntime::Provided(runtime) => {
+                service.with_full_node_runtime(runtime)
+            }
+        };
+        let mut service = service
+            .with_file_storage(files.clone())
+            .with_development_catalog(Arc::clone(&development_catalog))
+            .map_err(|_| LocalProcessError::Composition)?
+            .with_operational_logs(log_boundary);
         if let Some(resolver) = config.environment_serving_resolver.clone() {
             service = service.with_environment_serving_resolver(resolver);
         }

@@ -5,8 +5,10 @@ Safe V8 Product Environment and Platform Management in one `runku-server` contai
 the only required service. Operational Log capture, filesystem Parquet archival, retention,
 historical DuckDB query, and live streaming stay inside the Runku process.
 
-The package does not enable Full Node, orchestrate multiple Environments, or make one SQLite Product
-Environment active-active. Those are different trust and consistency profiles.
+The package keeps Full Node disabled by default, does not orchestrate multiple Environments, and
+does not make one SQLite Product Environment active-active. The image contains a pinned Node 22
+binary so an operator may explicitly select the documented `dedicated-host` profile when the
+complete machine/container is one Product trust domain. It is not a shared hostile-tenant boundary.
 
 ## Topology and network boundary
 
@@ -16,6 +18,7 @@ operator/CLI origin        ─► host TLS proxy ─► 127.0.0.1:3220 Managemen
                                                     │
                                     one runku-server container
                                       ├─ Safe V8/background/realtime
+                                      ├─ optional bounded Node worker pool (dedicated-host only)
                                       ├─ Product SQLite + Parquet/DuckDB
                                       ├─ Runku Storage bytes ─► filesystem or external object store
                                       └─ Platform Identity ─► PostgreSQL container
@@ -274,8 +277,9 @@ cryptographic recovery material. Destroy them separately only after the backup/r
 - The small profile has one active writer and one host failure domain. Use off-host backups or S3
   history according to the required RPO. HA logs protect admitted diagnostics; they do not make the
   Product data path active-active.
-- Full Node requires its separately qualified Agent/isolation profile and is never enabled by this
-  package.
+- Full Node is disabled by default. `dedicated-host` is valid only when the whole installation is
+  one Product trust domain; shared-untrusted Node still requires the separately qualified
+  VM-grade Agent/isolation profile.
 
 Troubleshoot with `./runku-selfhost status`, bounded `docker compose logs`, `runku status --remote`,
 `runku doctor` while stopped, and the [troubleshooting guide](../../docs/reference/troubleshooting.md).

@@ -24,8 +24,9 @@ use runku_protocol::{
     encode_development_state_response_v1,
 };
 use runku_releases::{
-    AuthPolicy, Capability, FunctionManifest, FunctionType, FunctionVisibility, ReleaseManifestV1,
-    RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_release_manifest, encode_safe_esm_bundle,
+    AuthPolicy, Capability, FunctionManifest, FunctionType, FunctionVisibility, NodeEsmBundleV1,
+    ReleaseManifestV1, RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_node_esm_bundle,
+    encode_release_manifest, encode_safe_esm_bundle,
 };
 use runku_value::TimestampMicros;
 use serde_json::Value;
@@ -422,6 +423,52 @@ fn package() -> Result<DevelopmentPublishRequestV1, Box<dyn Error>> {
         manifest_bytes,
         artifact_bytes,
     })
+}
+
+#[test]
+fn publish_accepts_canonical_node_bundle_for_dedicated_server_admission()
+-> Result<(), Box<dyn Error>> {
+    let source = "export default async (_ctx, value) => value;";
+    let contract_source = "development-wire-node-contract";
+    let bundle = NodeEsmBundleV1::from_sources([source, contract_source])?;
+    let artifact_bytes = encode_node_esm_bundle(&bundle)?;
+    let contract = Sha256Digest::of(contract_source.as_bytes());
+    let manifest = ReleaseManifestV1 {
+        release_id: RELEASE.parse()?,
+        project_id: PROJECT.parse()?,
+        build_id: BUILD.parse()?,
+        created_at: TimestampMicros::new(1_800_000_000_000_000),
+        runtime_version: "runku-node".parse()?,
+        artifact: bundle.descriptor()?,
+        function_contract_hash: contract,
+        schema_contract_hash: contract,
+        index_contract_hash: contract,
+        functions: vec![FunctionManifest {
+            id: FUNCTION.parse()?,
+            name: "actions.echo".parse()?,
+            function_type: FunctionType::Action,
+            visibility: FunctionVisibility::Public,
+            auth_policy: AuthPolicy::None,
+            runtime_class: RuntimeClass::FullNode,
+            implementation_hash: Sha256Digest::of(source.as_bytes()),
+            arguments_contract_hash: contract,
+            result_contract_hash: contract,
+            capabilities: Vec::<Capability>::new(),
+        }],
+        cron_definitions: vec![],
+    };
+    let request = DevelopmentPublishRequestV1 {
+        operation_id: OPERATION.parse()?,
+        project_id: PROJECT.parse()?,
+        workspace_ref: "dev/manuel".parse()?,
+        expected_head: Some(REVISION.parse()?),
+        manifest_bytes: encode_release_manifest(&manifest)?,
+        manifest,
+        artifact_bytes,
+    };
+    let frame = encode_development_publish_request_v1(&request)?;
+    assert_eq!(decode_development_publish_request_v1(&frame)?, request);
+    Ok(())
 }
 
 fn reframe(original: &[u8], metadata: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {

@@ -6,6 +6,13 @@ All notable changes are documented in this file.
 
 ### Added
 
+- Added an opt-in `dedicated-host` Full Node profile to `runku-server`. It accepts canonical
+  CLI-produced Node/hybrid ESM bundles, materializes them into a verified read-only cache, and
+  reuses bounded Node workers inside the server container on Linux ARM64 and x86_64. Direct bundles
+  support Node built-ins and compiled source-graph code; unresolved external npm dependencies still
+  require the package-lock-bound OCI publication path.
+- Added fail-closed server configuration that rejects the Full Node profile for `shared` cell
+  manifests; the profile remains disabled by default and requires one Product trust domain.
 - Added Release-scoped document views so optional schema fields can coexist across active Releases,
   named Channels, exact targets, and weighted rollout policies over the same stored data.
 - Added a coherent Delivery snapshot, revision-bound compatibility preflight, directional Release
@@ -15,6 +22,8 @@ All notable changes are documented in this file.
 
 ### Changed
 
+- The multi-platform server image now includes a pinned Node 22 executable. Its presence does not
+  enable Full Node; `RUNKU_FULL_NODE_PROFILE=dedicated-host` is still required.
 - Reads project the schema of the selected Release. A full replace from an older compatible Release
   preserves fields that exist only in newer active schemas instead of deleting stored data.
 - Freeze, Channel movement, rollout, rollback, and retirement evaluate the complete serving closure,

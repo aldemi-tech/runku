@@ -159,6 +159,15 @@ network policy, cancellation, and replacement classes. After cancellation/deadli
 assume an external effect may have occurred unless an idempotency/reconciliation protocol proves
 otherwise.
 
+For the compact `dedicated-host` profile, `SERVER_FULL_NODE_CONFIGURATION_INVALID` means the
+profile, absolute Node path, heap, concurrency, or declared instance bounds are invalid;
+`SERVER_FULL_NODE_UNAVAILABLE` means the executable is absent, below Node 20, or the private
+cache/scratch roots cannot be prepared. `SERVER_FULL_NODE_REQUIRES_DEDICATED_CELL` means the
+profile was applied to a shared or Product-less server. Do not retry publication until
+`runku-server check` succeeds with the intended configuration. A Node direct bundle that imports an
+unavailable external npm package fails at execution; rebuild it through the package-lock-bound OCI
+path rather than installing dependencies into the live container.
+
 Do not move untrusted Node code to a weaker profile as a workaround.
 
 ## Dependency and capacity failures

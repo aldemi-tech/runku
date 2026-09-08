@@ -180,6 +180,11 @@ Publication creates an immutable Dev Revision and updates the selected Workspace
 compare-and-set. If another developer won the race, exit `4` is a request to read and reconcile—not
 to retry with a fabricated expected revision.
 
+For a Node/hybrid build, the target Environment must explicitly enable a compatible Full Node
+runtime; otherwise publication fails before HEAD moves. The direct bundle carries built source and
+contracts but not `node_modules`, so use Node built-ins or source already included in the compiled
+graph. External npm dependencies continue to require the package-lock-bound OCI publication path.
+
 Freeze and promote only after application tests and schema compatibility evidence:
 
 ```sh

@@ -59,6 +59,38 @@ Product database secret, origins, and auth config into one versioned manifest. A
 [Multi-Environment cell profile](cell-profile.md) for the schema, routing, isolation, capacity, and
 single-active-writer constraints.
 
+## Dedicated-host Full Node
+
+Full Node is disabled by default. The released server image includes Node 22 for both Linux ARM64
+and x86_64, but starts no Node worker until a Full Node Action is invoked. Enable the profile only
+when the complete server instance belongs to one Product trust domain:
+
+| Variable | Default | Contract |
+|---|---:|---|
+| `RUNKU_FULL_NODE_PROFILE` | `disabled` | `disabled` or `dedicated-host`; the latter is rejected for a `shared` cell manifest |
+| `RUNKU_FULL_NODE_BINARY` | `/usr/local/bin/node` | absolute Node 20+ executable path |
+| `RUNKU_FULL_NODE_MAX_CONCURRENCY` | `1` | bounded worker/admission slots, 1–128 |
+| `RUNKU_FULL_NODE_HEAP_MEGABYTES` | `256` | per-worker V8 heap, 64–4096 MiB and below declared instance memory |
+| `RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS` | required | externally enforced whole-instance CPU declaration |
+| `RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES` | required | externally enforced whole-instance memory declaration |
+| `RUNKU_FULL_NODE_INSTANCE_PIDS` | required | externally enforced whole-instance PID declaration |
+
+The runtime stores verified read-only artifacts and ephemeral worker mailboxes below
+`PRODUCT_ROOT/.runku/server-node-runtime-v1`. Workers are separate child processes inside the same
+container and communicate through the bounded mailbox protocol; no gRPC hop is involved. Healthy
+workers are reused and are destroyed after errors, timeout/cancellation, or the reuse ceiling.
+
+Direct Development publication accepts canonical Node/hybrid ESM bundles. Those bundles carry
+compiled application sources and contracts but no `node_modules`; use Node built-ins or code
+already bundled into the source graph. Actions with unresolved external npm imports require the
+existing package-lock-bound OCI publication path and cannot be made available by installing
+packages in the running server container.
+
+This profile does not turn Docker into a hostile multi-tenant sandbox. CPU, memory, PID, filesystem,
+and egress isolation for the complete instance remain operator responsibilities. In particular,
+the declared fail-closed egress policy is not independently enforceable on a child process that
+shares the server container's network namespace.
+
 ## Optional Product logical PostgreSQL
 
 | Variable | Contract |

@@ -245,6 +245,12 @@ Validates and persists the artifact before updating a Workspace pointer. `--expe
 the update into an operator-visible compare-and-set. A stale expectation returns conflict; re-read
 state before deciding whether to publish a newer package or retry exact bytes.
 
+Remote publication accepts Safe ESM and canonical Node/hybrid ESM bundles only when the selected
+Environment has an attached compatible Full Node runtime. A disabled or shared-cell runtime
+rejects a Node package before changing the Workspace HEAD. Direct Node bundles do not contain
+`node_modules`; unresolved external npm imports require the package-lock-bound OCI publication
+path rather than this command.
+
 ### `runku release`
 
 ```sh

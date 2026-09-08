@@ -34,6 +34,10 @@ use runku_management_service::{
     ManagementHttpConfig, ManagementHttpExposure, ManagementProduct, OidcClientConfiguration,
     build_management_router_with_product, build_management_router_with_products, serve_management,
 };
+use runku_node_runtime::{
+    DedicatedHostPolicy, FullNodeActionRuntime, HostNodeArtifactCache, HostNodeRuntimeConfig,
+    ServerNodeRuntimeConfig,
+};
 use runku_observability::{
     JournalArchiveOutcome, LogArchive, LogJournalArchiver, NatsLogJournal, NatsLogJournalConfig,
     S3LogArchiveConfig,
@@ -43,12 +47,13 @@ use runku_platform_identity::{
     PlatformIdentityRepository, PlatformIdentityRepositoryConfig, PlatformIdentityService,
     SessionTokenPolicy, SqlPlatformIdentityRepository,
 };
+use runku_releases::FullNodeEgressPolicy;
 use runku_value::TimestampMicros;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
-use crate::cell::{CellManifest, build_cell_router};
+use crate::cell::{CellManifest, CellMode, build_cell_router};
 use crate::product::{ProductAdapter, ProductAdapterConfig, migrate_platform_database};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3220";
@@ -102,6 +107,7 @@ async fn run() -> Result<(), &'static str> {
     if command == "check" {
         let _ = external_authenticator(config.oidc.as_ref())?;
         validate_cell_product_inputs(&config)?;
+        validate_full_node_binary(&config.full_node)?;
         println!("configuration valid");
         return Ok(());
     }
@@ -160,6 +166,7 @@ async fn run() -> Result<(), &'static str> {
     let external = external_authenticator(config.oidc.as_ref())?;
     let mut product_adapters = Vec::new();
     if let Some(root) = config.product_root.as_ref() {
+        let full_node_runtime = open_full_node_runtime(&config.full_node, root)?;
         product_adapters.push(Arc::new(
             Box::pin(ProductAdapter::open(
                 root.clone(),
@@ -175,6 +182,7 @@ async fn run() -> Result<(), &'static str> {
                     file_storage_limits: config.file_storage_limits,
                     file_usage_sink: config.file_usage_sink.clone(),
                     file_usage_interval: config.file_usage_interval,
+                    full_node_runtime,
                 },
             ))
             .await?,
@@ -184,6 +192,7 @@ async fn run() -> Result<(), &'static str> {
         for (environment, platform_database_url) in
             manifest.environments.iter().zip(cell_database_urls)
         {
+            let full_node_runtime = open_full_node_runtime(&config.full_node, &environment.root)?;
             let allowed_origins = environment
                 .allowed_origins
                 .iter()
@@ -208,6 +217,7 @@ async fn run() -> Result<(), &'static str> {
                         file_storage_limits: config.file_storage_limits,
                         file_usage_sink: config.file_usage_sink.clone(),
                         file_usage_interval: config.file_usage_interval,
+                        full_node_runtime,
                     },
                 ))
                 .await?,
@@ -426,6 +436,23 @@ struct ServerConfig {
     file_storage_limits: FileStorageLimits,
     file_usage_sink: Option<Arc<dyn FileUsageSink>>,
     file_usage_interval: Duration,
+    full_node: FullNodeServerProfile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FullNodeServerProfile {
+    Disabled,
+    DedicatedHost(DedicatedHostNodeConfig),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DedicatedHostNodeConfig {
+    node_binary: String,
+    max_concurrency: usize,
+    heap_megabytes: u16,
+    cpu_millis: u32,
+    memory_bytes: u64,
+    pids: u32,
 }
 
 enum ServerFileStorage {
@@ -551,6 +578,15 @@ impl ServerConfig {
             (None, true) => return Err("SERVER_APPLICATION_LISTENER_CONFIGURATION_INCOMPLETE"),
         };
         let has_product = product_root.is_some() || cell_manifest.is_some();
+        let full_node = load_full_node_profile()?;
+        if !matches!(full_node, FullNodeServerProfile::Disabled)
+            && (!has_product
+                || cell_manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.mode != CellMode::Dedicated))
+        {
+            return Err("SERVER_FULL_NODE_REQUIRES_DEDICATED_CELL");
+        }
         if trusted_application_listen.is_some() && !has_product {
             return Err("SERVER_PRODUCT_CONFIGURATION_WITHOUT_ROOT");
         }
@@ -637,8 +673,124 @@ impl ServerConfig {
             file_storage_limits,
             file_usage_sink,
             file_usage_interval,
+            full_node,
         })
     }
+}
+
+fn load_full_node_profile() -> Result<FullNodeServerProfile, &'static str> {
+    let profile = env::var("RUNKU_FULL_NODE_PROFILE").unwrap_or_else(|_| "disabled".to_owned());
+    match profile.as_str() {
+        "disabled" => Ok(FullNodeServerProfile::Disabled),
+        "dedicated-host" => {
+            let node_binary = env::var("RUNKU_FULL_NODE_BINARY")
+                .unwrap_or_else(|_| "/usr/local/bin/node".to_owned());
+            let binary_path = Path::new(&node_binary);
+            let max_concurrency =
+                usize::try_from(full_node_u64("RUNKU_FULL_NODE_MAX_CONCURRENCY", 1)?)
+                    .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+            let heap_megabytes =
+                u16::try_from(full_node_u64("RUNKU_FULL_NODE_HEAP_MEGABYTES", 256)?)
+                    .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+            let cpu_millis = u32::try_from(required_full_node_u64(
+                "RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS",
+            )?)
+            .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+            let memory_bytes = required_full_node_u64("RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES")?;
+            let pids = u32::try_from(required_full_node_u64("RUNKU_FULL_NODE_INSTANCE_PIDS")?)
+                .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+            if !binary_path.is_absolute()
+                || binary_path == Path::new("/")
+                || !(1..=128).contains(&max_concurrency)
+                || !(64..=4096).contains(&heap_megabytes)
+                || u64::from(heap_megabytes) * 1024 * 1024 >= memory_bytes
+            {
+                return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+            }
+            Ok(FullNodeServerProfile::DedicatedHost(
+                DedicatedHostNodeConfig {
+                    node_binary,
+                    max_concurrency,
+                    heap_megabytes,
+                    cpu_millis,
+                    memory_bytes,
+                    pids,
+                },
+            ))
+        }
+        _ => Err("SERVER_FULL_NODE_CONFIGURATION_INVALID"),
+    }
+}
+
+fn full_node_u64(name: &str, default: u64) -> Result<u64, &'static str> {
+    env::var(name)
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")
+        .map(|value| value.unwrap_or(default))
+}
+
+fn required_full_node_u64(name: &str) -> Result<u64, &'static str> {
+    env::var(name)
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?
+        .parse::<u64>()
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")
+}
+
+fn validate_full_node_binary(profile: &FullNodeServerProfile) -> Result<(), &'static str> {
+    let FullNodeServerProfile::DedicatedHost(config) = profile else {
+        return Ok(());
+    };
+    let output = std::process::Command::new(&config.node_binary)
+        .arg("--version")
+        .output()
+        .map_err(|_| "SERVER_FULL_NODE_UNAVAILABLE")?;
+    let supported = output.status.success()
+        && std::str::from_utf8(&output.stdout)
+            .ok()
+            .and_then(|version| version.trim().strip_prefix('v'))
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse::<u16>().ok())
+            .is_some_and(|major| major >= 20);
+    if supported {
+        Ok(())
+    } else {
+        Err("SERVER_FULL_NODE_UNAVAILABLE")
+    }
+}
+
+fn open_full_node_runtime(
+    profile: &FullNodeServerProfile,
+    product_root: &Path,
+) -> Result<Option<Arc<dyn FullNodeActionRuntime>>, &'static str> {
+    let FullNodeServerProfile::DedicatedHost(config) = profile else {
+        return Ok(None);
+    };
+    validate_full_node_binary(profile)?;
+    let runtime_root = product_root.join(".runku/server-node-runtime-v1");
+    let cache_root = runtime_root.join("artifacts");
+    let scratch_root = runtime_root.join("scratch");
+    std::fs::create_dir_all(&cache_root).map_err(|_| "SERVER_FULL_NODE_UNAVAILABLE")?;
+    std::fs::create_dir_all(&scratch_root).map_err(|_| "SERVER_FULL_NODE_UNAVAILABLE")?;
+    let cache = HostNodeArtifactCache::open(cache_root)
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let policy = DedicatedHostPolicy::new(
+        config.cpu_millis,
+        config.memory_bytes,
+        config.pids,
+        FullNodeEgressPolicy::none(),
+    )
+    .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let runtime = ServerNodeRuntimeConfig::DedicatedHost(
+        HostNodeRuntimeConfig::dedicated(cache, scratch_root, policy, config.max_concurrency)
+            .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?
+            .with_node_binary(config.node_binary.clone())
+            .with_heap_megabytes(config.heap_megabytes),
+    )
+    .build()
+    .map_err(|_| "SERVER_FULL_NODE_UNAVAILABLE")?;
+    Ok(Some(Arc::new(runtime)))
 }
 
 fn load_file_storage() -> Result<(ServerFileStorage, FileStorageLimits), &'static str> {

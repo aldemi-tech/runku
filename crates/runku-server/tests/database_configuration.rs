@@ -308,3 +308,94 @@ fn shared_cell_manifest_accepts_two_environments_and_conflicts_with_compact_root
     assert_error(&conflict, "SERVER_PRODUCT_CONFIGURATION_CONFLICT");
     Ok(())
 }
+
+#[test]
+fn full_node_profile_is_explicit_and_rejects_shared_cells() -> Result<(), Box<dyn std::error::Error>>
+{
+    let product = TempDir::new()?;
+    let invalid = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        (
+            "RUNKU_PRODUCT_ROOT",
+            product.path().to_str().ok_or("non-UTF-8 temp path")?,
+        ),
+        ("RUNKU_FULL_NODE_PROFILE", "automatic"),
+    ])?;
+    assert_error(&invalid, "SERVER_FULL_NODE_CONFIGURATION_INVALID");
+
+    let incomplete = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        (
+            "RUNKU_PRODUCT_ROOT",
+            product.path().to_str().ok_or("non-UTF-8 temp path")?,
+        ),
+        ("RUNKU_FULL_NODE_PROFILE", "dedicated-host"),
+    ])?;
+    assert_error(&incomplete, "SERVER_FULL_NODE_CONFIGURATION_INVALID");
+
+    let first = TempDir::new()?;
+    let second = TempDir::new()?;
+    let mut manifest = NamedTempFile::new()?;
+    write!(
+        manifest,
+        "{}",
+        serde_json::json!({
+            "version": 1,
+            "mode": "shared",
+            "memberId": "member_full-node-test",
+            "environments": [
+                {
+                    "root": first.path(),
+                    "hosts": ["first-node.runku.test"],
+                    "platformDatabaseUrlFile": null,
+                    "allowedOrigins": [],
+                    "authConfig": null
+                },
+                {
+                    "root": second.path(),
+                    "hosts": ["second-node.runku.test"],
+                    "platformDatabaseUrlFile": null,
+                    "allowedOrigins": [],
+                    "authConfig": null
+                }
+            ]
+        })
+    )?;
+    let shared = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        (
+            "RUNKU_CELL_CONFIG",
+            manifest.path().to_str().ok_or("non-UTF-8 temp path")?,
+        ),
+        ("RUNKU_APPLICATION_LISTEN", "0.0.0.0:3210"),
+        ("RUNKU_APPLICATION_TLS_TERMINATED", "true"),
+        ("RUNKU_FULL_NODE_PROFILE", "dedicated-host"),
+        ("RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS", "1000"),
+        ("RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES", "536870912"),
+        ("RUNKU_FULL_NODE_INSTANCE_PIDS", "64"),
+    ])?;
+    assert_error(&shared, "SERVER_FULL_NODE_REQUIRES_DEDICATED_CELL");
+
+    let node = Command::new("node")
+        .args(["--print", "process.execPath"])
+        .output()?;
+    if node.status.success() {
+        let binary = String::from_utf8(node.stdout)?.trim().to_owned();
+        let dedicated = check(&[
+            ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+            (
+                "RUNKU_PRODUCT_ROOT",
+                product.path().to_str().ok_or("non-UTF-8 temp path")?,
+            ),
+            ("RUNKU_FULL_NODE_PROFILE", "dedicated-host"),
+            ("RUNKU_FULL_NODE_BINARY", &binary),
+            ("RUNKU_FULL_NODE_MAX_CONCURRENCY", "1"),
+            ("RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS", "1000"),
+            ("RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES", "536870912"),
+            ("RUNKU_FULL_NODE_INSTANCE_PIDS", "64"),
+        ])?;
+        assert!(dedicated.status.success());
+        assert_eq!(dedicated.stdout, b"configuration valid\n");
+    }
+    Ok(())
+}

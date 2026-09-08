@@ -107,7 +107,7 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Values/index keys | v1 canonical encodings; existing vectors immutable |
 | Release/artifact | Version/digest/size/runtime descriptors verified |
 | SQLite/PostgreSQL | Same logical contract; physical schema/files are internal |
-| Server composition | Linux GNU glibc 2.31+ ARM64/x86_64 binary and multi-platform OCI image; compact one-Environment or strict shared/dedicated cell member, Safe V8 profile |
+| Server composition | Linux GNU glibc 2.31+ ARM64/x86_64 binary and multi-platform OCI image; Safe V8 by default; opt-in in-container Full Node only for one Product root or a `dedicated` one-Environment cell |
 | Compact deployment | Dedicated Linux host, Compose v2, one active Environment writer, PostgreSQL 16, host TLS proxy, backup/empty restore |
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
 | Platform Identity | Management HTTP v1, native OIDC configuration, source-owned managed reconciliation, authenticated Product lifecycle/catalog/Data Admin/log stream, schema v3; no mixed-version or downgrade window |
@@ -122,7 +122,7 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | React and Next.js bindings | `@runku/react@0.5.0` with exact `@runku/client@0.5.0` peer |
 | Public API | strict HTTP/WebSocket v1 envelopes and canonical values |
 | Compact server | Linux GNU glibc 2.31+ ARM64/x86-64 binary and multi-platform non-root image |
-| Deployment | Docker Compose v2 compact profile or externally orchestrated cell member; PostgreSQL 16 Platform Identity, Safe runtime, one active writer per Environment |
+| Deployment | Docker Compose v2 compact profile or externally orchestrated cell member; PostgreSQL 16 Platform Identity, Safe runtime by default, optional dedicated-host Node, one active writer per Environment |
 | Function data | Product-root SQLite by default; optional exact-scope PostgreSQL 16 profile |
 | Distributed roles/Kubernetes | no published general-purpose Agent, active-active, or Helm support window |
 

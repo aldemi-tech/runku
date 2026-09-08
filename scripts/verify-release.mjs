@@ -128,6 +128,16 @@ assertContains(
   read("deployments/docker/server.Dockerfile"),
   "gcr.io/distroless/cc-debian13:nonroot@sha256:",
 )
+assertContains(
+  "server image Node source",
+  read("deployments/docker/server.Dockerfile"),
+  "node:22-bookworm-slim@sha256:",
+)
+assertContains(
+  "server image Node executable",
+  read("deployments/docker/server.Dockerfile"),
+  "COPY --from=node-runtime --chmod=0555 /usr/local/bin/node /usr/local/bin/node",
+)
 assertContains("source install smoke version", read("Makefile"), `runku ${version.replaceAll(".", "\\.")}`)
 assertContains(
   "self-host image example",

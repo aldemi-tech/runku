@@ -22,11 +22,11 @@ pub struct SafeEsmBundleV1 {
     implementations: BTreeMap<Sha256Digest, String>,
 }
 
-/// Canonical ESM resource bundle consumed by the developer machine's local Node binary.
+/// Canonical ESM resource bundle consumed by a local or dedicated-host Node binary.
 ///
 /// It intentionally shares the strict content-addressed resource envelope with
 /// [`SafeEsmBundleV1`] while using a distinct manifest artifact tag, preventing local Node output
-/// from being confused with a remotely executable OCI artifact.
+/// from being confused with an OCI artifact that carries production npm dependencies.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeEsmBundleV1(SafeEsmBundleV1);
 

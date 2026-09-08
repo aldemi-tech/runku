@@ -7,7 +7,8 @@ Runku assumes application code, client input, artifacts, and network peers may b
 - Project and Environment scope is part of every authoritative key.
 - Application identity and functional identity are independent checks.
 - Safe V8 exposes only declared Platform Ops.
-- Full Node never executes inside the Safe V8 process.
+- Full Node never executes inside the Safe V8 isolate. The dedicated-host profile uses a separate
+  bounded Node child process inside the same one-trust-domain server container.
 - Shared untrusted Full Node uses a microVM boundary, not Docker alone.
 - HTTPS egress resolves and pins allowed destinations and denies private infrastructure ranges.
 - Artifact size and digest are verified on every trust-boundary read.
@@ -78,8 +79,9 @@ audit, and separate failure-domain backups. See
 ## Residual risk
 
 The current repository is pre-release and its production packaging and distributed operational
-profiles are not certified. Do not run mutually untrusted Full Node code outside the documented
-VM-grade microVM boundary. Use the
+profiles are not certified. The dedicated-host profile inherits the complete server
+instance/container trust domain and cannot isolate mutually hostile tenants. Do not run mutually
+untrusted Full Node code outside the documented VM-grade microVM boundary. Use the
 [private vulnerability reporting policy](https://github.com/aldemi-tech/runku/blob/main/SECURITY.md)
 to report vulnerabilities.
 

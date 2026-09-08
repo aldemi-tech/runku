@@ -457,6 +457,7 @@ mod tests {
                     file_storage_limits: runku_file_storage::FileStorageLimits::DEFAULT,
                     file_usage_sink: None,
                     file_usage_interval: std::time::Duration::from_secs(1),
+                    full_node_runtime: None,
                 },
             ))
             .await?,

@@ -88,6 +88,8 @@ struct Fixture {
     release_id: ReleaseId,
     manifest: Arc<ReleaseManifestV1>,
     artifact: Arc<[u8]>,
+    bundle_manifest: Arc<ReleaseManifestV1>,
+    bundle_artifact: Arc<[u8]>,
     cache: HostNodeArtifactCache,
     scratch: std::path::PathBuf,
 }
@@ -113,6 +115,32 @@ impl Fixture {
             function.id,
             Arc::clone(&self.manifest),
             Arc::clone(&self.artifact),
+            arguments,
+            timeout,
+            CancellationToken::new(),
+        )?)
+    }
+
+    fn bundle_request(
+        &self,
+        name: &str,
+        arguments: CanonicalValue,
+        timeout: Duration,
+    ) -> Result<InvocationRequest, Box<dyn Error>> {
+        let function = self
+            .bundle_manifest
+            .functions
+            .iter()
+            .find(|function| function.name.as_str() == name)
+            .ok_or("function missing")?;
+        Ok(InvocationRequest::new(
+            EnvironmentScope::new(self.project_id, EnvironmentId::generate()),
+            self.release_id,
+            RequestId::generate(),
+            InvocationId::generate(),
+            function.id,
+            Arc::clone(&self.bundle_manifest),
+            Arc::clone(&self.bundle_artifact),
             arguments,
             timeout,
             CancellationToken::new(),
@@ -155,6 +183,8 @@ fn fixture_with(
     )?;
     let mut manifest = decode_release_manifest(&std::fs::read(output.manifest_path)?)?;
     let source_artifact = std::fs::read(output.artifact_path)?;
+    let bundle_manifest = Arc::new(manifest.clone());
+    let bundle_artifact: Arc<[u8]> = source_artifact.clone().into();
     let target =
         NodeOciDescriptorV1::new(format!("sha256:{}", "a".repeat(64)))?.with_egress_policy(egress);
     let cache = HostNodeArtifactCache::open(&cache_root)?;
@@ -172,6 +202,8 @@ fn fixture_with(
         release_id,
         manifest: Arc::new(manifest),
         artifact: artifact.into(),
+        bundle_manifest,
+        bundle_artifact,
         cache,
         scratch,
     })
@@ -193,6 +225,39 @@ fn runtime_with_policy(
         2,
     )?)
     .build()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedicated_host_materializes_cli_node_bundle_and_reuses_worker()
+-> Result<(), Box<dyn Error>> {
+    let fixture = fixture()?;
+    let runtime = runtime(&fixture)?;
+    runtime
+        .prepare(&fixture.bundle_manifest, &fixture.bundle_artifact)
+        .await?;
+    let first = runtime
+        .execute(fixture.bundle_request(
+            "actions.workerIdentity",
+            CanonicalValue::Null,
+            Duration::from_secs(3),
+        )?)
+        .await?
+        .value;
+    let second = runtime
+        .execute(fixture.bundle_request(
+            "actions.workerIdentity",
+            CanonicalValue::Null,
+            Duration::from_secs(3),
+        )?)
+        .await?
+        .value;
+    let (CanonicalValue::String(first), CanonicalValue::String(second)) = (first, second) else {
+        return Err("worker identities were not strings".into());
+    };
+    assert_eq!(first.split(':').next(), second.split(':').next());
+    assert!(first.contains(":1:"));
+    assert!(second.contains(":2:"));
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

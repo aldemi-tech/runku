@@ -1,4 +1,4 @@
-//! Dedicated-tenant host Node execution over verified materialized OCI application artifacts.
+//! Dedicated-tenant host Node execution over verified materialized application artifacts.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -190,6 +190,71 @@ impl HostNodeArtifactCache {
         }
         if result == Err(RuntimeError::Busy) && final_path.exists() {
             verify_materialized(&final_path, source_manifest, &bundle, target)?;
+            return Ok(final_path);
+        }
+        result?;
+        Ok(final_path)
+    }
+
+    /// Materializes one canonical Node ESM bundle for a dedicated server profile.
+    ///
+    /// The cache key binds both the complete artifact and manifest. Existing exact entries are
+    /// revalidated before reuse, and the resulting tree is immutable to the worker process.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid manifests/artifacts, cache conflicts, or unsafe filesystem state.
+    pub fn materialize_bundle(
+        &self,
+        manifest: &ReleaseManifestV1,
+        artifact: &[u8],
+    ) -> Result<PathBuf, RuntimeError> {
+        manifest
+            .ensure_local_full_node_supported()
+            .map_err(|_| RuntimeError::UnsupportedRuntime)?;
+        let bundle = decode_node_esm_bundle(artifact).map_err(|_| RuntimeError::InvalidArtifact)?;
+        bundle
+            .verify_manifest(manifest, artifact)
+            .map_err(|_| RuntimeError::InvalidArtifact)?;
+        let manifest_digest = manifest
+            .digest()
+            .map_err(|_| RuntimeError::InvalidArtifact)?;
+        let final_path = self.root.join(format!(
+            "bundle-{}-{manifest_digest}",
+            Sha256Digest::of(artifact)
+        ));
+        if final_path.exists() {
+            verify_materialized_bundle(&self.root, &final_path, manifest, &bundle)?;
+            return Ok(final_path);
+        }
+        let staging = self.root.join(format!(
+            ".install-bundle-{manifest_digest}-{}",
+            InvocationId::generate()
+        ));
+        fs::create_dir(&staging).map_err(|_| RuntimeError::Unavailable)?;
+        let result = (|| {
+            write_resources(&staging, manifest, &bundle)?;
+            fs::rename(&staging, &final_path).map_err(|error| {
+                if final_path.exists() {
+                    RuntimeError::Busy
+                } else {
+                    let _ = error;
+                    RuntimeError::Unavailable
+                }
+            })?;
+            if let Err(error) = make_tree_read_only(&final_path) {
+                make_tree_writable(&final_path);
+                let _ = fs::remove_dir_all(&final_path);
+                return Err(error);
+            }
+            Ok(())
+        })();
+        if result.is_err() && staging.exists() {
+            make_tree_writable(&staging);
+            let _ = fs::remove_dir_all(&staging);
+        }
+        if result == Err(RuntimeError::Busy) && final_path.exists() {
+            verify_materialized_bundle(&self.root, &final_path, manifest, &bundle)?;
             return Ok(final_path);
         }
         result?;
@@ -629,9 +694,27 @@ fn resolve_executable(binary: &str) -> Result<String, RuntimeError> {
 #[async_trait]
 impl FullNodeActionRuntime for HostNodeRuntime {
     fn validate_manifest(&self, manifest: &ReleaseManifestV1) -> Result<(), RuntimeError> {
-        manifest
-            .ensure_full_node_supported()
-            .map_err(|_| RuntimeError::UnsupportedRuntime)
+        if manifest.ensure_full_node_supported().is_ok()
+            || manifest.ensure_local_full_node_supported().is_ok()
+        {
+            Ok(())
+        } else {
+            Err(RuntimeError::UnsupportedRuntime)
+        }
+    }
+
+    async fn prepare(
+        &self,
+        manifest: &ReleaseManifestV1,
+        artifact_bytes: &[u8],
+    ) -> Result<(), RuntimeError> {
+        self.validate_manifest(manifest)?;
+        if manifest.artifact.format == ArtifactFormat::NodeEsmBundleV1 {
+            self.config
+                .cache
+                .materialize_bundle(manifest, artifact_bytes)?;
+        }
+        Ok(())
     }
 
     async fn execute(
@@ -652,10 +735,12 @@ async fn prepare_request(
     config: &HostNodeRuntimeConfig,
     request: &InvocationRequest,
 ) -> Result<PreparedInvocation, RuntimeError> {
-    request
-        .manifest()
-        .ensure_full_node_supported()
-        .map_err(|_| RuntimeError::UnsupportedRuntime)?;
+    let manifest = request.manifest();
+    if manifest.ensure_full_node_supported().is_err()
+        && manifest.ensure_local_full_node_supported().is_err()
+    {
+        return Err(RuntimeError::UnsupportedRuntime);
+    }
     let function = request
         .manifest()
         .functions
@@ -674,21 +759,29 @@ async fn prepare_request(
     {
         return Err(RuntimeError::InvalidArtifact);
     }
-    let descriptor_bytes = match request.manifest().artifact.format {
-        ArtifactFormat::NodeOciDescriptorV1 => artifact.as_ref(),
-        ArtifactFormat::HybridOciArtifactV1 => {
-            runku_releases::decode_hybrid_oci_artifact(artifact)
-                .map_err(|_| RuntimeError::InvalidArtifact)?
-                .1
+    let image_root = match request.manifest().artifact.format {
+        ArtifactFormat::NodeEsmBundleV1 => config.cache.materialize_bundle(manifest, artifact)?,
+        ArtifactFormat::NodeOciDescriptorV1 => {
+            let descriptor =
+                decode_node_oci_descriptor(artifact).map_err(|_| RuntimeError::InvalidArtifact)?;
+            if descriptor.egress_policy() != config.instance_policy.egress() {
+                return Err(RuntimeError::UnsupportedRuntime);
+            }
+            config.cache.image_root(&descriptor)?
         }
-        _ => return Err(RuntimeError::UnsupportedRuntime),
+        ArtifactFormat::HybridOciArtifactV1 => {
+            let descriptor_bytes = runku_releases::decode_hybrid_oci_artifact(artifact)
+                .map_err(|_| RuntimeError::InvalidArtifact)?
+                .1;
+            let descriptor = decode_node_oci_descriptor(descriptor_bytes)
+                .map_err(|_| RuntimeError::InvalidArtifact)?;
+            if descriptor.egress_policy() != config.instance_policy.egress() {
+                return Err(RuntimeError::UnsupportedRuntime);
+            }
+            config.cache.image_root(&descriptor)?
+        }
+        ArtifactFormat::SafeEsmBundleV1 => return Err(RuntimeError::UnsupportedRuntime),
     };
-    let descriptor =
-        decode_node_oci_descriptor(descriptor_bytes).map_err(|_| RuntimeError::InvalidArtifact)?;
-    if descriptor.egress_policy() != config.instance_policy.egress() {
-        return Err(RuntimeError::UnsupportedRuntime);
-    }
-    let image_root = config.cache.image_root(&descriptor)?;
     validate_cached_root(&config.cache.root, &image_root)?;
     let source_path = image_root.join(format!("{}.mjs", function.implementation_hash));
     validate_cached_file(
@@ -771,6 +864,42 @@ fn verify_materialized(
     {
         return Err(RuntimeError::InvalidArtifact);
     }
+    let mut contracts =
+        BTreeSet::from([manifest.schema_contract_hash, manifest.index_contract_hash]);
+    for function in &manifest.functions {
+        let path = root.join(format!("{}.mjs", function.implementation_hash));
+        validate_cached_file(root, &path, Some(function.implementation_hash))?;
+        if fs::read_to_string(path).map_err(|_| RuntimeError::InvalidArtifact)?
+            != bundle
+                .source(function.implementation_hash)
+                .ok_or(RuntimeError::InvalidArtifact)?
+        {
+            return Err(RuntimeError::InvalidArtifact);
+        }
+        contracts.insert(function.arguments_contract_hash);
+        contracts.insert(function.result_contract_hash);
+    }
+    for digest in contracts {
+        let path = root.join(format!("{digest}.resource"));
+        validate_cached_file(root, &path, Some(digest))?;
+        if fs::read_to_string(path).map_err(|_| RuntimeError::InvalidArtifact)?
+            != bundle
+                .resource(digest)
+                .ok_or(RuntimeError::InvalidArtifact)?
+        {
+            return Err(RuntimeError::InvalidArtifact);
+        }
+    }
+    Ok(())
+}
+
+fn verify_materialized_bundle(
+    cache: &Path,
+    root: &Path,
+    manifest: &ReleaseManifestV1,
+    bundle: &runku_releases::NodeEsmBundleV1,
+) -> Result<(), RuntimeError> {
+    validate_cached_root(cache, root)?;
     let mut contracts =
         BTreeSet::from([manifest.schema_contract_hash, manifest.index_contract_hash]);
     for function in &manifest.functions {

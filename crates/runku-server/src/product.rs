@@ -48,10 +48,10 @@ use runku_identity::{
 use runku_local::{
     LocalChannelExpectation, LocalCodeResolution, LocalCreatedCredential, LocalCredentialMetadata,
     LocalIdentityError, LocalIdentityManager, LocalLogError, LocalLogManager, LocalProcess,
-    LocalProcessConfig, LocalProcessListener, LocalProcessTelemetrySnapshot, LocalPublishError,
-    LocalReleaseError, LocalReleaseManager, LocalReleaseOutcome, LocalReleaseStatusReport,
-    S3ProductConfig, build_s3_router, derive_local_object_storage_digest_key, load_local,
-    publish_local_if_head,
+    LocalProcessConfig, LocalProcessFullNodeRuntime, LocalProcessListener,
+    LocalProcessTelemetrySnapshot, LocalPublishError, LocalReleaseError, LocalReleaseManager,
+    LocalReleaseOutcome, LocalReleaseStatusReport, S3ProductConfig, build_s3_router,
+    derive_local_object_storage_digest_key, load_local, publish_local_if_head,
 };
 use runku_management_service::{
     ManagementApplicationClient, ManagementApplicationClientCreate,
@@ -89,6 +89,7 @@ use runku_management_service::{
     ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, ManagementStorageOperation,
     ManagementWorkspacePublish,
 };
+use runku_node_runtime::FullNodeActionRuntime;
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
     BucketConfiguration, BucketId, BucketLifecycle, BucketPolicy, BucketQuota, CorsMethod,
@@ -244,6 +245,8 @@ pub struct ProductAdapterConfig {
     pub file_usage_sink: Option<std::sync::Arc<dyn FileUsageSink>>,
     /// Bounded cadence for delivering the application-file usage outbox.
     pub file_usage_interval: std::time::Duration,
+    /// Optional server-composed Full Node runtime. Absence keeps remote Full Node disabled.
+    pub full_node_runtime: Option<Arc<dyn FullNodeActionRuntime>>,
 }
 
 impl std::fmt::Debug for ProductAdapter {
@@ -370,6 +373,10 @@ impl ProductAdapter {
                 data_store: Some(Arc::clone(&data_store)),
                 environment_serving_resolver: Some(environment_serving_resolver),
                 configuration: Some(runtime_configuration),
+                full_node_runtime: config.full_node_runtime.map_or(
+                    LocalProcessFullNodeRuntime::Disabled,
+                    LocalProcessFullNodeRuntime::Provided,
+                ),
                 file_storage_limits: config.file_storage_limits,
                 file_usage_sink: config.file_usage_sink,
                 file_usage_interval: config.file_usage_interval,
@@ -2411,6 +2418,21 @@ impl ManagementProduct for ProductAdapter {
         if request.project_id != self.scope.project_id() {
             return Err(ManagementProductError::Invalid);
         }
+        if request
+            .manifest
+            .functions
+            .iter()
+            .any(|function| function.runtime_class == RuntimeClass::FullNode)
+        {
+            let LocalProcessFullNodeRuntime::Provided(runtime) =
+                &self.process_config.full_node_runtime
+            else {
+                return Err(ManagementProductError::Invalid);
+            };
+            runtime
+                .validate_manifest(&request.manifest)
+                .map_err(|_| ManagementProductError::Invalid)?;
+        }
         let actor =
             DevelopmentActor::from_str(actor).map_err(|_| ManagementProductError::Invalid)?;
         let result = publish_local_if_head(
@@ -4122,6 +4144,7 @@ mod tests {
     use runku_development::DevelopmentActor;
     use runku_local::{initialize_local, publish_local};
     use runku_protocol::{WireObjectEntryV1, WireValueV1};
+    use runku_releases::decode_release_manifest;
 
     use super::*;
 
@@ -4167,6 +4190,39 @@ export const hourly = cron({
   args: null,
 })
 "#;
+
+    const NODE_FUNCTIONS: &str = r#"
+"use runku node"
+import { action, v } from "@runku/server"
+import path from "node:path"
+export const basename = action({
+  auth: "none", visibility: "public", capabilities: [],
+  args: v.string(), returns: v.string(),
+  handler(_ctx, input) { return path.basename(input) },
+})
+"#;
+
+    struct ManifestOnlyNodeRuntime;
+
+    #[async_trait]
+    impl FullNodeActionRuntime for ManifestOnlyNodeRuntime {
+        fn validate_manifest(
+            &self,
+            manifest: &runku_releases::ReleaseManifestV1,
+        ) -> Result<(), runku_runtime::RuntimeError> {
+            manifest
+                .ensure_local_full_node_supported()
+                .map_err(|_| runku_runtime::RuntimeError::UnsupportedRuntime)
+        }
+
+        async fn execute(
+            &self,
+            _request: runku_runtime::InvocationRequest,
+        ) -> Result<runku_node_runtime::FullNodeActionOutcome, runku_runtime::RuntimeError>
+        {
+            Err(runku_runtime::RuntimeError::UnsupportedRuntime)
+        }
+    }
 
     fn value(body: &str, rank: i64) -> WireValueV1 {
         WireValueV1::Object {
@@ -4217,6 +4273,13 @@ export const hourly = cron({
     }
 
     async fn open_adapter(root: &Path) -> Result<ProductAdapter, &'static str> {
+        open_adapter_with_full_node(root, None).await
+    }
+
+    async fn open_adapter_with_full_node(
+        root: &Path,
+        full_node_runtime: Option<Arc<dyn FullNodeActionRuntime>>,
+    ) -> Result<ProductAdapter, &'static str> {
         Box::pin(ProductAdapter::open(
             root.to_path_buf(),
             ProductAdapterConfig {
@@ -4231,9 +4294,65 @@ export const hourly = cron({
                 file_storage_limits: FileStorageLimits::DEFAULT,
                 file_usage_sink: None,
                 file_usage_interval: Duration::from_secs(1),
+                full_node_runtime,
             },
         ))
         .await
+    }
+
+    #[tokio::test]
+    async fn remote_node_publish_requires_an_attached_compatible_runtime() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let workspace: WorkspaceRef = "local".parse()?;
+        let (state, _) = initialize_local(
+            directory.path(),
+            workspace.clone(),
+            "127.0.0.1:0".parse::<SocketAddr>()?,
+            TimestampMicros::new(1_800_000_000_000_000),
+        )
+        .await?;
+        std::fs::create_dir_all(directory.path().join("runku"))?;
+        std::fs::write(
+            directory.path().join("runku/schema.ts"),
+            "import { defineSchema } from '@runku/server'; export default defineSchema({});",
+        )?;
+        std::fs::write(directory.path().join("runku/actions.ts"), NODE_FUNCTIONS)?;
+        let output = build_project(
+            directory.path(),
+            Path::new("runku"),
+            state.project_id,
+            BuildMetadata::generate(TimestampMicros::new(1_800_000_000_000_001)),
+        )?;
+        let manifest_bytes = std::fs::read(output.manifest_path)?;
+        let artifact_bytes = std::fs::read(output.artifact_path)?;
+        let request = runku_protocol::DevelopmentPublishRequestV1 {
+            operation_id: OperationId::generate(),
+            project_id: state.project_id,
+            workspace_ref: workspace,
+            expected_head: None,
+            manifest: decode_release_manifest(&manifest_bytes)?,
+            manifest_bytes,
+            artifact_bytes,
+        };
+        let bytes = runku_protocol::encode_development_publish_request_v1(&request)?;
+
+        let disabled = open_adapter(directory.path()).await?;
+        assert_eq!(
+            disabled.publish("console-node-test", &bytes).await,
+            Err(ManagementProductError::Invalid)
+        );
+        drop(disabled);
+
+        let enabled =
+            open_adapter_with_full_node(directory.path(), Some(Arc::new(ManifestOnlyNodeRuntime)))
+                .await?;
+        let published = enabled.publish("console-node-test", &bytes).await?;
+        assert_eq!(
+            published.release_id,
+            request.manifest.release_id.to_string()
+        );
+        assert!(!published.replayed);
+        Ok(())
     }
 
     #[tokio::test]
@@ -5458,6 +5577,7 @@ export const hourly = cron({
                     file_storage_limits: FileStorageLimits::DEFAULT,
                     file_usage_sink: None,
                     file_usage_interval: Duration::from_secs(1),
+                    full_node_runtime: None,
                 },
             ))
             .await?;

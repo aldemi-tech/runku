@@ -6,8 +6,9 @@ use runku_core::{
     RequestId, WorkspaceId, WorkspaceRef,
 };
 use runku_releases::{
-    ARTIFACT_MAX_BYTES, MANIFEST_MAX_BYTES, ReleaseManifestV1, Sha256Digest,
-    decode_release_manifest, decode_safe_esm_bundle, encode_release_manifest,
+    ARTIFACT_MAX_BYTES, ArtifactFormat, MANIFEST_MAX_BYTES, ReleaseManifestV1, Sha256Digest,
+    decode_node_esm_bundle, decode_release_manifest, decode_safe_esm_bundle,
+    encode_release_manifest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -991,10 +992,15 @@ fn validate_package(
     {
         return Err(invalid);
     }
-    let bundle = decode_safe_esm_bundle(artifact_bytes).map_err(|_| invalid)?;
-    bundle
-        .verify_manifest(manifest, artifact_bytes)
-        .map_err(|_| invalid)
+    match manifest.artifact.format {
+        ArtifactFormat::SafeEsmBundleV1 => decode_safe_esm_bundle(artifact_bytes)
+            .and_then(|bundle| bundle.verify_manifest(manifest, artifact_bytes))
+            .map_err(|_| invalid),
+        ArtifactFormat::NodeEsmBundleV1 => decode_node_esm_bundle(artifact_bytes)
+            .and_then(|bundle| bundle.verify_manifest(manifest, artifact_bytes))
+            .map_err(|_| invalid),
+        ArtifactFormat::NodeOciDescriptorV1 | ArtifactFormat::HybridOciArtifactV1 => Err(invalid),
+    }
 }
 
 fn validate_freeze_request(request: &DevelopmentFreezeRequestV1) -> Result<(), ProtocolError> {
