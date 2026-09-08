@@ -183,6 +183,9 @@ passed and the release owner separately approves the coordinated publication.
 The retained `0.5.1` candidate record is
 [`v0.5.1-candidate-evidence.md`](v0.5.1-candidate-evidence.md). Future candidate records must retain
 the same distinction between Product conformance, hosted artifact completion, and final publication.
+The local-only `0.5.2` preparation record is
+[`v0.5.2-candidate-evidence.md`](v0.5.2-candidate-evidence.md); it explicitly does not qualify or
+authorize a remote image or coordinated publication.
 
 ## Trigger and workflow
 
