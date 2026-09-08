@@ -1,6 +1,6 @@
 {
   "name": "@runku/react",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "React and Next.js bindings for the Runku TypeScript client",
   "type": "module",
   "license": "Apache-2.0",
@@ -29,7 +29,7 @@
   "engines": { "node": ">=20" },
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
   "peerDependencies": {
-    "@runku/client": "0.5.0",
+    "@runku/client": "0.5.1",
     "react": ">=18.3.0 <20"
   },
   "devDependencies": {

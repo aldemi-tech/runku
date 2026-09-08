@@ -3427,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "runku-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -4157,7 +4157,7 @@ dependencies = [
 
 [[package]]
 name = "runku-server"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-nats",
  "async-trait",

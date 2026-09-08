@@ -14,6 +14,12 @@ archive.
 This procedure publishes irreversible external state. Run it only from a reviewed, clean commit on
 `main`; never from an uncommitted working tree or a fork.
 
+An OCI-only candidate track exists for remote conformance before the coordinated distribution is
+published. It builds the native Linux CLI and server for both supported architectures and publishes
+only `ghcr.io/aldemi-tech/runku-server:X.Y.Z-candidate-SHORT_COMMIT`, its architecture assembly
+tags, and `sha-COMMIT`. It does not create a Git tag or GitHub Release and does not pack or publish
+any npm package. Candidate tags are immutable test inputs; production must pin the resulting digest.
+
 ## Published artifacts
 
 ### Coordinated distribution
@@ -154,6 +160,19 @@ verification, empty-install restore, preserved operator session, and automatic s
 restart. Use it to prove all native runners and the release-shaped self-host package before creating
 irreversible registry versions.
 
+After all local gates pass, publish an OCI-only candidate from the exact reviewed commit when a
+remote cell is required for the remaining campaign:
+
+```sh
+gh workflow run release.yml --ref COMMIT_OR_BRANCH -f candidate_image=true
+```
+
+This is a publication action because the candidate image becomes externally visible. Record the
+workflow run, candidate tag, multi-platform digest, source commit, SBOM/provenance result, and remote
+campaign evidence. Do not use a candidate run to infer that npm packages or the final distribution
+exist. The final `vX.Y.Z` tag remains forbidden until every required local and remote scenario has
+passed and the release owner separately approves the coordinated publication.
+
 ## Trigger and workflow
 
 After review and CI success:
@@ -187,8 +206,9 @@ git push origin sdk-vX.Y.Z
    bounded install/lifecycle/disaster-restore campaign. It is skipped on tags because the reviewed
    commit already supplied this behavioral evidence.
 7. `server-image` combines those server bytes with the matching native CLI bytes into a digest-
-   pinned distroless image, publishes both architectures, and creates the version/commit manifests
-   with BuildKit SBOM and provenance attestations.
+   pinned distroless image and publishes both architectures with BuildKit SBOM and provenance
+   attestations. A distribution tag creates the version/commit manifests. An explicitly requested
+   candidate run creates only the immutable `X.Y.Z-candidate-SHORT_COMMIT` and commit manifests.
 8. For a distribution tag, `publish-npm` verifies the complete ten-package set, publishes native
    packages first and the launcher last, and compares registry integrity with the local tarballs.
 9. `github-release` generates checksums, attests assets, and publishes the release after npm and

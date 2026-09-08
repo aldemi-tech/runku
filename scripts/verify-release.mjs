@@ -69,7 +69,17 @@ for (const platform of releasePlatforms) {
 for (const target of ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]) {
   assertOccursOnce("server release workflow target", serverWorkflow, `target: ${target}`)
 }
-assertContains("server image workflow", releaseWorkflow, "ghcr.io/aldemi-tech/runku-server:${VERSION}")
+assertContains(
+  "server image workflow",
+  releaseWorkflow,
+  "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}",
+)
+assertContains("candidate image release kind", releaseWorkflow, "kind=candidate-image")
+assertContains(
+  "immutable candidate image tag",
+  releaseWorkflow,
+  'IMAGE_TAG="${VERSION}-candidate-${REVISION:0:12}"',
+)
 assertContains(
   "server image base",
   read("deployments/docker/server.Dockerfile"),

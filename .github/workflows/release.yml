@@ -7,6 +7,11 @@ on:
       - "sdk-v*"
   workflow_dispatch:
     inputs:
+      candidate_image:
+        description: Publish only an immutable OCI candidate image; never publish npm packages, tags, or a GitHub Release
+        required: false
+        default: false
+        type: boolean
       artifact_run_id:
         description: Existing release workflow run whose artifacts should be published without rebuilding
         required: false
@@ -50,13 +55,16 @@ jobs:
           elif test "$GITHUB_REF_TYPE" = tag; then
             node scripts/verify-release.mjs --tag "$GITHUB_REF_NAME"
             echo 'kind=distribution' >> "$GITHUB_OUTPUT"
+          elif test '${{ inputs.candidate_image }}' = true; then
+            node scripts/verify-release.mjs
+            echo 'kind=candidate-image' >> "$GITHUB_OUTPUT"
           else
             node scripts/verify-release.mjs
             echo 'kind=distribution' >> "$GITHUB_OUTPUT"
           fi
 
   sdk-packages:
-    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
+    if: needs.metadata.outputs.kind != 'candidate-image' && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
     needs: metadata
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -137,7 +145,7 @@ jobs:
           compression-level: 0
 
   cli-binaries:
-    if: needs.metadata.outputs.kind == 'distribution' && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
+    if: (needs.metadata.outputs.kind == 'distribution' || needs.metadata.outputs.kind == 'candidate-image') && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
     needs: metadata
     strategy:
       fail-fast: false
@@ -250,7 +258,7 @@ jobs:
           compression-level: 0
 
   server-binaries:
-    if: needs.metadata.outputs.kind == 'distribution' && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
+    if: (needs.metadata.outputs.kind == 'distribution' || needs.metadata.outputs.kind == 'candidate-image') && (github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == '')
     needs: metadata
     strategy:
       fail-fast: false
@@ -302,7 +310,7 @@ jobs:
           compression-level: 0
 
   server-image:
-    if: github.ref_type == 'tag' && needs.metadata.outputs.kind == 'distribution'
+    if: (github.ref_type == 'tag' && needs.metadata.outputs.kind == 'distribution') || (github.event_name == 'workflow_dispatch' && needs.metadata.outputs.kind == 'candidate-image')
     needs: [metadata, cli-binaries, server-binaries]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -346,24 +354,30 @@ jobs:
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
           REVISION: ${{ github.sha }}
+          RELEASE_KIND: ${{ needs.metadata.outputs.kind }}
         run: |
+          if test "$RELEASE_KIND" = candidate-image; then
+            IMAGE_TAG="${VERSION}-candidate-${REVISION:0:12}"
+          else
+            IMAGE_TAG="$VERSION"
+          fi
           docker buildx create --name runku-release-builder --use
           docker buildx build --platform linux/amd64 --file deployments/docker/server.Dockerfile \
             --build-arg "RUNKU_VERSION=${VERSION}" --build-arg "RUNKU_REVISION=${REVISION}" \
             --provenance=mode=max --sbom=true --push \
-            --tag "ghcr.io/aldemi-tech/runku-server:${VERSION}-amd64" image-amd64
+            --tag "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}-amd64" image-amd64
           docker buildx build --platform linux/arm64 --file deployments/docker/server.Dockerfile \
             --build-arg "RUNKU_VERSION=${VERSION}" --build-arg "RUNKU_REVISION=${REVISION}" \
             --provenance=mode=max --sbom=true --push \
-            --tag "ghcr.io/aldemi-tech/runku-server:${VERSION}-arm64" image-arm64
+            --tag "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}-arm64" image-arm64
           docker buildx imagetools create \
-            --tag "ghcr.io/aldemi-tech/runku-server:${VERSION}" \
+            --tag "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}" \
             --tag "ghcr.io/aldemi-tech/runku-server:sha-${REVISION}" \
-            "ghcr.io/aldemi-tech/runku-server:${VERSION}-amd64" \
-            "ghcr.io/aldemi-tech/runku-server:${VERSION}-arm64"
+            "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}-amd64" \
+            "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}-arm64"
           mkdir -p out/release
           docker buildx imagetools inspect \
-            "ghcr.io/aldemi-tech/runku-server:${VERSION}" \
+            "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}" \
             >out/release/runku-server-image.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
