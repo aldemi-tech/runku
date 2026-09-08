@@ -7,8 +7,9 @@ historical DuckDB query, and live streaming stay inside the Runku process.
 
 The package keeps Full Node disabled by default, does not orchestrate multiple Environments, and
 does not make one SQLite Product Environment active-active. The image contains a pinned Node 22
-binary so an operator may explicitly select the documented `dedicated-host` profile when the
-complete machine/container is one Product trust domain. It is not a shared hostile-tenant boundary.
+binary so an operator may select either the compact `dedicated-host` profile or the
+`full-node-worker` overlay when the complete machine is one Product trust domain. Safe V8 remains
+enabled in both cases. Neither is a shared hostile-tenant boundary.
 
 ## Topology and network boundary
 
@@ -18,7 +19,8 @@ operator/CLI origin        ─► host TLS proxy ─► 127.0.0.1:3220 Managemen
                                                     │
                                     one runku-server container
                                       ├─ Safe V8/background/realtime
-                                      ├─ optional bounded Node worker pool (dedicated-host only)
+                                      ├─ optional bounded Node child pool (dedicated-host)
+                                      ├─ optional NATS ─► separate Node container (full-node-worker)
                                       ├─ Product SQLite + Parquet/DuckDB
                                       ├─ Runku Storage bytes ─► filesystem or external object store
                                       └─ Platform Identity ─► PostgreSQL container
@@ -63,6 +65,12 @@ Edit `.env`:
 3. set `RUNKU_UID` and `RUNKU_GID` to their non-root host owner;
 4. set the exact public HTTPS Management origin;
 5. keep `RUNKU_DEPLOYMENT_PROFILE=standalone` unless an optional profile below is required.
+
+Choose `RUNKU_DEPLOYMENT_PROFILE=full-node-worker` (or `browser-full-node-worker`) to keep Safe V8
+in the server and place trusted Full Node processes in an independent container. The worker mounts
+only a read-only immutable execution projection plus its own cache; it does not mount Product,
+Platform Identity, or secret files. The included NATS listener is bound to host loopback. This is a
+single-host trust profile, not a VM-grade hostile multi-tenant sandbox.
 
 Prepare secrets and persistent directories without starting a server:
 
@@ -277,8 +285,9 @@ cryptographic recovery material. Destroy them separately only after the backup/r
 - The small profile has one active writer and one host failure domain. Use off-host backups or S3
   history according to the required RPO. HA logs protect admitted diagnostics; they do not make the
   Product data path active-active.
-- Full Node is disabled by default. `dedicated-host` is valid only when the whole installation is
-  one Product trust domain; shared-untrusted Node still requires the separately qualified
+- Full Node is disabled by default. `dedicated-host` and `dedicated-worker` are valid only when the
+  whole installation is one Product trust domain. A separate container improves mounts, cgroups,
+  and lifecycle isolation but shared-untrusted Node still requires the separately qualified
   VM-grade Agent/isolation profile.
 
 Troubleshoot with `./runku-selfhost status`, bounded `docker compose logs`, `runku status --remote`,

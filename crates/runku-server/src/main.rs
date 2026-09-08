@@ -17,6 +17,10 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use runku_execution_queue::{
+    ExecutionAgent, ExecutionAgentConfig, ExecutionClass, NatsExecutionControlConfig,
+    NatsExecutionControlPlane, NatsExecutionQueue, NatsExecutionQueueConfig,
+};
 use runku_file_storage::{
     FileObjectStore, FileStorageError, FileStorageLimits, FileUsageEvent, FileUsageSink,
     S3FileCredentials, S3FileStaticCredentials, S3FileStoreConfig,
@@ -35,8 +39,9 @@ use runku_management_service::{
     build_management_router_with_product, build_management_router_with_products, serve_management,
 };
 use runku_node_runtime::{
-    DedicatedHostPolicy, FullNodeActionRuntime, HostNodeArtifactCache, HostNodeRuntimeConfig,
-    ServerNodeRuntimeConfig,
+    DedicatedHostPolicy, FullNodeActionRuntime, FullNodeExecutionHandler,
+    FullNodeFilesystemResources, HostNodeArtifactCache, HostNodeRuntimeConfig, QueuedNodeRuntime,
+    QueuedNodeRuntimeConfig, ServerNodeRuntimeConfig,
 };
 use runku_observability::{
     JournalArchiveOutcome, LogArchive, LogJournalArchiver, NatsLogJournal, NatsLogJournalConfig,
@@ -81,6 +86,7 @@ async fn run() -> Result<(), &'static str> {
             | "migrate"
             | "recover-bootstrap"
             | "logs-worker"
+            | "full-node-worker"
             | "probe-live"
             | "probe-ready"
             | "version"
@@ -100,6 +106,9 @@ async fn run() -> Result<(), &'static str> {
     }
     if command == "logs-worker" {
         return run_logs_worker_command().await;
+    }
+    if command == "full-node-worker" {
+        return run_full_node_worker_command().await;
     }
     let config = ServerConfig::load()?;
     let file_object_store = config.file_storage.open().await?;
@@ -166,7 +175,7 @@ async fn run() -> Result<(), &'static str> {
     let external = external_authenticator(config.oidc.as_ref())?;
     let mut product_adapters = Vec::new();
     if let Some(root) = config.product_root.as_ref() {
-        let full_node_runtime = open_full_node_runtime(&config.full_node, root)?;
+        let full_node = open_full_node_runtime(&config.full_node, root).await?;
         product_adapters.push(Arc::new(
             Box::pin(ProductAdapter::open(
                 root.clone(),
@@ -182,7 +191,8 @@ async fn run() -> Result<(), &'static str> {
                     file_storage_limits: config.file_storage_limits,
                     file_usage_sink: config.file_usage_sink.clone(),
                     file_usage_interval: config.file_usage_interval,
-                    full_node_runtime,
+                    full_node_runtime: full_node.runtime,
+                    full_node_resources: full_node.resources,
                 },
             ))
             .await?,
@@ -192,7 +202,7 @@ async fn run() -> Result<(), &'static str> {
         for (environment, platform_database_url) in
             manifest.environments.iter().zip(cell_database_urls)
         {
-            let full_node_runtime = open_full_node_runtime(&config.full_node, &environment.root)?;
+            let full_node = open_full_node_runtime(&config.full_node, &environment.root).await?;
             let allowed_origins = environment
                 .allowed_origins
                 .iter()
@@ -217,7 +227,8 @@ async fn run() -> Result<(), &'static str> {
                         file_storage_limits: config.file_storage_limits,
                         file_usage_sink: config.file_usage_sink.clone(),
                         file_usage_interval: config.file_usage_interval,
-                        full_node_runtime,
+                        full_node_runtime: full_node.runtime,
+                        full_node_resources: full_node.resources,
                     },
                 ))
                 .await?,
@@ -414,6 +425,80 @@ async fn run_logs_worker_command() -> Result<(), &'static str> {
     run_log_worker(journal, archive, log_archive_batch_wait()?).await
 }
 
+async fn run_full_node_worker_command() -> Result<(), &'static str> {
+    if env::var("RUNKU_FULL_NODE_PROFILE").as_deref() != Ok("dedicated-worker") {
+        return Err("SERVER_FULL_NODE_WORKER_PROFILE_REQUIRED");
+    }
+    let node = load_dedicated_host_node_config()?;
+    let resources_root = required_absolute_path("RUNKU_FULL_NODE_RESOURCE_ROOT")?;
+    let runtime_root = required_absolute_path("RUNKU_FULL_NODE_RUNTIME_ROOT")?;
+    if runtime_root.starts_with(&resources_root) || resources_root.starts_with(&runtime_root) {
+        return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+    }
+    let max_concurrent_per_project = usize::try_from(full_node_u64(
+        "RUNKU_FULL_NODE_MAX_CONCURRENT_PER_PROJECT",
+        u64::try_from(node.max_concurrency)
+            .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?,
+    )?)
+    .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    if !(1..=node.max_concurrency).contains(&max_concurrent_per_project) {
+        return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+    }
+    let execution = load_execution_nats_config()?;
+    let node_profile = FullNodeServerProfile::DedicatedHost(node.clone());
+    validate_full_node_binary(&node_profile)?;
+    let resources = Arc::new(
+        FullNodeFilesystemResources::open_reader(&resources_root)
+            .await
+            .map_err(|_| "SERVER_FULL_NODE_RESOURCE_PROJECTION_UNAVAILABLE")?,
+    );
+    let runtime = build_host_node_runtime(&node, &runtime_root)?;
+    let client = connect_execution_nats(&execution).await?;
+    let queue = Arc::new(
+        NatsExecutionQueue::open(client.clone(), execution.queue.clone())
+            .await
+            .map_err(|_| "SERVER_FULL_NODE_NATS_UNAVAILABLE")?,
+    );
+    let control = Arc::new(
+        NatsExecutionControlPlane::open(client, execution.control.clone())
+            .await
+            .map_err(|_| "SERVER_FULL_NODE_NATS_UNAVAILABLE")?,
+    );
+    let handler = Arc::new(FullNodeExecutionHandler::from_resources(
+        resources, runtime, control,
+    ));
+    let class_display = execution.class.to_string();
+    let agent = Arc::new(
+        ExecutionAgent::new(
+            queue,
+            handler,
+            ExecutionAgentConfig {
+                class: execution.class,
+                slots: node.max_concurrency,
+                max_concurrent_per_project,
+                pull_wait: Duration::from_secs(5),
+            },
+        )
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?,
+    );
+    let (stop, receiver) = tokio::sync::watch::channel(false);
+    let signal = tokio::spawn(async move {
+        shutdown().await;
+        stop.send_replace(true);
+    });
+    println!(
+        "runku-server Full Node worker serving class {} with {} slot(s)",
+        class_display, node.max_concurrency
+    );
+    let result = agent
+        .run(receiver)
+        .await
+        .map_err(|_| "SERVER_FULL_NODE_WORKER_STOPPED");
+    signal.abort();
+    drop(signal.await);
+    result
+}
+
 struct ServerConfig {
     identity_database_url: String,
     pepper: [u8; 32],
@@ -439,10 +524,11 @@ struct ServerConfig {
     full_node: FullNodeServerProfile,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum FullNodeServerProfile {
     Disabled,
     DedicatedHost(DedicatedHostNodeConfig),
+    DedicatedWorker(Box<DedicatedWorkerGatewayConfig>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -453,6 +539,27 @@ struct DedicatedHostNodeConfig {
     cpu_millis: u32,
     memory_bytes: u64,
     pids: u32,
+}
+
+#[derive(Clone, Debug)]
+struct ExecutionNatsConfig {
+    url: String,
+    credentials_file: Option<PathBuf>,
+    require_tls: bool,
+    queue: NatsExecutionQueueConfig,
+    control: NatsExecutionControlConfig,
+    class: ExecutionClass,
+}
+
+#[derive(Clone, Debug)]
+struct DedicatedWorkerGatewayConfig {
+    resources_root: PathBuf,
+    execution: ExecutionNatsConfig,
+}
+
+struct OpenedFullNode {
+    runtime: Option<Arc<dyn FullNodeActionRuntime>>,
+    resources: Option<FullNodeFilesystemResources>,
 }
 
 enum ServerFileStorage {
@@ -682,44 +789,164 @@ fn load_full_node_profile() -> Result<FullNodeServerProfile, &'static str> {
     let profile = env::var("RUNKU_FULL_NODE_PROFILE").unwrap_or_else(|_| "disabled".to_owned());
     match profile.as_str() {
         "disabled" => Ok(FullNodeServerProfile::Disabled),
-        "dedicated-host" => {
-            let node_binary = env::var("RUNKU_FULL_NODE_BINARY")
-                .unwrap_or_else(|_| "/usr/local/bin/node".to_owned());
-            let binary_path = Path::new(&node_binary);
-            let max_concurrency =
-                usize::try_from(full_node_u64("RUNKU_FULL_NODE_MAX_CONCURRENCY", 1)?)
-                    .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
-            let heap_megabytes =
-                u16::try_from(full_node_u64("RUNKU_FULL_NODE_HEAP_MEGABYTES", 256)?)
-                    .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
-            let cpu_millis = u32::try_from(required_full_node_u64(
-                "RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS",
-            )?)
-            .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
-            let memory_bytes = required_full_node_u64("RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES")?;
-            let pids = u32::try_from(required_full_node_u64("RUNKU_FULL_NODE_INSTANCE_PIDS")?)
-                .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
-            if !binary_path.is_absolute()
-                || binary_path == Path::new("/")
-                || !(1..=128).contains(&max_concurrency)
-                || !(64..=4096).contains(&heap_megabytes)
-                || u64::from(heap_megabytes) * 1024 * 1024 >= memory_bytes
-            {
-                return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
-            }
-            Ok(FullNodeServerProfile::DedicatedHost(
-                DedicatedHostNodeConfig {
-                    node_binary,
-                    max_concurrency,
-                    heap_megabytes,
-                    cpu_millis,
-                    memory_bytes,
-                    pids,
-                },
-            ))
-        }
+        "dedicated-host" => Ok(FullNodeServerProfile::DedicatedHost(
+            load_dedicated_host_node_config()?,
+        )),
+        "dedicated-worker" => Ok(FullNodeServerProfile::DedicatedWorker(Box::new(
+            DedicatedWorkerGatewayConfig {
+                resources_root: required_absolute_path("RUNKU_FULL_NODE_RESOURCE_ROOT")?,
+                execution: load_execution_nats_config()?,
+            },
+        ))),
         _ => Err("SERVER_FULL_NODE_CONFIGURATION_INVALID"),
     }
+}
+
+fn load_dedicated_host_node_config() -> Result<DedicatedHostNodeConfig, &'static str> {
+    let node_binary =
+        env::var("RUNKU_FULL_NODE_BINARY").unwrap_or_else(|_| "/usr/local/bin/node".to_owned());
+    let binary_path = Path::new(&node_binary);
+    let max_concurrency = usize::try_from(full_node_u64("RUNKU_FULL_NODE_MAX_CONCURRENCY", 1)?)
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let heap_megabytes = u16::try_from(full_node_u64("RUNKU_FULL_NODE_HEAP_MEGABYTES", 256)?)
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let cpu_millis = u32::try_from(required_full_node_u64(
+        "RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS",
+    )?)
+    .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let memory_bytes = required_full_node_u64("RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES")?;
+    let pids = u32::try_from(required_full_node_u64("RUNKU_FULL_NODE_INSTANCE_PIDS")?)
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    if !binary_path.is_absolute()
+        || binary_path == Path::new("/")
+        || !(1..=128).contains(&max_concurrency)
+        || !(64..=4096).contains(&heap_megabytes)
+        || u64::from(heap_megabytes) * 1024 * 1024 >= memory_bytes
+    {
+        return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+    }
+    Ok(DedicatedHostNodeConfig {
+        node_binary,
+        max_concurrency,
+        heap_megabytes,
+        cpu_millis,
+        memory_bytes,
+        pids,
+    })
+}
+
+fn required_absolute_path(name: &str) -> Result<PathBuf, &'static str> {
+    let path = PathBuf::from(required(name)?);
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+    }
+    Ok(path)
+}
+
+fn load_execution_nats_config() -> Result<ExecutionNatsConfig, &'static str> {
+    let url = required("RUNKU_EXECUTION_NATS_URL")?;
+    let parsed = url::Url::parse(&url).map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let loopback = parsed.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if !matches!(parsed.scheme(), "nats" | "tls")
+        || parsed.host_str().is_none()
+        || !matches!(parsed.path(), "" | "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.scheme() == "nats" && !loopback
+    {
+        return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+    }
+    let credentials_file = env::var_os("RUNKU_EXECUTION_NATS_CREDENTIALS_FILE")
+        .map(PathBuf::from)
+        .map(|path| {
+            if !path.is_absolute() {
+                return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+            }
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
+                return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+            }
+            Ok(path)
+        })
+        .transpose()?;
+    let replicas = usize::try_from(full_node_u64("RUNKU_EXECUTION_NATS_REPLICAS", 1)?)
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let mut queue = NatsExecutionQueueConfig {
+        replicas,
+        ..NatsExecutionQueueConfig::default()
+    };
+    if let Ok(value) = env::var("RUNKU_EXECUTION_NATS_STREAM") {
+        queue.stream_name = value;
+    }
+    if let Ok(value) = env::var("RUNKU_EXECUTION_NATS_SUBJECT_PREFIX") {
+        queue.subject_prefix = value;
+    }
+    let mut control = NatsExecutionControlConfig {
+        replicas,
+        ..NatsExecutionControlConfig::default()
+    };
+    if let Ok(value) = env::var("RUNKU_EXECUTION_NATS_CONTROL_BUCKET") {
+        control.bucket = value;
+    }
+    let class = env::var("RUNKU_FULL_NODE_EXECUTION_CLASS")
+        .unwrap_or_else(|_| "node_host_v1".to_owned())
+        .parse()
+        .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+    let valid_stream = !queue.stream_name.is_empty()
+        && queue.stream_name.len() <= 64
+        && queue
+            .stream_name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    let valid_subject = !queue.subject_prefix.is_empty()
+        && queue.subject_prefix.len() <= 128
+        && queue.subject_prefix.split('.').all(|token| {
+            !token.is_empty()
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    let valid_bucket = !control.bucket.is_empty()
+        && control.bucket.len() <= 64
+        && control
+            .bucket
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    if !(1..=5).contains(&replicas) || !valid_stream || !valid_subject || !valid_bucket {
+        return Err("SERVER_FULL_NODE_CONFIGURATION_INVALID");
+    }
+    Ok(ExecutionNatsConfig {
+        url,
+        credentials_file,
+        require_tls: parsed.scheme() == "tls",
+        queue,
+        control,
+        class,
+    })
+}
+
+async fn connect_execution_nats(
+    config: &ExecutionNatsConfig,
+) -> Result<async_nats::Client, &'static str> {
+    let mut options = async_nats::ConnectOptions::new().require_tls(config.require_tls);
+    if let Some(path) = &config.credentials_file {
+        options = options
+            .credentials_file(path)
+            .await
+            .map_err(|_| "SERVER_FULL_NODE_NATS_CREDENTIALS_INVALID")?;
+    }
+    options
+        .connect(&config.url)
+        .await
+        .map_err(|_| "SERVER_FULL_NODE_NATS_UNAVAILABLE")
 }
 
 fn full_node_u64(name: &str, default: u64) -> Result<u64, &'static str> {
@@ -760,15 +987,61 @@ fn validate_full_node_binary(profile: &FullNodeServerProfile) -> Result<(), &'st
     }
 }
 
-fn open_full_node_runtime(
+async fn open_full_node_runtime(
     profile: &FullNodeServerProfile,
     product_root: &Path,
-) -> Result<Option<Arc<dyn FullNodeActionRuntime>>, &'static str> {
-    let FullNodeServerProfile::DedicatedHost(config) = profile else {
-        return Ok(None);
-    };
-    validate_full_node_binary(profile)?;
-    let runtime_root = product_root.join(".runku/server-node-runtime-v1");
+) -> Result<OpenedFullNode, &'static str> {
+    match profile {
+        FullNodeServerProfile::Disabled => Ok(OpenedFullNode {
+            runtime: None,
+            resources: None,
+        }),
+        FullNodeServerProfile::DedicatedHost(config) => {
+            validate_full_node_binary(profile)?;
+            let runtime_root = product_root.join(".runku/server-node-runtime-v1");
+            let runtime = build_host_node_runtime(config, &runtime_root)?;
+            Ok(OpenedFullNode {
+                runtime: Some(runtime),
+                resources: None,
+            })
+        }
+        FullNodeServerProfile::DedicatedWorker(config) => {
+            let resources = FullNodeFilesystemResources::open_writer(&config.resources_root)
+                .await
+                .map_err(|_| "SERVER_FULL_NODE_RESOURCE_PROJECTION_UNAVAILABLE")?;
+            let client = connect_execution_nats(&config.execution).await?;
+            let queue = Arc::new(
+                NatsExecutionQueue::open(client.clone(), config.execution.queue.clone())
+                    .await
+                    .map_err(|_| "SERVER_FULL_NODE_NATS_UNAVAILABLE")?,
+            );
+            let control = Arc::new(
+                NatsExecutionControlPlane::open(client, config.execution.control.clone())
+                    .await
+                    .map_err(|_| "SERVER_FULL_NODE_NATS_UNAVAILABLE")?,
+            );
+            let runtime = QueuedNodeRuntime::new(
+                queue,
+                control,
+                QueuedNodeRuntimeConfig {
+                    class: config.execution.class.clone(),
+                    result_wait: Duration::from_secs(5),
+                    configuration_available: false,
+                },
+            )
+            .map_err(|_| "SERVER_FULL_NODE_CONFIGURATION_INVALID")?;
+            Ok(OpenedFullNode {
+                runtime: Some(Arc::new(runtime)),
+                resources: Some(resources),
+            })
+        }
+    }
+}
+
+fn build_host_node_runtime(
+    config: &DedicatedHostNodeConfig,
+    runtime_root: &Path,
+) -> Result<Arc<dyn FullNodeActionRuntime>, &'static str> {
     let cache_root = runtime_root.join("artifacts");
     let scratch_root = runtime_root.join("scratch");
     std::fs::create_dir_all(&cache_root).map_err(|_| "SERVER_FULL_NODE_UNAVAILABLE")?;
@@ -790,7 +1063,7 @@ fn open_full_node_runtime(
     )
     .build()
     .map_err(|_| "SERVER_FULL_NODE_UNAVAILABLE")?;
-    Ok(Some(Arc::new(runtime)))
+    Ok(Arc::new(runtime))
 }
 
 fn load_file_storage() -> Result<(ServerFileStorage, FileStorageLimits), &'static str> {

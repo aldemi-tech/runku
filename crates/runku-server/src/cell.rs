@@ -458,6 +458,7 @@ mod tests {
                     file_usage_sink: None,
                     file_usage_interval: std::time::Duration::from_secs(1),
                     full_node_runtime: None,
+                    full_node_resources: None,
                 },
             ))
             .await?,

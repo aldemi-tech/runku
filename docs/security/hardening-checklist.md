@@ -90,8 +90,8 @@ connection, not only during new login.
 
 ## Runtime and code supply chain
 
-- [ ] Safe V8 is the selected profile unless Node is truly required; manifests declare the minimum
-      data/network/storage/scheduler/nested-call/configuration capabilities.
+- [ ] Safe V8 remains enabled for every Environment; attach a Full Node executor only when required,
+      and keep manifest data/network/storage/scheduler/nested-call/configuration capabilities minimal.
 - [ ] Builds reject unsupported imports, path escape, symlinked source, unknown versions, and
       unstable snapshots.
 - [ ] Artifacts are verified by digest and size on read; old eligible Releases remain immutable.
@@ -99,7 +99,8 @@ connection, not only during new login.
 - [ ] Nested calls preserve exact Environment/code pin and enforce child visibility/capabilities.
 - [ ] Shared untrusted Full Node code is not run in ordinary Docker; a VM-grade boundary is required.
 
-The current compact release does not ship a Full Node Agent. Kubernetes/Firecracker assets in the
+The compact release ships an optional separate trusted Full Node worker, but not a VM-grade
+shared-untrusted Full Node Agent. Kubernetes/Firecracker assets in the
 repository are conformance/architecture material, not an authorization to expose a production
 multi-tenant runtime.
 

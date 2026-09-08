@@ -2,9 +2,9 @@
 
 This is the decision and execution guide for the currently supported Runku Self-Hosted shape: one
 initialized Safe V8 Product Environment, one active Product writer, PostgreSQL-backed Platform
-Identity, and the released Docker Compose package. An explicit dedicated-host option can run Full
-Node workers inside the same container when the whole installation is one trust domain. It is not
-a generic Kubernetes, active-active, or shared Full Node Agent installation.
+Identity, and the released Docker Compose package. Trusted Full Node can run either in the compact
+server container or in the optional separate-worker overlay when the whole installation is one
+trust domain. It is not a generic Kubernetes, active-active, or shared hostile-tenant installation.
 
 ## Decide whether this profile fits
 
@@ -12,8 +12,8 @@ Use the compact profile when all of these are true:
 
 - one Product Environment per installation is an acceptable administrative boundary;
 - one active writer and host-level maintenance windows fit the availability objective;
-- application Functions fit Safe V8 capabilities, or trusted Full Node Actions use the explicit
-  dedicated-host profile and its operator-enforced whole-instance limits;
+- Safe V8 remains the baseline, and trusted Full Node Actions use either the explicit
+  `dedicated-host` or `dedicated-worker` profile with operator-enforced limits;
 - the team can operate Docker/Compose, PostgreSQL, TLS, encrypted backups, and an optional external
   S3-compatible object-store backend;
 - the team accepts that Product-root authorities remain local even if Function data uses PostgreSQL;
@@ -33,8 +33,9 @@ flowchart LR
   Operator[Operators / CI] -->|HTTPS| Proxy
   Proxy -->|127.0.0.1:3210| Product[Product gateway + workers]
   Proxy -->|127.0.0.1:3220| Management[Identity + Management]
-  Product --- Server[runku-server]
+  Product --- Server[runku-server + Safe V8]
   Management --- Server
+  Server -. optional NATS .-> Node[separate Full Node worker]
   Server --> Pg[(PostgreSQL\nPlatform Identity)]
   Server --> Root[(Product root)]
   Server --> Files[(Runku Storage bytes\nfilesystem or external object store)]
@@ -104,6 +105,7 @@ installation unless the recovery design already requires an overlay.
 | `s3-files` | external application file/object bytes | bucket/prefix durability and coordinated restore |
 | `s3-logs` | external immutable log history | archive credentials, retention, query availability |
 | `ha-logs` | NATS journal plus S3 archive workers | replicated journal capacity and worker operation |
+| `full-node-worker` | loopback JetStream plus one separate trusted Node container | separate cgroup/mount/restart boundary on one dedicated host |
 
 Overlay combinations are named in the packaged Docker guide. S3/NATS overlays improve the named
 storage boundary; they do not create active-active Product writers. The bucket must exist. Runku
@@ -162,6 +164,25 @@ diagnostics before admitting traffic. To roll back the capability, stop Node tra
 profile to `disabled`, restart, and verify that Safe Releases still serve while new Node publication
 is rejected. Existing Node Releases remain durable but cannot execute until a compatible runtime
 is restored.
+
+To keep Safe V8 in the server while moving Node into its own container, select
+`RUNKU_DEPLOYMENT_PROFILE=full-node-worker` (or `browser-full-node-worker`). The overlay forces
+`RUNKU_FULL_NODE_PROFILE=dedicated-worker`, starts a loopback-only JetStream service, mounts the
+immutable execution projection read-only in the worker, and gives the worker its own CPU, memory,
+PID, writable cache, and restart boundary. The worker never mounts the Product root, Platform
+Identity database, database URL, peppers, or application key stores. The gateway-to-worker hop is
+NATS, not gRPC; OCI remains an artifact format rather than an Environment mode.
+
+The packaged overlay currently admits Full Node Actions only when they do not declare
+`variable:NAME` or `secret:NAME`. It rejects such Releases before Workspace HEAD changes because
+the separate worker has no Environment configuration broker. This restriction does not affect Safe
+V8 Functions; use `dedicated-host` when the current Full Node Action requires configuration.
+
+This overlay is for trusted code on one dedicated host. It improves blast-radius control but shares
+the host kernel, so it is not the Firecracker boundary required for mutually untrusted tenants.
+Stopping `full-node-worker` is the rollback: Safe V8 continues serving and Node invocations fail
+closed. Republish an existing Node Release after first enabling the profile if it predates the
+immutable projection; new publishes stage the projection before Workspace HEAD can move.
 
 The initial-owner invitation is written under the data directory at
 `platform/bootstrap/initial-owner.code`. Protect and consume it through the procedure in

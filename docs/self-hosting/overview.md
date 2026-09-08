@@ -123,7 +123,7 @@ Authoritative state never lives only in a Pod/container filesystem or `emptyDir`
 | Workload | Profile | Isolation boundary |
 |---|---|---|
 | TypeScript without Node packages/process/filesystem | Safe V8 | Deny-by-default isolate + Platform Ops |
-| Node code in one trust domain | Dedicated host/VM/Pod | Complete deployment unit |
+| Node code in one trust domain | Dedicated host or separate worker container | Complete deployment unit; separate worker narrows mounts/cgroups but shares the kernel |
 | Local OCI/runtime conformance | Docker | Test/dedicated container, not hostile tenant boundary |
 | Mutually untrusted Node code sharing hosts | MicroVM Full Node Agent | VM-grade worker isolation + jailer/controller |
 

@@ -399,3 +399,40 @@ fn full_node_profile_is_explicit_and_rejects_shared_cells() -> Result<(), Box<dy
     }
     Ok(())
 }
+
+#[test]
+fn dedicated_worker_profile_requires_a_sanitized_root_and_secure_queue()
+-> Result<(), Box<dyn std::error::Error>> {
+    let product = TempDir::new()?;
+    let resources = TempDir::new()?;
+    let product_root = product.path().to_str().ok_or("non-UTF-8 temp path")?;
+    let resource_root = resources.path().to_str().ok_or("non-UTF-8 temp path")?;
+
+    let valid = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PRODUCT_ROOT", product_root),
+        ("RUNKU_FULL_NODE_PROFILE", "dedicated-worker"),
+        ("RUNKU_FULL_NODE_RESOURCE_ROOT", resource_root),
+        ("RUNKU_EXECUTION_NATS_URL", "nats://127.0.0.1:4222"),
+    ])?;
+    assert!(valid.status.success());
+    assert_eq!(valid.stdout, b"configuration valid\n");
+
+    let missing_root = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PRODUCT_ROOT", product_root),
+        ("RUNKU_FULL_NODE_PROFILE", "dedicated-worker"),
+        ("RUNKU_EXECUTION_NATS_URL", "nats://127.0.0.1:4222"),
+    ])?;
+    assert_error(&missing_root, "SERVER_CONFIGURATION_MISSING");
+
+    let insecure_remote = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PRODUCT_ROOT", product_root),
+        ("RUNKU_FULL_NODE_PROFILE", "dedicated-worker"),
+        ("RUNKU_FULL_NODE_RESOURCE_ROOT", resource_root),
+        ("RUNKU_EXECUTION_NATS_URL", "nats://queue.example:4222"),
+    ])?;
+    assert_error(&insecure_remote, "SERVER_FULL_NODE_CONFIGURATION_INVALID");
+    Ok(())
+}

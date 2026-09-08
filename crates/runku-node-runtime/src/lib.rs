@@ -15,6 +15,7 @@ mod mailbox;
 mod performance;
 mod protocol;
 mod remote;
+mod resources;
 mod server;
 
 use async_trait::async_trait;
@@ -33,6 +34,10 @@ pub use local::{LocalNodeRuntime, LocalNodeRuntimeConfig};
 pub use remote::{
     FullNodeExecutionHandler, QueuedNodeRuntime, QueuedNodeRuntimeConfig,
     REMOTE_NODE_INVOCATION_FORMAT_VERSION,
+};
+pub use resources::{
+    FullNodeExecutionPackage, FullNodeExecutionResourceError, FullNodeExecutionResources,
+    FullNodeFilesystemResources,
 };
 pub use server::{ServerNodeRuntime, ServerNodeRuntimeConfig};
 

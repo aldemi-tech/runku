@@ -26,7 +26,8 @@ tagged release contains only the artifacts and profiles named in that release.
 | Product gateway | Implemented | Query, Mutation, Action, Realtime, file transfers, and the Runku Object Storage path | Calls require exact application identity and code targeting |
 | Safe V8 | Implemented | Deny-by-default TypeScript/JavaScript runtime with manifest-declared capabilities and deadlines | No ambient Node, filesystem, environment, or network authority |
 | Full Node, local | Implemented for development | Node built-ins/npm, local machine runtime, immutable OCI descriptor generation, and hybrid calls | Local Node trusts the developer machine; it is not a tenant boundary |
-| Full Node, shared untrusted | Conformance | Docker and Firecracker-oriented execution evidence and a queue/control-plane contract | The compact package does not ship a Full Node Agent; Docker alone is not VM-grade isolation |
+| Full Node, separate trusted worker | Implemented | NATS queue/control, immutable read-only resource projection, dedicated container/cgroup/cache | Shares the host kernel; not a hostile multi-tenant boundary |
+| Full Node, shared untrusted | Conformance | Firecracker-oriented execution evidence behind the same queue/control-plane contract | The compact package does not ship the VM-grade Agent profile |
 | General distributed roles | Not shipped | Internal conformance exists for some boundaries | No supported `runku-agent`, generic role package, or active-active Product topology |
 | Kubernetes | Conformance | Dependency and Full Node Agent conformance manifests | No supported Helm chart or general Kubernetes installation |
 

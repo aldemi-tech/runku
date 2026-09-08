@@ -1858,6 +1858,7 @@ async fn setup() -> Result<TestSystem, Box<dyn Error>> {
         QueuedNodeRuntimeConfig {
             class: execution_class,
             result_wait: Duration::from_millis(50),
+            configuration_available: false,
         },
     )?;
     let service = Arc::new(

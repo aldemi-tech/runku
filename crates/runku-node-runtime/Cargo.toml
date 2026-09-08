@@ -22,6 +22,7 @@ runku-runtime = { path = "../runku-runtime" }
 runku-value = { path = "../runku-value" }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "sync", "time"] }
 zeroize.workspace = true
 

@@ -100,9 +100,10 @@ than as one unexamined bundle. Generated types belong to the built Release. Rebu
 when server SDK contracts change and retain older clients/Releases for the documented compatibility
 window. Unknown protocol/manifest/runtime versions fail closed.
 
-The `dedicated-host` Full Node setting is an operator-selected capability, not a persisted-format
-migration. Before enabling it on an upgraded image, prove the image's pinned Node binary and one
-direct Node bundle on the target architecture. Rolling back to an image without that profile is
+The `dedicated-host` and `dedicated-worker` Full Node settings are operator-selected capabilities,
+not persisted-format migrations. Before enabling either on an upgraded image, prove the image's
+pinned Node binary and one direct Node bundle on the target architecture. Upgrade the gateway and
+separate worker from the same coordinated image. Rolling back to an image without those profiles is
 safe for Product bytes, but all Node Releases must be drained or treated as unavailable first;
 Safe Releases remain independently eligible.
 

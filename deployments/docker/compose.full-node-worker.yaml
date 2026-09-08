@@ -1,0 +1,71 @@
+services:
+  nats-execution:
+    image: nats@sha256:71092f77d707a4a81b12aca5096d6b2d2e07ad16aa57c84066940a17af74f61a
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "127.0.0.1:${RUNKU_EXECUTION_NATS_PORT:-54222}:4222"
+    volumes:
+      - execution-nats-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  server:
+    environment:
+      RUNKU_FULL_NODE_PROFILE: dedicated-worker
+      RUNKU_FULL_NODE_RESOURCE_ROOT: /var/lib/runku/platform/full-node-worker-resources
+      RUNKU_EXECUTION_NATS_URL: nats://127.0.0.1:${RUNKU_EXECUTION_NATS_PORT:-54222}
+      RUNKU_EXECUTION_NATS_REPLICAS: 1
+    depends_on:
+      nats-execution:
+        condition: service_started
+
+  full-node-worker:
+    image: ${RUNKU_SERVER_IMAGE:?Set RUNKU_SERVER_IMAGE to an immutable version and digest}
+    user: "${RUNKU_UID:?Set RUNKU_UID}:${RUNKU_GID:?Set RUNKU_GID}"
+    network_mode: host
+    command: ["full-node-worker"]
+    environment:
+      RUNKU_FULL_NODE_PROFILE: dedicated-worker
+      RUNKU_FULL_NODE_RESOURCE_ROOT: /var/lib/runku/full-node-resources
+      RUNKU_FULL_NODE_RUNTIME_ROOT: /var/lib/runku/full-node-runtime
+      RUNKU_EXECUTION_NATS_URL: nats://127.0.0.1:${RUNKU_EXECUTION_NATS_PORT:-54222}
+      RUNKU_EXECUTION_NATS_REPLICAS: 1
+      RUNKU_FULL_NODE_MAX_CONCURRENCY: ${RUNKU_FULL_NODE_MAX_CONCURRENCY:-1}
+      RUNKU_FULL_NODE_MAX_CONCURRENT_PER_PROJECT: ${RUNKU_FULL_NODE_MAX_CONCURRENT_PER_PROJECT:-1}
+      RUNKU_FULL_NODE_HEAP_MEGABYTES: ${RUNKU_FULL_NODE_HEAP_MEGABYTES:-256}
+      RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS: ${RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS:-2000}
+      RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES: ${RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES:-2147483648}
+      RUNKU_FULL_NODE_INSTANCE_PIDS: ${RUNKU_FULL_NODE_INSTANCE_PIDS:-512}
+    volumes:
+      - type: bind
+        source: ${RUNKU_DATA_DIRECTORY:?Set RUNKU_DATA_DIRECTORY}/platform/full-node-worker-resources
+        target: /var/lib/runku/full-node-resources
+        read_only: true
+      - type: bind
+        source: ${RUNKU_DATA_DIRECTORY:?Set RUNKU_DATA_DIRECTORY}/full-node-runtime
+        target: /var/lib/runku/full-node-runtime
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${RUNKU_FULL_NODE_INSTANCE_PIDS:-512}
+    mem_limit: ${RUNKU_FULL_NODE_WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${RUNKU_FULL_NODE_WORKER_CPU_LIMIT:-2.0}
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    stop_grace_period: 30s
+    restart: unless-stopped
+    depends_on:
+      nats-execution:
+        condition: service_started
+
+volumes:
+  execution-nats-data:

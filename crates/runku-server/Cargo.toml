@@ -31,6 +31,7 @@ runku-environment-repository = { path = "../runku-environment-repository" }
 runku-environments = { path = "../runku-environments" }
 runku-gateway = { path = "../runku-gateway" }
 runku-file-storage = { path = "../runku-file-storage" }
+runku-execution-queue = { path = "../runku-execution-queue" }
 runku-execution = { path = "../runku-execution" }
 runku-identity = { path = "../runku-identity" }
 runku-identity-provider = { path = "../runku-identity-provider" }

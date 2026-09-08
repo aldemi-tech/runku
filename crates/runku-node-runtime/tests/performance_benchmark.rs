@@ -652,6 +652,7 @@ async fn kubernetes_distributed_gateway_load() -> Result<(), Box<dyn Error>> {
         QueuedNodeRuntimeConfig {
             class,
             result_wait: Duration::from_millis(100),
+            configuration_available: false,
         },
     )?);
     let case = "kubernetes_gateway_nats_s3_agents_firecracker";
@@ -1571,6 +1572,7 @@ async fn remote_runtime(
         QueuedNodeRuntimeConfig {
             class,
             result_wait: Duration::from_millis(100),
+            configuration_available: false,
         },
     )?);
     let (shutdown, receiver) = watch::channel(false);

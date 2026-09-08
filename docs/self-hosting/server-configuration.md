@@ -59,26 +59,56 @@ Product database secret, origins, and auth config into one versioned manifest. A
 [Multi-Environment cell profile](cell-profile.md) for the schema, routing, isolation, capacity, and
 single-active-writer constraints.
 
-## Dedicated-host Full Node
+## Optional Full Node profiles
 
 Full Node is disabled by default. The released server image includes Node 22 for both Linux ARM64
-and x86_64, but starts no Node worker until a Full Node Action is invoked. Enable the profile only
-when the complete server instance belongs to one Product trust domain:
+and x86_64. Safe V8 remains enabled in every profile; these settings only attach an executor for
+Functions declared as Full Node Actions. `safe`, `node`, and `hybrid` describe Release artifact
+composition, while OCI describes an artifact/package format. They are not Environment modes.
 
 | Variable | Default | Contract |
 |---|---:|---|
-| `RUNKU_FULL_NODE_PROFILE` | `disabled` | `disabled` or `dedicated-host`; the latter is rejected for a `shared` cell manifest |
+| `RUNKU_FULL_NODE_PROFILE` | `disabled` | `disabled`, `dedicated-host`, or `dedicated-worker`; enabled profiles are rejected for a `shared` cell manifest |
 | `RUNKU_FULL_NODE_BINARY` | `/usr/local/bin/node` | absolute Node 20+ executable path |
 | `RUNKU_FULL_NODE_MAX_CONCURRENCY` | `1` | bounded worker/admission slots, 1–128 |
+| `RUNKU_FULL_NODE_MAX_CONCURRENT_PER_PROJECT` | same as concurrency | worker-only fairness ceiling, 1 through the total slot count |
 | `RUNKU_FULL_NODE_HEAP_MEGABYTES` | `256` | per-worker V8 heap, 64–4096 MiB and below declared instance memory |
 | `RUNKU_FULL_NODE_INSTANCE_CPU_MILLIS` | required | externally enforced whole-instance CPU declaration |
 | `RUNKU_FULL_NODE_INSTANCE_MEMORY_BYTES` | required | externally enforced whole-instance memory declaration |
 | `RUNKU_FULL_NODE_INSTANCE_PIDS` | required | externally enforced whole-instance PID declaration |
 
-The runtime stores verified read-only artifacts and ephemeral worker mailboxes below
+`dedicated-host` is the compact compatibility profile for a complete server instance belonging to
+one Product trust domain. The runtime stores verified read-only artifacts and ephemeral mailboxes below
 `PRODUCT_ROOT/.runku/server-node-runtime-v1`. Workers are separate child processes inside the same
 container and communicate through the bounded mailbox protocol; no gRPC hop is involved. Healthy
 workers are reused and are destroyed after errors, timeout/cancellation, or the reuse ceiling.
+
+`dedicated-worker` moves those Node processes into an independent `runku-server full-node-worker`
+container. The cell keeps Safe V8, verifies a Node-capable Release, writes a sanitized immutable
+manifest/artifact projection before moving Workspace HEAD, and queues only scoped IDs, deadlines,
+and arguments. The worker mounts that projection read-only plus its own writable cache/scratch; it
+does not mount Product databases, application keys, Platform Identity state, or the cell's secret
+files. Gateway and worker communicate through NATS JetStream rather than gRPC. Because this compact
+composition does not include a remote configuration broker, it rejects a Release when any Full
+Node Action declares `variable:NAME` or `secret:NAME`; Safe V8 configuration remains available.
+
+| Separate-worker variable | Default | Contract |
+|---|---:|---|
+| `RUNKU_FULL_NODE_RESOURCE_ROOT` | required | absolute projection root; writable in the cell and read-only in the worker |
+| `RUNKU_FULL_NODE_RUNTIME_ROOT` | worker required | absolute worker-private cache/scratch root; must not contain or be contained by the projection |
+| `RUNKU_EXECUTION_NATS_URL` | required | `tls://host:port`, or `nats://` only for literal loopback/local composition |
+| `RUNKU_EXECUTION_NATS_CREDENTIALS_FILE` | none | optional absolute, non-symlink NATS credentials file |
+| `RUNKU_EXECUTION_NATS_REPLICAS` | `1` | exact JetStream stream/KV replica count, 1–5; production external clusters normally use 3 |
+| `RUNKU_EXECUTION_NATS_STREAM` | `RUNKU_EXECUTIONS` | exact uppercase/digit/underscore stream namespace |
+| `RUNKU_EXECUTION_NATS_SUBJECT_PREFIX` | `runku.execution.v1` | exact lower-case subject namespace |
+| `RUNKU_EXECUTION_NATS_CONTROL_BUCKET` | `RUNKU_EXECUTION_STATE` | exact uppercase/digit/underscore KV namespace |
+| `RUNKU_FULL_NODE_EXECUTION_CLASS` | `node_host_v1` | exact compatible worker ABI/pool token |
+
+The packaged `full-node-worker` overlay uses one loopback-only NATS instance and is intended for a
+single dedicated host. Provider deployments use a private TLS NATS endpoint and distinct
+publisher/worker credentials. Queue state is bounded and transient; immutable execution resources
+are part of the coordinated platform backup. A stopped worker leaves Safe V8 available, while Node
+invocations fail or time out without silently falling back to Safe.
 
 Direct Development publication accepts canonical Node/hybrid ESM bundles. Those bundles carry
 compiled application sources and contracts but no `node_modules`; use Node built-ins or code
@@ -86,10 +116,10 @@ already bundled into the source graph. Actions with unresolved external npm impo
 existing package-lock-bound OCI publication path and cannot be made available by installing
 packages in the running server container.
 
-This profile does not turn Docker into a hostile multi-tenant sandbox. CPU, memory, PID, filesystem,
-and egress isolation for the complete instance remain operator responsibilities. In particular,
-the declared fail-closed egress policy is not independently enforceable on a child process that
-shares the server container's network namespace.
+Neither profile turns Docker into a hostile multi-tenant sandbox. The separate container materially
+reduces accidental access to cell state and gives Node its own cgroup, PID, filesystem, and restart
+boundary, but a shared kernel is not a VM-grade isolation boundary. Shared mutually untrusted Node
+still requires the Firecracker-oriented executor profile and its separate qualification gate.
 
 ## Optional Product logical PostgreSQL
 

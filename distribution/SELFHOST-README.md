@@ -26,7 +26,12 @@ Runku does not provide that service's backup, replication, lifecycle, or recover
 `compose.s3-logs.yaml` for off-host history without another process. Use `compose.ha-logs.yaml` only
 with externally operated TLS NATS JetStream and durable S3-compatible storage; the helper selects
 the matching compatible-endpoint overlays when a custom HTTPS object endpoint is required.
+Use `compose.full-node-worker.yaml` through the `full-node-worker` deployment profile only for
+trusted Node Actions on the same dedicated host; Safe V8 remains in the server and Node runs in a
+separate resource-bounded container over loopback JetStream. This compact worker currently admits
+Full Node Actions only without `variable:NAME` or `secret:NAME`; use `dedicated-host` when a Node
+Action needs the in-process Environment configuration broker.
 
-The current supported compact boundary is one Environment per server process, Safe V8, and one
-active Product writer. It does not enable Full Node, multi-Environment orchestration, or
-active-active writers for the same Environment.
+The current supported compact boundary is one Environment, Safe V8, optional trusted Full Node,
+and one active Product writer. It does not enable shared-hostile-tenant Node, multi-Environment
+orchestration, or active-active writers for the same Environment.

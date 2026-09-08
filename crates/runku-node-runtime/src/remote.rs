@@ -24,7 +24,10 @@ use runku_releases::{
 use runku_runtime::{CancellationToken, ConfigurationRead, InvocationRequest, RuntimeError};
 use serde::{Deserialize, Serialize};
 
-use crate::{FullNodeActionOutcome, FullNodeActionRuntime};
+use crate::{
+    FullNodeActionOutcome, FullNodeActionRuntime, FullNodeExecutionResources,
+    resources::RepositoryExecutionResources,
+};
 
 /// Version of the runtime-specific payload stored inside [`ExecutionJobV1`].
 pub const REMOTE_NODE_INVOCATION_FORMAT_VERSION: u16 = 1;
@@ -36,6 +39,12 @@ pub struct QueuedNodeRuntimeConfig {
     pub class: ExecutionClass,
     /// Maximum duration of one durable wait subscription before refreshing it.
     pub result_wait: Duration,
+    /// Whether the selected agent pool has an Environment-scoped configuration broker.
+    ///
+    /// Keep this disabled for workers that only receive the sanitized artifact projection. Those
+    /// workers reject variable/secret capabilities during Release admission instead of accepting
+    /// code that can only fail when invoked.
+    pub configuration_available: bool,
 }
 
 impl QueuedNodeRuntimeConfig {
@@ -263,9 +272,22 @@ impl QueuedNodeRuntime {
 #[async_trait]
 impl FullNodeActionRuntime for QueuedNodeRuntime {
     fn validate_manifest(&self, manifest: &ReleaseManifestV1) -> Result<(), RuntimeError> {
-        manifest
-            .ensure_full_node_supported()
-            .map_err(|_| RuntimeError::UnsupportedRuntime)
+        if manifest.ensure_full_node_supported().is_err()
+            && manifest.ensure_local_full_node_supported().is_err()
+        {
+            return Err(RuntimeError::UnsupportedRuntime);
+        }
+        if !self.config.configuration_available
+            && manifest.functions.iter().any(|function| {
+                function.runtime_class == runku_releases::RuntimeClass::FullNode
+                    && function.capabilities.iter().any(|capability| {
+                        matches!(capability, Capability::Variable(_) | Capability::Secret(_))
+                    })
+            })
+        {
+            return Err(RuntimeError::UnsupportedRuntime);
+        }
+        Ok(())
     }
 
     async fn execute(
@@ -278,8 +300,7 @@ impl FullNodeActionRuntime for QueuedNodeRuntime {
 
 /// Agent-side materializer connecting Release Repository, Artifact Store, control plane, and Node.
 pub struct FullNodeExecutionHandler {
-    releases: Arc<dyn ReleaseRepository>,
-    artifacts: Arc<dyn ArtifactStore>,
+    resources: Arc<dyn FullNodeExecutionResources>,
     runtime: Arc<dyn FullNodeActionRuntime>,
     control: Arc<dyn ExecutionControlPlane>,
     prepared_artifacts: tokio::sync::Mutex<PreparedArtifactCache>,
@@ -335,7 +356,6 @@ impl std::fmt::Debug for FullNodeExecutionHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("FullNodeExecutionHandler")
-            .field("release_backend", &self.releases.backend())
             .finish_non_exhaustive()
     }
 }
@@ -349,9 +369,24 @@ impl FullNodeExecutionHandler {
         runtime: Arc<dyn FullNodeActionRuntime>,
         control: Arc<dyn ExecutionControlPlane>,
     ) -> Self {
+        Self::from_resources(
+            Arc::new(RepositoryExecutionResources::new(releases, artifacts)),
+            runtime,
+            control,
+        )
+    }
+
+    /// Composes an agent from a sanitized immutable package source.
+    ///
+    /// This is the constructor used by a separate worker that must not mount Product state.
+    #[must_use]
+    pub fn from_resources(
+        resources: Arc<dyn FullNodeExecutionResources>,
+        runtime: Arc<dyn FullNodeActionRuntime>,
+        control: Arc<dyn ExecutionControlPlane>,
+    ) -> Self {
         Self {
-            releases,
-            artifacts,
+            resources,
             runtime,
             control,
             prepared_artifacts: tokio::sync::Mutex::new(PreparedArtifactCache::new(
@@ -482,11 +517,13 @@ impl ExecutionHandler for FullNodeExecutionHandler {
                 None,
             )
         });
-        let manifest_result = self.releases.manifest(scope, job.release_id).await;
+        let manifest_result = self.resources.manifest(scope, job.release_id).await;
         finish_preparation_timer(release_timer, &manifest_result);
         let manifest = match manifest_result {
             Ok(manifest) => manifest,
-            Err(error) if error.retryable() => return Err(ExecutionPreparationError::Unavailable),
+            Err(error) if error.retryable() => {
+                return Err(ExecutionPreparationError::Unavailable);
+            }
             Err(_) => {
                 return Err(self
                     .reject(job.invocation_id, RuntimeError::InvalidArtifact)
@@ -516,7 +553,7 @@ impl ExecutionHandler for FullNodeExecutionHandler {
                     None,
                 )
             });
-            let artifact_result = self.artifacts.get(&manifest.artifact).await;
+            let artifact_result = self.resources.artifact(&manifest.artifact).await;
             finish_preparation_timer(artifact_timer, &artifact_result);
             let artifact = match artifact_result {
                 Ok(artifact) => artifact,

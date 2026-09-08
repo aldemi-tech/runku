@@ -168,6 +168,18 @@ profile was applied to a shared or Product-less server. Do not retry publication
 unavailable external npm package fails at execution; rebuild it through the package-lock-bound OCI
 path rather than installing dependencies into the live container.
 
+For `dedicated-worker`, `SERVER_FULL_NODE_NATS_UNAVAILABLE` identifies the bounded queue/control
+dependency, while `SERVER_FULL_NODE_RESOURCE_PROJECTION_UNAVAILABLE` identifies the immutable
+manifest/artifact mount. Confirm that gateway and worker use the same stream, subject, bucket,
+class, and projection; the gateway mount must be writable and the worker mount read-only. A worker
+can be restarted without stopping Safe V8. Releases published before the projection existed must
+be republished exactly before they can execute through this profile.
+
+A Full Node Release with `variable:NAME` or `secret:NAME` is rejected by the packaged
+`dedicated-worker` profile because it intentionally has no configuration broker or secret mount.
+Keep that Function on Safe V8, remove the capability when it is unnecessary, or select
+`dedicated-host`; do not copy Environment secrets into the worker container.
+
 Do not move untrusted Node code to a weaker profile as a workaround.
 
 ## Dependency and capacity failures

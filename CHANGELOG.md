@@ -13,6 +13,10 @@ All notable changes are documented in this file.
   require the package-lock-bound OCI publication path.
 - Added fail-closed server configuration that rejects the Full Node profile for `shared` cell
   manifests; the profile remains disabled by default and requires one Product trust domain.
+- Added an optional `dedicated-worker` composition that keeps Safe V8 in the cell and dispatches
+  trusted Full Node Actions through NATS JetStream to a separate resource-bounded container. The
+  worker reads only a sanitized immutable Release/artifact projection and owns a disposable cache;
+  it does not mount Product, Platform Identity, application credentials, or secret state.
 - Added Release-scoped document views so optional schema fields can coexist across active Releases,
   named Channels, exact targets, and weighted rollout policies over the same stored data.
 - Added a coherent Delivery snapshot, revision-bound compatibility preflight, directional Release
@@ -23,7 +27,10 @@ All notable changes are documented in this file.
 ### Changed
 
 - The multi-platform server image now includes a pinned Node 22 executable. Its presence does not
-  enable Full Node; `RUNKU_FULL_NODE_PROFILE=dedicated-host` is still required.
+  enable Full Node; `RUNKU_FULL_NODE_PROFILE=dedicated-host` or `dedicated-worker` is still required.
+- The packaged separate worker fails Release admission when a Full Node Action declares
+  `variable:NAME` or `secret:NAME`, because this compact profile intentionally has no remote
+  configuration broker or secret mount. Safe V8 configuration remains available.
 - Reads project the schema of the selected Release. A full replace from an older compatible Release
   preserves fields that exist only in newer active schemas instead of deleting stored data.
 - Freeze, Channel movement, rollout, rollback, and retirement evaluate the complete serving closure,
@@ -37,9 +44,11 @@ All notable changes are documented in this file.
   field contract, or changing index/Cron contracts without readiness evidence fails closed.
 - Candidate preflight binds its evidence to both Release-serving and serving-policy revisions, so a
   stale compatibility result cannot authorize a later rollout.
-- This source state is an OCI-only `0.5.1` candidate for local and remote conformance. It does not
-  publish `@runku/client`, `@runku/react`, `@runku/server`, `@runku/cli`, a Git tag, or a GitHub
-  Release. The published frontend SDK remains `0.5.0` until the complete campaign passes.
+- This source state is an unpublished `0.5.1` candidate. Local conformance includes the separate
+  worker, while the retained OCI evidence predates it and must be regenerated from the exact
+  approved source. It does not publish `@runku/client`, `@runku/react`, `@runku/server`,
+  `@runku/cli`, a Git tag, or a GitHub Release. The published frontend SDK remains `0.5.0` until the
+  complete campaign passes.
 - Linux GNU CLI/server artifacts now build and execute on a digest-pinned glibc 2.31 baseline with
   bounded DuckDB C++ concurrency, rather than inheriting the newer glibc of the hosted runner.
 - The exact candidate image, schema/Release coexistence, rollback/retirement, 5 GiB + 1 byte

@@ -89,7 +89,7 @@ use runku_management_service::{
     ManagementStorageAccessKeyRevoke, ManagementStorageAccessKeyRotate, ManagementStorageOperation,
     ManagementWorkspacePublish,
 };
-use runku_node_runtime::FullNodeActionRuntime;
+use runku_node_runtime::{FullNodeActionRuntime, FullNodeFilesystemResources};
 use runku_object_storage::{
     AccessKeyConfiguration, AccessKeyId, AccessKeyMetadata, AccessKeyOperation, Bucket,
     BucketConfiguration, BucketId, BucketLifecycle, BucketPolicy, BucketQuota, CorsMethod,
@@ -144,6 +144,7 @@ pub struct ProductAdapter {
     storage: ObjectStorageService,
     object_bytes: FileObjectStore,
     configuration: EnvironmentConfigurationRegistry,
+    full_node_resources: Option<FullNodeFilesystemResources>,
 }
 
 #[derive(Clone, Debug)]
@@ -247,6 +248,8 @@ pub struct ProductAdapterConfig {
     pub file_usage_interval: std::time::Duration,
     /// Optional server-composed Full Node runtime. Absence keeps remote Full Node disabled.
     pub full_node_runtime: Option<Arc<dyn FullNodeActionRuntime>>,
+    /// Sanitized immutable projection populated for a separate Full Node worker.
+    pub full_node_resources: Option<FullNodeFilesystemResources>,
 }
 
 impl std::fmt::Debug for ProductAdapter {
@@ -393,6 +396,7 @@ impl ProductAdapter {
             storage,
             object_bytes,
             configuration,
+            full_node_resources: config.full_node_resources,
         };
         let releases = LocalReleaseManager::open(&adapter.root)
             .await
@@ -2435,6 +2439,24 @@ impl ManagementProduct for ProductAdapter {
         }
         let actor =
             DevelopmentActor::from_str(actor).map_err(|_| ManagementProductError::Invalid)?;
+        if request
+            .manifest
+            .functions
+            .iter()
+            .any(|function| function.runtime_class == RuntimeClass::FullNode)
+            && let Some(resources) = &self.full_node_resources
+        {
+            resources
+                .stage(self.scope, &request.manifest_bytes, &request.artifact_bytes)
+                .await
+                .map_err(|error| {
+                    if error.retryable() {
+                        ManagementProductError::Unavailable
+                    } else {
+                        ManagementProductError::Invalid
+                    }
+                })?;
+        }
         let result = publish_local_if_head(
             &self.root,
             &request.workspace_ref,
@@ -4143,6 +4165,7 @@ mod tests {
     use runku_core::{ProjectId, WorkspaceRef};
     use runku_development::DevelopmentActor;
     use runku_local::{initialize_local, publish_local};
+    use runku_node_runtime::FullNodeExecutionResources as _;
     use runku_protocol::{WireObjectEntryV1, WireValueV1};
     use runku_releases::decode_release_manifest;
 
@@ -4280,6 +4303,14 @@ export const basename = action({
         root: &Path,
         full_node_runtime: Option<Arc<dyn FullNodeActionRuntime>>,
     ) -> Result<ProductAdapter, &'static str> {
+        open_adapter_with_full_node_options(root, full_node_runtime, None).await
+    }
+
+    async fn open_adapter_with_full_node_options(
+        root: &Path,
+        full_node_runtime: Option<Arc<dyn FullNodeActionRuntime>>,
+        full_node_resources: Option<FullNodeFilesystemResources>,
+    ) -> Result<ProductAdapter, &'static str> {
         Box::pin(ProductAdapter::open(
             root.to_path_buf(),
             ProductAdapterConfig {
@@ -4295,6 +4326,7 @@ export const basename = action({
                 file_usage_sink: None,
                 file_usage_interval: Duration::from_secs(1),
                 full_node_runtime,
+                full_node_resources,
             },
         ))
         .await
@@ -4343,15 +4375,29 @@ export const basename = action({
         );
         drop(disabled);
 
-        let enabled =
-            open_adapter_with_full_node(directory.path(), Some(Arc::new(ManifestOnlyNodeRuntime)))
-                .await?;
+        let enabled = open_adapter_with_full_node_options(
+            directory.path(),
+            Some(Arc::new(ManifestOnlyNodeRuntime)),
+            Some(
+                FullNodeFilesystemResources::open_writer(directory.path().join("worker-resources"))
+                    .await?,
+            ),
+        )
+        .await?;
         let published = enabled.publish("console-node-test", &bytes).await?;
         assert_eq!(
             published.release_id,
             request.manifest.release_id.to_string()
         );
         assert!(!published.replayed);
+        let reader =
+            FullNodeFilesystemResources::open_reader(directory.path().join("worker-resources"))
+                .await?;
+        let package = reader
+            .load(state.scope(), request.manifest.release_id)
+            .await?;
+        assert_eq!(package.manifest, request.manifest);
+        assert_eq!(package.artifact, request.artifact_bytes);
         Ok(())
     }
 
@@ -5578,6 +5624,7 @@ export const basename = action({
                     file_usage_sink: None,
                     file_usage_interval: Duration::from_secs(1),
                     full_node_runtime: None,
+                    full_node_resources: None,
                 },
             ))
             .await?;

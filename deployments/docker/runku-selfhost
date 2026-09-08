@@ -45,6 +45,12 @@ compose() {
     browser)
       docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" "$@"
       ;;
+    full-node-worker)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.full-node-worker.yaml" "$@"
+      ;;
+    browser-full-node-worker)
+      docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.browser.yaml" -f "$SCRIPT_DIRECTORY/compose.full-node-worker.yaml" "$@"
+      ;;
     s3-logs)
       docker compose --project-directory "$SCRIPT_DIRECTORY" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$SCRIPT_DIRECTORY/compose.s3-logs.yaml" "$@"
       ;;
@@ -162,16 +168,42 @@ configure() {
   test "$gid" -ne 0 || fail "RUNKU_GID must be non-root"
 
   mkdir -p "$data_directory/product" "$data_directory/platform" "$data_directory/files" "$secrets_directory"
+  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  full_node_worker=false
+  case "${deployment_profile:-standalone}" in
+    *full-node-worker*)
+      mkdir -p "$data_directory/platform/full-node-worker-resources" "$data_directory/full-node-runtime"
+      full_node_worker=true
+      ;;
+  esac
   for directory in "$data_directory" "$data_directory/product" "$data_directory/platform" "$data_directory/files" "$secrets_directory"; do
     test ! -L "$directory" || fail "persistent and secret directories must not be symlinks"
   done
   chmod 0700 "$data_directory" "$data_directory/product" "$data_directory/platform" "$data_directory/files" "$secrets_directory"
-  case "$(uname -s)" in
-    Linux) actual_uid=$(stat -c '%u' "$data_directory/product"); actual_gid=$(stat -c '%g' "$data_directory/product") ;;
-    Darwin) actual_uid=$(stat -f '%u' "$data_directory/product"); actual_gid=$(stat -f '%g' "$data_directory/product") ;;
-    *) fail "unsupported host for ownership validation" ;;
-  esac
-  test "$actual_uid" = "$uid" && test "$actual_gid" = "$gid" || fail "data directories must be owned by RUNKU_UID:RUNKU_GID ($uid:$gid)"
+  if test "$full_node_worker" = true; then
+    for directory in "$data_directory/platform/full-node-worker-resources" "$data_directory/full-node-runtime"; do
+      test ! -L "$directory" || fail "Full Node worker directories must not be symlinks"
+      chmod 0700 "$directory"
+    done
+  fi
+  for directory in "$data_directory/product" "$data_directory/platform" "$data_directory/files"; do
+    case "$(uname -s)" in
+      Linux) actual_uid=$(stat -c '%u' "$directory"); actual_gid=$(stat -c '%g' "$directory") ;;
+      Darwin) actual_uid=$(stat -f '%u' "$directory"); actual_gid=$(stat -f '%g' "$directory") ;;
+      *) fail "unsupported host for ownership validation" ;;
+    esac
+    test "$actual_uid" = "$uid" && test "$actual_gid" = "$gid" || fail "data directories must be owned by RUNKU_UID:RUNKU_GID ($uid:$gid)"
+  done
+  if test "$full_node_worker" = true; then
+    for directory in "$data_directory/platform/full-node-worker-resources" "$data_directory/full-node-runtime"; do
+      case "$(uname -s)" in
+        Linux) actual_uid=$(stat -c '%u' "$directory"); actual_gid=$(stat -c '%g' "$directory") ;;
+        Darwin) actual_uid=$(stat -f '%u' "$directory"); actual_gid=$(stat -f '%g' "$directory") ;;
+        *) fail "unsupported host for ownership validation" ;;
+      esac
+      test "$actual_uid" = "$uid" && test "$actual_gid" = "$gid" || fail "Full Node worker directories must be owned by RUNKU_UID:RUNKU_GID ($uid:$gid)"
+    done
+  fi
 
   existing=0
   for file in postgres-password database-url platform-pepper; do
@@ -187,7 +219,6 @@ configure() {
     write_secret "$secrets_directory/platform-pepper" "$platform_pepper"
   fi
   chmod 0600 "$secrets_directory/postgres-password" "$secrets_directory/database-url" "$secrets_directory/platform-pepper"
-  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
   case "${deployment_profile:-standalone}" in
     *s3-logs*|*ha-logs*) require_external_secret "$secrets_directory/archive-aws-credentials" ;;
   esac
@@ -218,6 +249,7 @@ start() {
         worker_replicas=$(env_value RUNKU_LOG_WORKER_REPLICAS)
         compose up -d --scale "logs-worker=$worker_replicas" logs-worker
         ;;
+      *full-node-worker*) compose up -d full-node-worker ;;
     esac
     printf 'server already running and ready\n'
     return
@@ -235,6 +267,7 @@ start() {
       worker_replicas=$(env_value RUNKU_LOG_WORKER_REPLICAS)
       compose up -d --scale "logs-worker=$worker_replicas" logs-worker
       ;;
+    *full-node-worker*) compose up -d full-node-worker ;;
   esac
   data_directory=$(env_value RUNKU_DATA_DIRECTORY)
   printf 'server ready; initial owner invitation: %s\n' "$data_directory/platform/bootstrap/initial-owner.code"
@@ -246,6 +279,10 @@ status() {
   compose exec -T server /usr/local/bin/runku-server probe-live
   compose exec -T server /usr/local/bin/runku-server probe-ready
   compose exec -T server /usr/local/bin/runku-server version
+  deployment_profile=$(optional_env_value RUNKU_DEPLOYMENT_PROFILE)
+  case "${deployment_profile:-standalone}" in
+    *full-node-worker*) compose exec -T full-node-worker /usr/local/bin/runku-server version ;;
+  esac
 }
 
 backup_create() {
@@ -272,12 +309,15 @@ backup_create() {
   was_running=false
   if compose ps --status running --services | grep -qx server; then
     was_running=true
-    compose stop -t 30 server
+    compose stop -t 30 full-node-worker server >/dev/null 2>&1 || compose stop -t 30 server
   fi
   cleanup_backup() {
     rm -rf "$temporary"
     if test "$was_running" = true; then
       compose up -d server >/dev/null 2>&1 || true
+      case "${deployment_profile:-standalone}" in
+        *full-node-worker*) compose up -d full-node-worker >/dev/null 2>&1 || true ;;
+      esac
     fi
   }
   trap cleanup_backup EXIT HUP INT TERM
@@ -312,6 +352,9 @@ backup_create() {
   trap - EXIT HUP INT TERM
   if test "$was_running" = true; then
     compose up -d server
+    case "${deployment_profile:-standalone}" in
+      *full-node-worker*) compose up -d full-node-worker ;;
+    esac
     wait_ready
   fi
   printf 'backup created: %s\n' "$destination"
@@ -361,7 +404,7 @@ restore_backup() {
   expected_pepper=$(jq -er '.requiredSecretFingerprints.platformPepperSha256' "$backup/manifest.json")
   actual_pepper=$(sha256_file "$secrets_directory/platform-pepper")
   test "$actual_pepper" = "$expected_pepper" || fail "the configured Platform Identity pepper does not match this backup"
-  compose stop -t 30 server >/dev/null 2>&1 || true
+  compose stop -t 30 full-node-worker server >/dev/null 2>&1 || compose stop -t 30 server >/dev/null 2>&1 || true
   test -z "$(find "$data_directory/product" -mindepth 1 -print -quit)" || fail "Product destination is not empty"
   test -z "$(find "$data_directory/platform" -mindepth 1 -print -quit)" || fail "Platform destination is not empty"
   test -z "$(find "$data_directory/files" -mindepth 1 -print -quit)" || fail "application-file/Object Storage byte destination is not empty"
@@ -392,6 +435,7 @@ restore_backup() {
       worker_replicas=$(env_value RUNKU_LOG_WORKER_REPLICAS)
       compose up -d --scale "logs-worker=$worker_replicas" logs-worker
       ;;
+    *full-node-worker*) compose up -d full-node-worker ;;
   esac
   printf 'restore complete and server ready\n'
 }
@@ -419,6 +463,9 @@ upgrade() {
       RUNKU_SERVER_IMAGE=$image compose up -d --force-recreate --scale "logs-worker=$worker_replicas" logs-worker
       RUNKU_SERVER_IMAGE=$image compose exec -T logs-worker /usr/local/bin/runku-server version
       ;;
+    *full-node-worker*)
+      compose stop -t 30 full-node-worker
+      ;;
   esac
   compose stop -t 30 server
   RUNKU_SERVER_IMAGE=$image compose run --rm server migrate
@@ -432,6 +479,12 @@ upgrade() {
     sleep 2
   done
   test "$attempts" -lt 30 || fail "new server failed readiness; preserve state and follow the migration rollback limit"
+  case "${deployment_profile:-standalone}" in
+    *full-node-worker*)
+      RUNKU_SERVER_IMAGE=$image compose up -d --force-recreate full-node-worker
+      RUNKU_SERVER_IMAGE=$image compose exec -T full-node-worker /usr/local/bin/runku-server version
+      ;;
+  esac
   temporary="$ENV_FILE.new.$$"
   awk -v image="$image" 'BEGIN { replaced=0 } /^RUNKU_SERVER_IMAGE=/ { print "RUNKU_SERVER_IMAGE=" image; replaced=1; next } { print } END { if (!replaced) exit 2 }' "$ENV_FILE" >"$temporary"
   chmod --reference="$ENV_FILE" "$temporary" 2>/dev/null || chmod 0600 "$temporary"
@@ -454,8 +507,8 @@ uninstall() {
   data_directory=$(env_value RUNKU_DATA_DIRECTORY)
   compose down --volumes
   test "$data_directory" != / || fail "refusing to delete a root data directory"
-  rm -rf "$data_directory/product" "$data_directory/platform" "$data_directory/files"
-  printf 'installation containers, PostgreSQL volume, Product state, and filesystem application files removed; secret files were retained\n'
+  rm -rf "$data_directory/product" "$data_directory/platform" "$data_directory/files" "$data_directory/full-node-runtime"
+  printf 'installation containers, PostgreSQL volume, Product state, filesystem application files, and Full Node cache removed; secret files were retained\n'
 }
 
 command=${1:-}

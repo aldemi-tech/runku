@@ -6,7 +6,7 @@ ARG RUNKU_VERSION
 ARG RUNKU_REVISION
 
 LABEL org.opencontainers.image.title="Runku Server" \
-      org.opencontainers.image.description="Runku Self-Hosted Safe V8 server with opt-in dedicated-host Node" \
+      org.opencontainers.image.description="Runku Self-Hosted Safe V8 server with optional trusted Full Node executors" \
       org.opencontainers.image.source="https://github.com/aldemi-tech/runku" \
       org.opencontainers.image.version="$RUNKU_VERSION" \
       org.opencontainers.image.revision="$RUNKU_REVISION" \

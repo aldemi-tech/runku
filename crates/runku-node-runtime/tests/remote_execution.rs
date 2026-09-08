@@ -14,7 +14,8 @@ use runku_execution_queue::{
     NatsExecutionControlPlane, NatsExecutionQueue, NatsExecutionQueueConfig,
 };
 use runku_node_runtime::{
-    DedicatedHostPolicy, FullNodeActionRuntime, FullNodeExecutionHandler, HostNodeArtifactCache,
+    DedicatedHostPolicy, FullNodeActionRuntime, FullNodeExecutionHandler,
+    FullNodeExecutionResources, FullNodeFilesystemResources, HostNodeArtifactCache,
     HostNodeRuntime, HostNodeRuntimeConfig, QueuedNodeRuntime, QueuedNodeRuntimeConfig,
 };
 use runku_observability::{
@@ -25,7 +26,7 @@ use runku_releases::{
     ArtifactDescriptor, ArtifactStore, FullNodeEgressPolicy, NodeOciDescriptorV1, ReleaseCommand,
     ReleaseCommandResult, ReleaseError, ReleaseManifestV1, ReleaseRepository,
     ReleaseRepositoryBackend, ReleaseRepositoryTelemetrySnapshot, ServingSnapshot,
-    decode_release_manifest, encode_node_oci_descriptor,
+    decode_release_manifest, encode_node_oci_descriptor, encode_release_manifest,
 };
 use runku_runtime::{
     CancellationToken, ConfigurationRead, ConfigurationReadError, ConfigurationValueKind,
@@ -69,6 +70,9 @@ export const inspect = action({
     return `inspected:${input}:${ctx.invocation.invocationId}:${ctx.invocation.function}`
   },
 })
+"#;
+
+const CONFIGURED_ACTION: &str = r#"
 export const configured = action({
   auth: "none", visibility: "public", capabilities: ["secret:API_KEY", "variable:REGION"],
   args: v.null(), returns: v.string(),
@@ -78,6 +82,9 @@ export const configured = action({
     return `${region}:${secret.length}:${Object.isFrozen(ctx.env)}:${Object.isFrozen(ctx.secrets)}`
   },
 })
+"#;
+
+const LOOP_ACTION: &str = r#"
 export const loop = action({
   auth: "none", visibility: "public", capabilities: [],
   args: v.null(), returns: v.null(), handler() { for (;;) {} },
@@ -122,6 +129,17 @@ impl Fixture {
 }
 
 fn fixture() -> Result<Fixture, Box<dyn Error>> {
+    fixture_with_oci_descriptor(true, true)
+}
+
+fn direct_fixture() -> Result<Fixture, Box<dyn Error>> {
+    fixture_with_oci_descriptor(false, false)
+}
+
+fn fixture_with_oci_descriptor(
+    oci_descriptor: bool,
+    configuration_capability: bool,
+) -> Result<Fixture, Box<dyn Error>> {
     let directory = tempdir()?;
     let source = directory.path().join("runku");
     let cache_root = directory.path().join("cache");
@@ -133,7 +151,12 @@ fn fixture() -> Result<Fixture, Box<dyn Error>> {
         source.join("schema.ts"),
         "import { defineSchema } from '@runku/server'; export default defineSchema({});",
     )?;
-    std::fs::write(source.join("actions.ts"), SOURCE)?;
+    let mut source_code = SOURCE.to_owned();
+    if configuration_capability {
+        source_code.push_str(CONFIGURED_ACTION);
+    }
+    source_code.push_str(LOOP_ACTION);
+    std::fs::write(source.join("actions.ts"), source_code)?;
     let project_id = ProjectId::generate();
     let release_id = ReleaseId::generate();
     let output = build_project(
@@ -148,11 +171,16 @@ fn fixture() -> Result<Fixture, Box<dyn Error>> {
     )?;
     let mut manifest = decode_release_manifest(&std::fs::read(output.manifest_path)?)?;
     let bundle = std::fs::read(output.artifact_path)?;
-    let target = NodeOciDescriptorV1::new(format!("sha256:{}", "a".repeat(64)))?;
     let cache = HostNodeArtifactCache::open(cache_root)?;
-    cache.materialize(&manifest, &bundle, &target, None)?;
-    let descriptor = encode_node_oci_descriptor(&target)?;
-    manifest.artifact = target.descriptor()?;
+    let descriptor = if oci_descriptor {
+        let target = NodeOciDescriptorV1::new(format!("sha256:{}", "a".repeat(64)))?;
+        cache.materialize(&manifest, &bundle, &target, None)?;
+        let descriptor = encode_node_oci_descriptor(&target)?;
+        manifest.artifact = target.descriptor()?;
+        descriptor
+    } else {
+        bundle
+    };
     let runtime = HostNodeRuntime::new(HostNodeRuntimeConfig::dedicated(
         cache,
         scratch,
@@ -240,6 +268,7 @@ impl ArtifactStore for StaticArtifact {
 }
 
 struct Vertical {
+    _resources: Option<tempfile::TempDir>,
     runtime: Arc<QueuedNodeRuntime>,
     agent: Arc<ExecutionAgent>,
     performance: Arc<MemoryInvocationPerformanceSink>,
@@ -326,11 +355,13 @@ fn vertical(fixture: &Fixture) -> Result<Vertical, Box<dyn Error>> {
         QueuedNodeRuntimeConfig {
             class,
             result_wait: Duration::from_millis(50),
+            configuration_available: true,
         },
     )?);
     let (shutdown, receiver) = watch::channel(false);
     tokio::spawn(Arc::clone(&agent).run(receiver));
     Ok(Vertical {
+        _resources: None,
         runtime,
         agent,
         performance,
@@ -339,6 +370,24 @@ fn vertical(fixture: &Fixture) -> Result<Vertical, Box<dyn Error>> {
 }
 
 async fn nats_vertical(fixture: &Fixture, url: &str) -> Result<Vertical, Box<dyn Error>> {
+    let resources_directory = tempdir()?;
+    let writer = FullNodeFilesystemResources::open_writer(resources_directory.path()).await?;
+    writer
+        .stage(
+            fixture.scope,
+            &encode_release_manifest(&fixture.manifest)?,
+            &fixture.descriptor,
+        )
+        .await?;
+    writer
+        .stage(
+            fixture.scope,
+            &encode_release_manifest(&fixture.manifest)?,
+            &fixture.descriptor,
+        )
+        .await?;
+    let resources: Arc<dyn FullNodeExecutionResources> =
+        Arc::new(FullNodeFilesystemResources::open_reader(resources_directory.path()).await?);
     let client = async_nats::connect(url).await?;
     let suffix = InvocationId::generate()
         .to_string()
@@ -365,19 +414,11 @@ async fn nats_vertical(fixture: &Fixture, url: &str) -> Result<Vertical, Box<dyn
         Arc::new(NatsExecutionQueue::open(client.clone(), queue_config).await?);
     let control: Arc<dyn ExecutionControlPlane> =
         Arc::new(NatsExecutionControlPlane::open(client, control_config).await?);
-    let releases = Arc::new(StaticReleases {
-        scope: fixture.scope,
-        manifest: (*fixture.manifest).clone(),
-    });
-    let artifacts = Arc::new(StaticArtifact {
-        descriptor: fixture.manifest.artifact,
-        bytes: fixture.descriptor.to_vec(),
-    });
     let node: Arc<dyn FullNodeActionRuntime> = fixture.runtime.clone();
     let performance = Arc::new(MemoryInvocationPerformanceSink::new(256)?);
     let performance_sink: Arc<dyn InvocationPerformanceSink> = performance.clone();
     let handler = Arc::new(
-        FullNodeExecutionHandler::new(releases, artifacts, node, Arc::clone(&control))
+        FullNodeExecutionHandler::from_resources(resources, node, Arc::clone(&control))
             .with_configuration(fixture.scope, Arc::new(TestConfiguration))
             .with_performance_sink(PerformanceRuntime::NodeHost, Arc::clone(&performance_sink)),
     );
@@ -401,16 +442,142 @@ async fn nats_vertical(fixture: &Fixture, url: &str) -> Result<Vertical, Box<dyn
         QueuedNodeRuntimeConfig {
             class,
             result_wait: Duration::from_millis(50),
+            configuration_available: true,
         },
     )?);
     let (shutdown, receiver) = watch::channel(false);
     tokio::spawn(Arc::clone(&agent).run(receiver));
     Ok(Vertical {
+        _resources: Some(resources_directory),
         runtime,
         agent,
         performance,
         shutdown,
     })
+}
+
+async fn filesystem_vertical(fixture: &Fixture) -> Result<Vertical, Box<dyn Error>> {
+    let resources_directory = tempdir()?;
+    let writer = FullNodeFilesystemResources::open_writer(resources_directory.path()).await?;
+    writer
+        .stage(
+            fixture.scope,
+            &encode_release_manifest(&fixture.manifest)?,
+            &fixture.descriptor,
+        )
+        .await?;
+    let resources: Arc<dyn FullNodeExecutionResources> =
+        Arc::new(FullNodeFilesystemResources::open_reader(resources_directory.path()).await?);
+    let queue = Arc::new(InMemoryExecutionQueue::new(32)?);
+    let control: Arc<dyn ExecutionControlPlane> =
+        Arc::new(InMemoryExecutionControlPlane::default());
+    let node: Arc<dyn FullNodeActionRuntime> = fixture.runtime.clone();
+    let handler = Arc::new(FullNodeExecutionHandler::from_resources(
+        resources,
+        node,
+        Arc::clone(&control),
+    ));
+    let class = ExecutionClass::new("node_host_v1")?;
+    let agent = Arc::new(ExecutionAgent::new(
+        queue.clone(),
+        handler,
+        ExecutionAgentConfig {
+            class: class.clone(),
+            slots: 2,
+            max_concurrent_per_project: 2,
+            pull_wait: Duration::from_millis(50),
+        },
+    )?);
+    let runtime = Arc::new(QueuedNodeRuntime::new(
+        queue,
+        control,
+        QueuedNodeRuntimeConfig {
+            class,
+            result_wait: Duration::from_millis(50),
+            configuration_available: false,
+        },
+    )?);
+    let performance = Arc::new(MemoryInvocationPerformanceSink::new(64)?);
+    let (shutdown, receiver) = watch::channel(false);
+    tokio::spawn(Arc::clone(&agent).run(receiver));
+    Ok(Vertical {
+        _resources: Some(resources_directory),
+        runtime,
+        agent,
+        performance,
+        shutdown,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sanitized_filesystem_projection_executes_without_product_state()
+-> Result<(), Box<dyn Error>> {
+    let fixture = direct_fixture()?;
+    let vertical = filesystem_vertical(&fixture).await?;
+    let outcome = vertical
+        .runtime
+        .execute(fixture.request(
+            "actions.hash",
+            CanonicalValue::String("isolated".to_owned()),
+            Duration::from_secs(3),
+            CancellationToken::new(),
+        )?)
+        .await?;
+    assert_eq!(
+        outcome.value,
+        CanonicalValue::String(
+            "afed2f77cefe58d821f08e334aeb42e52facc63c4f97e9d5d18f53fd0e285953".to_owned()
+        )
+    );
+    assert_eq!(
+        wait_for_agent_settled(&vertical.agent, 1).await?.completed,
+        1
+    );
+    vertical.shutdown.send_replace(true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn filesystem_projection_is_scope_bound_and_detects_modified_artifacts()
+-> Result<(), Box<dyn Error>> {
+    let fixture = fixture()?;
+    let directory = tempdir()?;
+    let writer = FullNodeFilesystemResources::open_writer(directory.path()).await?;
+    writer
+        .stage(
+            fixture.scope,
+            &encode_release_manifest(&fixture.manifest)?,
+            &fixture.descriptor,
+        )
+        .await?;
+    let reader = FullNodeFilesystemResources::open_reader(directory.path()).await?;
+    let package = reader
+        .load(fixture.scope, fixture.manifest.release_id)
+        .await?;
+    assert_eq!(package.manifest, *fixture.manifest);
+    assert_eq!(package.artifact, fixture.descriptor.as_ref());
+    let other_scope = EnvironmentScope::new(fixture.scope.project_id(), EnvironmentId::generate());
+    assert!(
+        reader
+            .load(other_scope, fixture.manifest.release_id)
+            .await
+            .is_err()
+    );
+    let digest = fixture.manifest.artifact.digest.to_string();
+    let artifact_path = directory
+        .path()
+        .join("full-node-execution-v1/artifacts")
+        .join(&digest[..2])
+        .join(&digest[2..4])
+        .join(format!("{}.artifact", &digest[4..]));
+    std::fs::write(artifact_path, b"modified")?;
+    assert!(
+        reader
+            .load(fixture.scope, fixture.manifest.release_id)
+            .await
+            .is_err()
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -487,6 +654,29 @@ async fn queued_agent_resolves_only_declared_environment_configuration()
     );
     assert!(!format!("{:?}", vertical.performance.snapshot()).contains("never-log-this-secret"));
     vertical.shutdown.send_replace(true);
+    Ok(())
+}
+
+#[test]
+fn unbrokered_queue_rejects_node_configuration_capabilities_at_admission()
+-> Result<(), Box<dyn Error>> {
+    let fixture = fixture()?;
+    let queue = Arc::new(InMemoryExecutionQueue::new(8)?);
+    let control: Arc<dyn ExecutionControlPlane> =
+        Arc::new(InMemoryExecutionControlPlane::default());
+    let runtime = QueuedNodeRuntime::new(
+        queue,
+        control,
+        QueuedNodeRuntimeConfig {
+            class: ExecutionClass::new("node_host_v1")?,
+            result_wait: Duration::from_millis(50),
+            configuration_available: false,
+        },
+    )?;
+    assert_eq!(
+        runtime.validate_manifest(&fixture.manifest),
+        Err(RuntimeError::UnsupportedRuntime)
+    );
     Ok(())
 }
 
