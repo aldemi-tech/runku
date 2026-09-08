@@ -244,7 +244,16 @@ async fn run_conformance(
             .is_converged()
     );
 
-    let incompatible = manifest(scope.project_id(), 3, 12, 11)?;
+    let schema_variant = manifest(scope.project_id(), 3, 12, 11)?;
+    assert!(
+        ServingPolicy::from_manifests(
+            scope,
+            ServingMode::Gradual,
+            [(&r1, 50), (&schema_variant, 50)]
+        )
+        .is_ok()
+    );
+    let incompatible = manifest(scope.project_id(), 4, 12, 13)?;
     assert_eq!(
         ServingPolicy::from_manifests(
             scope,
