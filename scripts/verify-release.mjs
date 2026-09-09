@@ -56,6 +56,7 @@ assertEqual(
 
 const launcherSource = read("packages/cli/lib/platform.js")
 const releaseWorkflow = read(".github/workflows/release.yml")
+const npmPublisher = read("scripts/publish-npm.mjs")
 const cliWorkflow = section(releaseWorkflow, "  cli-binaries:", "  server-binaries:")
 const serverWorkflow = section(releaseWorkflow, "  server-binaries:", "  server-image:")
 const installGuide = read("docs/getting-started/local-development.md")
@@ -118,6 +119,26 @@ assertContains(
   "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}",
 )
 assertContains("candidate image release kind", releaseWorkflow, "kind=candidate-image")
+assertContains(
+  "npm registry acknowledgement attempts",
+  npmPublisher,
+  "const REGISTRY_ACKNOWLEDGEMENT_ATTEMPTS = 90",
+)
+assertContains(
+  "npm registry acknowledgement delay",
+  npmPublisher,
+  "const REGISTRY_ACKNOWLEDGEMENT_DELAY_MS = 2_000",
+)
+assertContains(
+  "npm publication timeout",
+  section(releaseWorkflow, "  publish-npm:", "  publish-sdk-npm:"),
+  "timeout-minutes: 40",
+)
+assertContains(
+  "release recovery timeout",
+  section(releaseWorkflow, "  recover-release:", undefined),
+  "timeout-minutes: 45",
+)
 assertContains(
   "immutable candidate image tag",
   releaseWorkflow,
@@ -192,7 +213,7 @@ function assertOccursOnce(label, source, expected) {
 
 function section(source, start, end) {
   const startIndex = source.indexOf(start)
-  const endIndex = source.indexOf(end, startIndex + start.length)
+  const endIndex = end === undefined ? source.length : source.indexOf(end, startIndex + start.length)
   if (startIndex === -1 || endIndex === -1) {
     throw new Error(`release workflow section ${start}..${end} is missing`)
   }

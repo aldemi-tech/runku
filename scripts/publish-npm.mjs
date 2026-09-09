@@ -5,6 +5,9 @@ import { spawnSync } from "node:child_process"
 import process from "node:process"
 import { releasePlatforms } from "./release-platforms.mjs"
 
+const REGISTRY_ACKNOWLEDGEMENT_ATTEMPTS = 90
+const REGISTRY_ACKNOWLEDGEMENT_DELAY_MS = 2_000
+
 const directory = resolve(process.argv[2] ?? "")
 if (!process.argv[2]) throw new Error("usage: publish-npm.mjs DIRECTORY")
 const sdkOnly = process.argv.includes("--sdk")
@@ -93,12 +96,14 @@ function isMissingPackage(result) {
 
 async function waitForPublishedState(tarball) {
   const spec = `${tarball.name}@${tarball.version}`
-  for (let attempt = 1; attempt <= 10; attempt += 1) {
+  for (let attempt = 1; attempt <= REGISTRY_ACKNOWLEDGEMENT_ATTEMPTS; attempt += 1) {
     const result = run("npm", ["view", spec, "dist.integrity", "--json"], { allowFailure: true })
     if (result.status === 0) return JSON.parse(result.stdout.trim())
     if (!isMissingPackage(result)) throw new Error(`registry verification failed for ${spec}`)
     if (hasPublishedDistTag(tarball.name, tarball.version)) return null
-    if (attempt < 10) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000))
+    if (attempt < REGISTRY_ACKNOWLEDGEMENT_ATTEMPTS) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, REGISTRY_ACKNOWLEDGEMENT_DELAY_MS))
+    }
   }
   throw new Error(`${spec} was not acknowledged by the registry after publication`)
 }

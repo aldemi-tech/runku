@@ -298,6 +298,10 @@ behaves as follows:
 - existing name/version with different bytes: fail closed;
 - incomplete or unexpected tarball set: fail before publishing.
 
+After `npm publish` succeeds, the workflow allows up to three minutes for the immutable version or
+its dist-tag to become readable. npm registry propagation is not immediate; do not start a recovery
+run while the just-accepted package is still inside that acknowledgement window.
+
 This permits recovery from a network failure after some packages were accepted. It never replaces
 published bytes. Do not delete/recreate the tag, rebuild a different commit under the same version,
 or use `npm unpublish` as rollback.
