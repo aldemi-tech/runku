@@ -96,6 +96,53 @@ pub struct QueryOutcome {
     pub dependencies: Vec<ReadDependency>,
 }
 
+/// Result of one direct logical query executed without invoking user JavaScript.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicalQueryOutcome {
+    /// Stable page produced by the shared query planner.
+    pub page: DataQueryPage,
+    /// Snapshot sequence shared by every returned document.
+    pub snapshot_sequence: u64,
+}
+
+/// Executes one bounded logical table query through the same planner used by `ctx.db.query`.
+///
+/// This entry point exists for trusted Product adapters such as the authenticated Management Data
+/// Explorer. It does not grant capabilities or execute application code.
+///
+/// # Errors
+///
+/// Returns the same sanitized storage and data-planning failures as a Function query.
+pub async fn execute_logical_query(
+    store: Arc<dyn LogicalStore>,
+    scope: EnvironmentScope,
+    schema: Arc<SchemaCatalog>,
+    request: DataQueryRequest,
+    deadline: Instant,
+) -> Result<LogicalQueryOutcome, ExecutionError> {
+    let session = QueryReadSession::new(
+        store,
+        scope,
+        Arc::new(QueryTelemetry::default()),
+        Some(schema),
+    );
+    let query = session
+        .query(request, deadline, CancellationToken::new())
+        .await;
+    let summary = session
+        .finish(None)
+        .await
+        .map_err(SessionFailure::into_execution)?;
+    let page = query.map_err(ExecutionError::Data)?;
+    let snapshot_sequence = summary
+        .snapshot_sequence
+        .ok_or(ExecutionError::Data(DataReadError::Unavailable))?;
+    Ok(LogicalQueryOutcome {
+        page,
+        snapshot_sequence,
+    })
+}
+
 /// Stable Query composition failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ExecutionError {

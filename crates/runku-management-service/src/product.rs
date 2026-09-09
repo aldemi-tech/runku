@@ -41,6 +41,10 @@ pub enum ManagementProductError {
     Validation,
     /// Multiple Releases cannot safely coexist under the requested policy.
     Incompatible,
+    /// A bounded fallback would exceed the table-scan threshold and needs a declared index.
+    QueryRequiresIndex,
+    /// The selected table intentionally exposes only point operations.
+    QueryTableNotQueryable,
     /// Durable product storage is unavailable.
     Unavailable,
     /// Durable state failed an integrity check.
@@ -58,6 +62,8 @@ impl std::fmt::Display for ManagementProductError {
             Self::OperationIdReused => "product operation ID was reused",
             Self::Validation => "product data validation failed",
             Self::Incompatible => "product release contracts are incompatible",
+            Self::QueryRequiresIndex => "product data query requires an index",
+            Self::QueryTableNotQueryable => "product table is not queryable",
             Self::Unavailable => "product dependency is unavailable",
             Self::Corruption => "product state is corrupt",
             Self::ResultUncertain => "product operation result is uncertain",
@@ -1153,6 +1159,8 @@ pub struct ManagementSchemaIndex {
     pub name: String,
     /// Ordered object-property paths.
     pub fields: Vec<Vec<String>>,
+    /// Physical projection kind: `ordered` or `search`.
+    pub kind: String,
 }
 
 /// One table projected from the effective logical schema.
@@ -1163,6 +1171,8 @@ pub struct ManagementSchemaTable {
     pub table_id: String,
     /// Logical Table name.
     pub name: String,
+    /// Declared access mode: `keyValue` or `queryable`.
+    pub mode: String,
     /// Canonical document Contract v1.
     pub document: serde_json::Value,
     /// Ordered logical indexes for this table.
@@ -1205,7 +1215,47 @@ pub struct ManagementDataDocument {
     pub value: WireValueV1,
 }
 
-/// Bounded logical-index query used by the Data Explorer.
+/// One predicate accepted by the bounded Data Explorer query planner.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataQueryFilter {
+    /// Dotted application field path.
+    pub field: String,
+    /// `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `contains`, or `search`.
+    #[serde(default = "default_data_query_operator")]
+    pub operator: String,
+    /// Canonical comparison value.
+    pub value: WireValueV1,
+}
+
+fn default_data_query_operator() -> String {
+    "eq".to_owned()
+}
+
+/// One stable ordering component accepted by the Data Explorer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementDataQueryOrder {
+    /// Dotted application field path or `$createdAt`, `$updatedAt`, `$id`.
+    pub field: String,
+    /// `asc` or `desc`.
+    #[serde(default = "default_data_query_direction")]
+    pub direction: String,
+}
+
+fn default_data_query_direction() -> String {
+    "asc".to_owned()
+}
+
+fn default_data_query_limit() -> u16 {
+    100
+}
+
+/// Bounded logical table query used by the Data Explorer.
+///
+/// `index` and `prefix` retain the v0.5.3 exact-index request for compatible clients. Omitting
+/// `index` selects the same planner, defaults, bounded fallback scan, and cursor contract used by
+/// `ctx.db.query`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagementDataQuery {
@@ -1213,13 +1263,24 @@ pub struct ManagementDataQuery {
     pub target: String,
     /// Logical table name.
     pub table: String,
-    /// Logical index name within the table.
-    pub index: String,
-    /// Optional leading compound-key components; empty scans the complete logical index.
-    #[serde(default)]
+    /// Optional legacy logical index name within the table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+    /// Optional legacy leading compound-key components.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix: Vec<WireValueV1>,
+    /// Conjunctive predicates. Empty selects no filtering.
+    #[serde(default, rename = "where", skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<ManagementDataQueryFilter>,
+    /// Stable ordering. Empty selects `(createdAt DESC, documentId DESC)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_by: Vec<ManagementDataQueryOrder>,
     /// Result bound in `1..=200`.
+    #[serde(default = "default_data_query_limit")]
     pub limit: u16,
+    /// Opaque continuation token returned by an identical logical query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Result of one bounded logical-index query.
@@ -1236,6 +1297,9 @@ pub struct ManagementDataPage {
     pub documents: Vec<ManagementDataDocument>,
     /// True when the bounded scan may have additional entries.
     pub truncated: bool,
+    /// Opaque continuation token for the same query, absent at the end or for legacy index scans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Insert request; the Document ID is derived deterministically from `Idempotency-Key`.
@@ -2114,4 +2178,49 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         &self,
         request: &ManagementLogPruneRequest,
     ) -> Result<ManagementLogPruneResult, ManagementProductError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ManagementDataQuery;
+
+    #[test]
+    fn data_query_defaults_match_the_function_contract() -> Result<(), serde_json::Error> {
+        let request: ManagementDataQuery = serde_json::from_value(serde_json::json!({
+            "target": "environment",
+            "table": "notes"
+        }))?;
+        assert!(request.index.is_none());
+        assert!(request.prefix.is_empty());
+        assert!(request.filters.is_empty());
+        assert!(request.order_by.is_empty());
+        assert_eq!(request.limit, 100);
+        assert!(request.cursor.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn data_query_accepts_modern_and_legacy_shapes() -> Result<(), serde_json::Error> {
+        let query: ManagementDataQuery = serde_json::from_value(serde_json::json!({
+            "target": "environment",
+            "table": "notes",
+            "where": [{"field": "transcript", "operator": "search", "value": {"type": "string", "value": "comprar"}}],
+            "orderBy": [{"field": "$createdAt", "direction": "desc"}],
+            "limit": 20,
+            "cursor": "opaque"
+        }))?;
+        assert_eq!(query.filters[0].operator, "search");
+        assert_eq!(query.order_by[0].direction, "desc");
+        assert_eq!(query.cursor.as_deref(), Some("opaque"));
+
+        let legacy: ManagementDataQuery = serde_json::from_value(serde_json::json!({
+            "target": "environment",
+            "table": "notes",
+            "index": "by_created_at",
+            "prefix": [],
+            "limit": 50
+        }))?;
+        assert_eq!(legacy.index.as_deref(), Some("by_created_at"));
+        Ok(())
+    }
 }

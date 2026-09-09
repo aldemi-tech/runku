@@ -5,11 +5,13 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_document_schema};
+use runku_contracts::{
+    Contract, DocumentSchemaV1, TableMode, decode_contract, decode_document_schema,
+};
 use runku_core::{
     ApplicationClientId, ChannelName, CodeTarget, CredentialId, DocumentId, EnvironmentScope,
     FunctionName, OperationId, OperatorId, OutboxEventId, PinnedCode, ReleaseId,
@@ -35,7 +37,10 @@ use runku_environments::{
     EnvironmentMaterializationOutcome, EnvironmentOperation, EnvironmentOperationKind,
     EnvironmentService,
 };
-use runku_execution::{document_write_set_payload, plan_document_index_mutations};
+use runku_execution::{
+    ExecutionError, document_write_set_payload, execute_logical_query,
+    plan_document_index_mutations,
+};
 use runku_file_storage::{FileObjectStore, FileStorageError, FileStorageLimits, FileUsageSink};
 use runku_gateway::{
     ArtifactCacheTelemetrySnapshot, CorsOrigin, EnvironmentServingPercentile,
@@ -69,8 +74,9 @@ use runku_management_service::{
     ManagementCronActivationResult, ManagementCronActivationSet, ManagementCronCatalog,
     ManagementCronEntry, ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataDocument,
     ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
-    ManagementDataReplaceRequest, ManagementDataWriteResult, ManagementDeliverySnapshot,
-    ManagementEnvironment, ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
+    ManagementDataQueryFilter, ManagementDataQueryOrder, ManagementDataReplaceRequest,
+    ManagementDataWriteResult, ManagementDeliverySnapshot, ManagementEnvironment,
+    ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
     ManagementEnvironmentLifecycleChange, ManagementEnvironmentOperation,
     ManagementEnvironmentResult, ManagementEnvironmentUpdate, ManagementFunctionEntry,
     ManagementFunctionPage, ManagementHealthComponent, ManagementInstanceHealth,
@@ -109,9 +115,10 @@ use runku_releases::{
 };
 use runku_runtime::{
     CancellationToken, ConfigurationRead, ConfigurationReadError, ConfigurationValueKind,
-    RuntimeTelemetrySnapshot,
+    DataQueryDirection, DataQueryFilter, DataQueryOperator, DataQueryOrder, DataQueryRequest,
+    DataReadError, RuntimeTelemetrySnapshot,
 };
-use runku_schema::{SchemaCatalog, decode_schema_catalog};
+use runku_schema::{IndexKind, SchemaCatalog, decode_schema_catalog};
 use runku_serving::{
     ServingCommandKind, ServingMode, ServingOperation, ServingPolicy, ServingPolicyError,
     ServingPolicyRecord, ServingPolicyService, canonical_cron_declarations_hash,
@@ -2878,10 +2885,70 @@ impl ManagementProduct for ProductAdapter {
         let limit = data_limit(request.limit)?;
         let catalog = self.effective_catalog(&request.target).await?;
         let table = resolve_table(&catalog.schema, &request.table)?;
+        let Some(index_name) = request.index.as_deref() else {
+            if !request.prefix.is_empty() {
+                return Err(ManagementProductError::Invalid);
+            }
+            if table.mode != TableMode::Queryable {
+                return Err(ManagementProductError::QueryTableNotQueryable);
+            }
+            let filters = request
+                .filters
+                .iter()
+                .map(management_data_filter)
+                .collect::<Result<Vec<_>, _>>()?;
+            let order = request
+                .order_by
+                .iter()
+                .map(management_data_order)
+                .collect::<Result<Vec<_>, _>>()?;
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .ok_or(ManagementProductError::Unavailable)?;
+            let outcome = execute_logical_query(
+                Arc::clone(&self.data_store),
+                self.scope,
+                Arc::new(catalog.indexes.clone()),
+                DataQueryRequest {
+                    table_id: table.id,
+                    filters,
+                    order,
+                    limit: u32::from(request.limit),
+                    cursor: request.cursor.clone(),
+                },
+                deadline,
+            )
+            .await
+            .map_err(map_logical_query)?;
+            let next_cursor = outcome.page.next_cursor;
+            let documents = outcome
+                .page
+                .documents
+                .into_iter()
+                .map(|mut document| {
+                    document.value = catalog
+                        .schema
+                        .project_document(table.id, &document.value)
+                        .map_err(|_| ManagementProductError::Validation)?;
+                    runtime_data_document(table.name.as_str(), &document)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(ManagementDataPage {
+                version: 2,
+                target: catalog.target,
+                snapshot_sequence: outcome.snapshot_sequence.to_string(),
+                documents,
+                truncated: next_cursor.is_some(),
+                next_cursor,
+            });
+        };
+        if !request.filters.is_empty() || !request.order_by.is_empty() || request.cursor.is_some() {
+            return Err(ManagementProductError::Invalid);
+        }
         let index = catalog
             .indexes
             .indexes_for_table(table.id)
-            .find(|index| index.name() == request.index)
+            .find(|index| index.name() == index_name)
             .ok_or(ManagementProductError::NotFound)?;
         if request.prefix.len() > index.fields().len() {
             return Err(ManagementProductError::Invalid);
@@ -2951,6 +3018,7 @@ impl ManagementProduct for ProductAdapter {
             snapshot_sequence: sequence.to_string(),
             documents,
             truncated,
+            next_cursor: None,
         })
     }
 
@@ -3809,6 +3877,11 @@ fn schema_table(
     Ok(ManagementSchemaTable {
         table_id: table.id.to_string(),
         name: table.name.clone(),
+        mode: match table.mode {
+            TableMode::KeyValue => "keyValue",
+            TableMode::Queryable => "queryable",
+        }
+        .to_owned(),
         document: serde_json::to_value(&table.document_contract)
             .map_err(|_| ManagementProductError::Corruption)?,
         indexes: indexes
@@ -3821,6 +3894,11 @@ fn schema_table(
                     .iter()
                     .map(|field| field.segments().to_vec())
                     .collect(),
+                kind: match index.kind() {
+                    IndexKind::Ordered => "ordered",
+                    IndexKind::Search => "search",
+                }
+                .to_owned(),
             })
             .collect(),
     })
@@ -3862,6 +3940,78 @@ fn data_document(
         value: WireValueV1::from_canonical(&document.value)
             .map_err(|_| ManagementProductError::Corruption)?,
     })
+}
+
+fn runtime_data_document(
+    table: &str,
+    document: &runku_runtime::DataDocument,
+) -> Result<ManagementDataDocument, ManagementProductError> {
+    Ok(ManagementDataDocument {
+        table_id: document.table_id.to_string(),
+        table: table.to_owned(),
+        document_id: document.document_id.to_string(),
+        revision: document.revision.to_string(),
+        commit_sequence: document.commit_sequence.to_string(),
+        created_at_micros: document.created_at.get().to_string(),
+        updated_at_micros: document.updated_at.get().to_string(),
+        value: WireValueV1::from_canonical(&document.value)
+            .map_err(|_| ManagementProductError::Corruption)?,
+    })
+}
+
+fn management_data_filter(
+    filter: &ManagementDataQueryFilter,
+) -> Result<DataQueryFilter, ManagementProductError> {
+    let operator = match filter.operator.as_str() {
+        "eq" => DataQueryOperator::Equal,
+        "neq" => DataQueryOperator::NotEqual,
+        "gt" => DataQueryOperator::GreaterThan,
+        "gte" => DataQueryOperator::GreaterThanOrEqual,
+        "lt" => DataQueryOperator::LessThan,
+        "lte" => DataQueryOperator::LessThanOrEqual,
+        "contains" => DataQueryOperator::Contains,
+        "search" => DataQueryOperator::Search,
+        _ => return Err(ManagementProductError::Invalid),
+    };
+    Ok(DataQueryFilter {
+        field: filter.field.clone(),
+        operator,
+        value: filter
+            .value
+            .clone()
+            .into_canonical()
+            .map_err(|_| ManagementProductError::Invalid)?,
+    })
+}
+
+fn management_data_order(
+    order: &ManagementDataQueryOrder,
+) -> Result<DataQueryOrder, ManagementProductError> {
+    let direction = match order.direction.as_str() {
+        "asc" => DataQueryDirection::Ascending,
+        "desc" => DataQueryDirection::Descending,
+        _ => return Err(ManagementProductError::Invalid),
+    };
+    Ok(DataQueryOrder {
+        field: order.field.clone(),
+        direction,
+    })
+}
+
+fn map_logical_query(error: ExecutionError) -> ManagementProductError {
+    match error {
+        ExecutionError::Storage(error) => map_store(error),
+        ExecutionError::Data(DataReadError::QueryRequiresIndex) => {
+            ManagementProductError::QueryRequiresIndex
+        }
+        ExecutionError::Data(
+            DataReadError::InvalidRequest | DataReadError::LimitExceeded | DataReadError::Cancelled,
+        ) => ManagementProductError::Invalid,
+        ExecutionError::Data(
+            DataReadError::Unavailable | DataReadError::Storage | DataReadError::Timeout,
+        ) => ManagementProductError::Unavailable,
+        ExecutionError::Runtime(_) => ManagementProductError::Corruption,
+    }
 }
 
 fn map_mutation_planning(error: runku_execution::MutationExecutionError) -> ManagementProductError {
@@ -5412,7 +5562,9 @@ export const basename = action({
             .await?;
         assert_eq!(remaining_schema.tables.len(), 1);
         assert_ne!(schema.tables[0].name, remaining_schema.tables[0].name);
+        assert_eq!(schema.tables[0].mode, "queryable");
         assert_eq!(schema.tables[0].indexes[0].name, "by_rank");
+        assert_eq!(schema.tables[0].indexes[0].kind, "ordered");
         assert_eq!(remaining_schema.next, None);
         assert_eq!(
             product
@@ -5479,14 +5631,42 @@ export const basename = action({
             .data_query(&ManagementDataQuery {
                 target: "workspace:local".to_owned(),
                 table: "notes".to_owned(),
-                index: "by_rank".to_owned(),
+                index: Some("by_rank".to_owned()),
                 prefix: vec![WireValueV1::Int64 {
                     value: "1".to_owned(),
                 }],
+                filters: Vec::new(),
+                order_by: Vec::new(),
                 limit: 20,
+                cursor: None,
             })
             .await?;
         assert_eq!(page.documents.len(), 1);
+        let logical_page = product
+            .data_query(&ManagementDataQuery {
+                target: "workspace:local".to_owned(),
+                table: "notes".to_owned(),
+                index: None,
+                prefix: Vec::new(),
+                filters: vec![ManagementDataQueryFilter {
+                    field: "rank".to_owned(),
+                    operator: "eq".to_owned(),
+                    value: WireValueV1::Int64 {
+                        value: "1".to_owned(),
+                    },
+                }],
+                order_by: vec![ManagementDataQueryOrder {
+                    field: "rank".to_owned(),
+                    direction: "asc".to_owned(),
+                }],
+                limit: 20,
+                cursor: None,
+            })
+            .await?;
+        assert_eq!(logical_page.version, 2);
+        assert_eq!(logical_page.documents.len(), 1);
+        assert!(!logical_page.truncated);
+        assert!(logical_page.next_cursor.is_none());
 
         let replacement_operation = OperationId::generate();
         let replacement = value("second", 2);
@@ -5675,11 +5855,14 @@ export const basename = action({
                 .data_query(&ManagementDataQuery {
                     target: "workspace:local".to_owned(),
                     table: "notes".to_owned(),
-                    index: "by_rank".to_owned(),
+                    index: Some("by_rank".to_owned()),
                     prefix: vec![WireValueV1::Int64 {
                         value: "8".to_owned(),
                     }],
+                    filters: Vec::new(),
+                    order_by: Vec::new(),
                     limit: 1,
+                    cursor: None,
                 })
                 .await?;
             assert_eq!(page.documents.len(), 1);

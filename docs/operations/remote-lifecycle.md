@@ -263,6 +263,10 @@ Recovery rules:
 
 - `401` after the single refresh attempt: run `runku login` again; do not replace it with `rk_sec`;
 - `403`: request the minimum missing capability at the intended scope;
+- `422 DATA_QUERY_REQUIRES_INDEX`: add an ordered/search index matching the query, publish a
+  compatible Release, and retry the same logical request after the index is ready;
+- `422 DATA_QUERY_TABLE_NOT_QUERYABLE`: change the table mode through the normal additive Release
+  lifecycle before querying it; point reads and writes remain available in `keyValue` mode;
 - exit `4`: fetch status/current Workspace state and reconcile CAS intent;
 - exit `5`: verify server/storage health and retry exact idempotent bytes with bounded backoff;
 - exit `6`: stop writes, preserve Product state, and follow corruption/restore procedures;

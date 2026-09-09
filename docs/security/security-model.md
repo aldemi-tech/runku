@@ -68,6 +68,10 @@ internally, and commits through the same Environment-scoped `LogicalStore` used 
 Write operation IDs are bound to requested and resolved target, schema digest, document intent,
 and OCC precondition, preventing replay against a changed alias or schema. Responses never expose
 physical SQL, paths, credentials, or another Environment's records.
+Management table queries reuse the Function query planner and its fixed limits: empty listing uses
+stable physical table order, arbitrary unindexed filtering/sorting stops beyond 2,000 rows, and
+word search requires an explicit search index. The console cannot request raw SQL, name a physical
+table, widen the Environment scope, or turn a bounded fallback into an unrestricted scan.
 
 Archived logs retain the exact Project/Environment namespace in subjects, object paths, manifests,
 and queries. Serving and worker NATS identities are separate; remote NATS requires TLS and rejects

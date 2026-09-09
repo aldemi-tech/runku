@@ -18,8 +18,8 @@ pub use mutation::{
     document_write_set_payload, plan_document_index_mutations,
 };
 pub use query::{
-    DependencyBound, ExecutionError, QueryExecutor, QueryOutcome, QueryTelemetrySnapshot,
-    ReadDependency,
+    DependencyBound, ExecutionError, LogicalQueryOutcome, QueryExecutor, QueryOutcome,
+    QueryTelemetrySnapshot, ReadDependency, execute_logical_query,
 };
 pub use scheduler::{
     ScheduledInvocationRunner, ScheduledPollOutcome, ScheduledRunFailure, ScheduledWorker,

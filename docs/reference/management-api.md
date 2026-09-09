@@ -230,6 +230,22 @@ breadth, multipart, and Product-driven provider backup are not implied. See
 Data Admin bypasses the application's Function API but not schema, scope, identity, CAS, or audit
 boundaries. Treat writes as production data changes and use the same backup/change approval.
 
+`POST <base>/data/query` accepts the same optional query fields as `ctx.db.query`: `where`,
+`orderBy`, `limit`, and `cursor`. Their defaults are respectively `[]`, `[]`, `100`, and absent;
+the empty query therefore lists the newest documents in stable `(createdAt DESC, documentId DESC)`
+order without requiring an index. Predicates use `eq` (the default), `neq`, `gt`, `gte`, `lt`,
+`lte`, `contains`, or `search`; directions use `asc` (the default) or `desc`. Values use Canonical
+Value v1 wire objects, just like Data Admin writes. A queryable table may use a matching ordered or
+search index automatically. Otherwise the same 2,000-row bounded fallback applies, and the server
+returns `422 DATA_QUERY_REQUIRES_INDEX` instead of performing an unbounded scan. A `keyValue` table
+returns `422 DATA_QUERY_TABLE_NOT_QUERYABLE`.
+
+The schema catalog exposes each table's `mode` and each index's `kind`. New clients should omit
+`index` and let the planner select the physical path. The prior `{index, prefix, limit}` request is
+still accepted for compatibility, but it remains a one-page exact-index scan without a continuation
+cursor. Modern pages include `nextCursor` when another page exists and retain `truncated` for old
+consumers.
+
 ## Health, metrics, and logs
 
 | Route | Capability | Meaning |

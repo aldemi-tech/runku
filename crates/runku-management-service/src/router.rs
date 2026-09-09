@@ -2683,6 +2683,14 @@ fn product_failure(error: ManagementProductError) -> Response {
             StatusCode::UNPROCESSABLE_ENTITY,
             "PRODUCT_SERVING_INCOMPATIBLE_CONTRACTS",
         ),
+        ManagementProductError::QueryRequiresIndex => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "DATA_QUERY_REQUIRES_INDEX",
+        ),
+        ManagementProductError::QueryTableNotQueryable => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "DATA_QUERY_TABLE_NOT_QUERYABLE",
+        ),
         ManagementProductError::Unavailable => {
             (StatusCode::SERVICE_UNAVAILABLE, "PRODUCT_UNAVAILABLE")
         }
