@@ -219,6 +219,7 @@ breadth, multipart, and Product-driven provider backup are not implied. See
 | `GET <base>/functions` | `releases:read` | bounded catalog from one verified effective artifact |
 | `GET <base>/schema/tables` | `releases:read` | logical table/index catalog without physical IDs |
 | `POST <base>/data/query` | `data:read` | bounded logical administrative query |
+| `POST <base>/data/query/follow` | `data:read` | authoritative NDJSON page stream for one bounded logical query |
 | `GET <base>/data/documents/{table}/{id}` | `data:read` | one canonical document |
 | `POST <base>/data/documents/{table}` | `data:write` | deterministic insert under operation id |
 | `PUT/DELETE <base>/data/documents/{table}/{id}` | `data:write` | exact document revision/OCC + operation id |
@@ -245,6 +246,24 @@ The schema catalog exposes each table's `mode` and each index's `kind`. New clie
 still accepted for compatibility, but it remains a one-page exact-index scan without a continuation
 cursor. Modern pages include `nextCursor` when another page exists and retain `truncated` for old
 consumers.
+
+`POST <base>/data/query/follow` accepts that same request body with an exact immutable
+`release:<id>` target. Moving `environment:default`, `channel:`, and `workspace:` targets are
+resolved by the client before opening the stream; this prevents a long-lived connection from
+silently switching schemas. It subscribes before the initial read so a concurrent committed change
+cannot be missed, then emits one line per frame:
+
+```json
+{"version":1,"type":"state","resync":false,"page":{"documents":[],"nextCursor":null}}
+```
+
+`page` has the exact `/data/query` response contract. Heartbeats are
+`{"version":1,"type":"heartbeat"}`. A terminal failure is a bounded `error` frame with `code` and
+`retryable`; receiver lag causes a fresh authoritative page with `resync:true`. Only committed
+outbox changes for the selected table rerun the query, identical snapshot sequences are suppressed,
+operator authorization is rechecked while the connection remains open, and a stream lasts at most
+one hour. The client replaces its current page on every `state`; this is not row-event replay or
+polling.
 
 ## Health, metrics, and logs
 

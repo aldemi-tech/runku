@@ -39,7 +39,8 @@ The v1 routes are scoped by the URL Project and Environment:
 
 | Method and suffix | Capability | Contract |
 |---|---|---|
-| `POST /data/query` | `data:read` | table/index/prefix query, `limit` in `1..=200`, one snapshot |
+| `POST /data/query` | `data:read` | planner-selected logical query, `limit` in `1..=200`, one snapshot |
+| `POST /data/query/follow` | `data:read` | same bounded query as an authoritative NDJSON page stream |
 | `GET /data/documents/{table}/{document}` | `data:read` | exact logical document and OCC revision |
 | `POST /data/documents/{table}` | `data:write` | schema-validated insert; ID derives from `Idempotency-Key` |
 | `PUT /data/documents/{table}/{document}` | `data:write` | full replace with `expectedRevision` and `previousValue` |
@@ -121,6 +122,13 @@ compatible old/new Releases can serve the same Environment concurrently.
 A delivered value is an authoritative Query result, not a domain-event log. Reconnect or
 `resync_required` reruns the Query; intermediate WebSocket frames are not replay-guaranteed. Clients
 replace local state with each result.
+
+The public `POST /v1/query/follow` HTTP stream exposes the same Query dependency registry and
+version-1 state frames as WebSocket Realtime for proxies that support ordinary streaming HTTP but
+not protocol upgrade. Management `POST .../data/query/follow` applies the same rule to one bounded
+Data Admin page pinned to an exact immutable Release: committed changes to that table trigger a
+fresh page, unrelated tables do not, and lag forces an authoritative resync. Moving targets must be
+resolved before opening the stream. Neither endpoint scans or polls on a timer.
 
 Outbox records commit atomically with data/index/schedule changes. Dispatch may repeat after crash
 and must be idempotent. Lag delays Realtime but cannot expose uncommitted state.

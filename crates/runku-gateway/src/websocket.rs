@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
     fmt,
     sync::{
         Arc,
@@ -11,6 +12,7 @@ use std::{
 };
 
 use axum::{
+    body::{Body, Bytes},
     extract::{
         WebSocketUpgrade,
         ws::{CloseFrame, Message, WebSocket},
@@ -18,6 +20,7 @@ use axum::{
     http::{HeaderMap, header},
     response::Response,
 };
+use futures_util::stream;
 use runku_core::{RequestId, SubscriptionId};
 use runku_protocol::{
     REALTIME_MESSAGE_MAX_BYTES, RealtimeClientMessageV1, RealtimeServerMessageV1,
@@ -210,12 +213,178 @@ impl RealtimeGateway {
             .protocols([REALTIME_SUBPROTOCOL])
             .on_upgrade(move |socket| session(socket, gateway, permit)))
     }
+
+    pub(crate) async fn follow(
+        &self,
+        request_id: RequestId,
+        credentials: PresentedCredentials,
+        target: runku_core::CodeTarget,
+        function: runku_core::FunctionName,
+        arguments: runku_value::CanonicalValue,
+        cancellation: CancellationToken,
+    ) -> Result<Response, FollowFailure> {
+        let permit = Arc::clone(&self.admission)
+            .try_acquire_owned()
+            .map_err(|_| {
+                self.telemetry
+                    .admission_rejections
+                    .fetch_add(1, Ordering::Relaxed);
+                FollowFailure::Busy
+            })?;
+        let subscription_id = SubscriptionId::generate();
+        let prepared = tokio::time::timeout(
+            self.config.command_timeout,
+            self.service.prepare_subscription(
+                RealtimeSubscribeContext {
+                    request_id,
+                    subscription_id,
+                    credentials,
+                    maximum_authorization_duration: self.config.reauthentication_interval,
+                    cancellation: cancellation.clone(),
+                },
+                target,
+                function,
+                arguments,
+            ),
+        )
+        .await
+        .map_err(|_| FollowFailure::Timeout)?
+        .map_err(FollowFailure::Gateway)?;
+        let release_id = prepared.spec.release_id;
+        let authorized_until = prepared.spec.authorized_until;
+        let handle = self
+            .registry
+            .register(prepared.spec, prepared.outcome)
+            .map_err(FollowFailure::Realtime)?;
+        self.telemetry.connections.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.subscriptions.fetch_add(1, Ordering::Relaxed);
+        let state = HttpFollowState {
+            registry: self.registry.clone(),
+            telemetry: Arc::clone(&self.telemetry),
+            receiver: handle.receiver,
+            subscription_id,
+            release_id,
+            authorized_until,
+            request_id: Some(request_id),
+            deadline: instant_for_timestamp(authorized_until).unwrap_or_else(Instant::now),
+            cancellation,
+            done: false,
+            _permit: permit,
+        };
+        let body = stream::unfold(state, |mut current| async move {
+            if current.done {
+                return None;
+            }
+            let deadline =
+                tokio::time::sleep_until(tokio::time::Instant::from_std(current.deadline));
+            tokio::pin!(deadline);
+            let message = tokio::select! {
+                () = current.cancellation.cancelled() => return None,
+                () = &mut deadline => {
+                    current.done = true;
+                    RealtimeServerMessageV1::Error {
+                        request_id: None,
+                        subscription_id: Some(current.subscription_id),
+                        delivery_revision: None,
+                        code: "AUTHORIZATION_EXPIRED".to_owned(),
+                        retryable: false,
+                    }
+                }
+                delivery = current.receiver.recv() => match delivery {
+                    Ok(DeliveryEvent::State {
+                        subscription_id,
+                        delivery_revision,
+                        value,
+                        result_hash,
+                        snapshot_sequence,
+                    }) => RealtimeServerMessageV1::State {
+                        request_id: current.request_id.take(),
+                        subscription_id,
+                        release_id: current.release_id,
+                        delivery_revision,
+                        value,
+                        result_hash,
+                        snapshot_sequence,
+                        authorized_until: current.authorized_until,
+                    },
+                    Ok(DeliveryEvent::Error {
+                        subscription_id,
+                        delivery_revision,
+                        code,
+                        retryable,
+                        suspended,
+                    }) => {
+                        current.done = suspended;
+                        RealtimeServerMessageV1::Error {
+                            request_id: None,
+                            subscription_id: Some(subscription_id),
+                            delivery_revision: Some(delivery_revision),
+                            code: code.to_owned(),
+                            retryable,
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        current.done = true;
+                        current.telemetry.lagged_deliveries.fetch_add(1, Ordering::Relaxed);
+                        RealtimeServerMessageV1::ResyncRequired {
+                            subscription_id: current.subscription_id,
+                            code: "REALTIME_DELIVERY_LAGGED".to_owned(),
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            };
+            let mut bytes = encode_realtime_server_v1(&message).ok()?;
+            bytes.push(b'\n');
+            Some((Ok::<Bytes, Infallible>(Bytes::from(bytes)), current))
+        });
+        let mut response = Response::new(Body::from_stream(body));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/x-ndjson"),
+        );
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        Ok(response)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UpgradeFailure {
     Invalid,
     Busy,
+}
+
+pub(crate) enum FollowFailure {
+    Busy,
+    Timeout,
+    Gateway(GatewayFailure),
+    Realtime(RealtimeError),
+}
+
+struct HttpFollowState {
+    registry: SubscriptionRegistry,
+    telemetry: Arc<RealtimeGatewayTelemetry>,
+    receiver: broadcast::Receiver<DeliveryEvent>,
+    subscription_id: SubscriptionId,
+    release_id: runku_core::ReleaseId,
+    authorized_until: TimestampMicros,
+    request_id: Option<RequestId>,
+    deadline: Instant,
+    cancellation: CancellationToken,
+    done: bool,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for HttpFollowState {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if self.registry.remove(self.subscription_id).is_ok() {
+            self.telemetry.removals.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 struct ActiveSubscription {

@@ -14,8 +14,8 @@ mod dispatcher;
 mod registry;
 
 pub use dispatcher::{
-    ChangeDispatcher, DispatcherConfig, DispatcherError, DispatcherTelemetrySnapshot, PollOutcome,
-    SubscriptionRunFailure, SubscriptionRunner,
+    ChangeDispatcher, CommittedChange, DispatcherConfig, DispatcherError,
+    DispatcherTelemetrySnapshot, PollOutcome, SubscriptionRunFailure, SubscriptionRunner,
 };
 pub use registry::{
     DeliveryEvent, RegistryConfig, RegistryTelemetrySnapshot, RerunTicket, SubscriptionHandle,

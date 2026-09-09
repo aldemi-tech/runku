@@ -2,7 +2,24 @@
 
 All notable changes are documented in this file.
 
-## 0.5.3 candidate - 2026-09-08
+## 0.5.4 candidate - 2026-09-09
+
+### Added
+
+- Added `POST /v1/query/follow`, an HTTP NDJSON transport over the existing authoritative Realtime
+  Query dependency registry for proxies that cannot preserve a WebSocket upgrade.
+- Added Management `POST .../data/query/follow`, which streams the initial bounded logical page and
+  reruns only after committed changes to the selected table. Authorization is rechecked during the
+  bounded stream; lag returns a fresh authoritative resync page.
+
+### Compatibility and publication
+
+- Both routes are additive. Existing `/v1/query`, `/v1/realtime`, and Management `/data/query`
+  clients retain their current contracts and persisted data requires no migration.
+- This source state is an unpublished `0.5.4` candidate. No npm package, OCI image, Git tag, or
+  GitHub Release exists until the fresh release-owner approval gate is satisfied.
+
+## 0.5.3 - 2026-09-09
 
 ### Added
 
@@ -33,8 +50,8 @@ All notable changes are documented in this file.
   schemas is unsupported.
 - The index catalog emits its existing v1 bytes when all indexes are ordered and v2 only when a
   search index is present. Existing index artifacts remain byte-identical.
-- This source state is an unpublished `0.5.3` candidate. No npm package, OCI image, Git tag, or
-  GitHub Release exists until the fresh release-owner approval gate is satisfied.
+- Version `0.5.3` was published as one coordinated npm, OCI, native archive, self-host archive, Git
+  tag, and GitHub Release distribution.
 - Local PostgreSQL/YugabyteDB, package, runtime, documentation, security, and optimized CLI evidence
   is retained in
   [`docs/maintainers/v0.5.3-candidate-evidence.md`](docs/maintainers/v0.5.3-candidate-evidence.md).

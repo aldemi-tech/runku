@@ -20,8 +20,8 @@ use axum::{
 };
 use futures_util::stream;
 use runku_core::{
-    EnvironmentId, EnvironmentScope, OperationId, OperatorInvitationId, OperatorSessionId,
-    ProjectId,
+    CodeTarget, EnvironmentId, EnvironmentScope, OperationId, OperatorInvitationId,
+    OperatorSessionId, ProjectId,
 };
 use runku_platform_identity::{
     AccessScope, AccessToken, DeviceName, ExternalOperatorIdentity, IdempotentInvitationResult,
@@ -36,7 +36,7 @@ use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 use tokio::{
     net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore, broadcast},
 };
 use zeroize::Zeroizing;
 
@@ -437,6 +437,10 @@ pub fn build_management_router_with_products(
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/data/query",
             post(product_data_query).layer(DefaultBodyLimit::max(MAX_DATA_ADMIN_BODY_BYTES)),
+        )
+        .route(
+            "/v1/projects/{project_id}/environments/{environment_id}/data/query/follow",
+            post(product_data_follow).layer(DefaultBodyLimit::max(MAX_DATA_ADMIN_BODY_BYTES)),
         )
         .route(
             "/v1/projects/{project_id}/environments/{environment_id}/data/documents/{table}",
@@ -2355,6 +2359,202 @@ async fn product_data_query(
         Ok(result) => json(StatusCode::OK, &result, true),
         Err(error) => product_failure(error),
     }
+}
+
+struct DataFollowState {
+    identity: Arc<PlatformIdentityService>,
+    product: Arc<dyn ManagementProduct>,
+    token: Zeroizing<String>,
+    request: ManagementDataQuery,
+    table_id: String,
+    receiver: broadcast::Receiver<runku_realtime::CommittedChange>,
+    initial: Option<crate::ManagementDataPage>,
+    last_snapshot_sequence: String,
+    started: tokio::time::Instant,
+    next_authorization_check: tokio::time::Instant,
+    done: bool,
+    _permit: OwnedSemaphorePermit,
+}
+
+async fn product_data_follow(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((project, environment)): Path<(String, String)>,
+    Json(request): Json<ManagementDataQuery>,
+) -> Response {
+    if !matches!(
+        request.target.parse::<CodeTarget>(),
+        Ok(CodeTarget::Release(_))
+    ) {
+        return product_failure(ManagementProductError::Invalid);
+    }
+    let Ok(permit) = state.admission.clone().try_acquire_owned() else {
+        return failure(PlatformIdentityError::Unavailable);
+    };
+    let (product, _) = match product_context(
+        &state,
+        &headers,
+        &project,
+        &environment,
+        PlatformCapability::DataRead,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let token = match bearer(&headers) {
+        Ok(token) => Zeroizing::new(token),
+        Err(error) => return failure(error),
+    };
+    let changes = match product.data_changes(&request).await {
+        Ok(changes) => changes,
+        Err(error) => return product_failure(error),
+    };
+    let initial = match product.data_query(&request).await {
+        Ok(page) => page,
+        Err(error) => return product_failure(error),
+    };
+    let last_snapshot_sequence = initial.snapshot_sequence.clone();
+    let started = tokio::time::Instant::now();
+    let stream_state = DataFollowState {
+        identity: state.identity.clone(),
+        product,
+        token,
+        request,
+        table_id: changes.table_id,
+        receiver: changes.receiver,
+        initial: Some(initial),
+        last_snapshot_sequence,
+        started,
+        next_authorization_check: started + std::time::Duration::from_secs(15),
+        done: false,
+        _permit: permit,
+    };
+    let body_stream = stream::unfold(stream_state, |mut current| async move {
+        if current.done || current.started.elapsed() >= std::time::Duration::from_secs(3_600) {
+            return None;
+        }
+        if let Some(page) = current.initial.take() {
+            return data_follow_item(current, data_follow_state_frame(page, false));
+        }
+        loop {
+            if current.started.elapsed() >= std::time::Duration::from_secs(3_600) {
+                return None;
+            }
+            let delivery =
+                tokio::time::timeout(std::time::Duration::from_secs(15), current.receiver.recv())
+                    .await;
+            if tokio::time::Instant::now() >= current.next_authorization_check {
+                if !data_follow_authorized(&current).await {
+                    current.done = true;
+                    return data_follow_item(
+                        current,
+                        serde_json::json!({
+                            "version": 1,
+                            "type": "error",
+                            "code": "PLATFORM_UNAUTHENTICATED",
+                            "retryable": false
+                        }),
+                    );
+                }
+                current.next_authorization_check =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            }
+            let resync = match delivery {
+                Err(_) => {
+                    return data_follow_item(
+                        current,
+                        serde_json::json!({ "version": 1, "type": "heartbeat" }),
+                    );
+                }
+                Ok(Ok(change)) => {
+                    if !change
+                        .tables
+                        .iter()
+                        .any(|table| table.to_string() == current.table_id)
+                    {
+                        continue;
+                    }
+                    false
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => true,
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                    current.done = true;
+                    return data_follow_item(
+                        current,
+                        serde_json::json!({
+                            "version": 1,
+                            "type": "error",
+                            "code": "PRODUCT_DATA_STREAM_UNAVAILABLE",
+                            "retryable": true
+                        }),
+                    );
+                }
+            };
+            match current.product.data_query(&current.request).await {
+                Ok(page) => {
+                    if page.snapshot_sequence == current.last_snapshot_sequence {
+                        continue;
+                    }
+                    current.last_snapshot_sequence = page.snapshot_sequence.clone();
+                    return data_follow_item(current, data_follow_state_frame(page, resync));
+                }
+                Err(_) => {
+                    current.done = true;
+                    return data_follow_item(
+                        current,
+                        serde_json::json!({
+                            "version": 1,
+                            "type": "error",
+                            "code": "PRODUCT_DATA_STREAM_UNAVAILABLE",
+                            "retryable": true
+                        }),
+                    );
+                }
+            }
+        }
+    });
+    let mut response = Response::new(Body::from_stream(body_stream));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn data_follow_state_frame(page: crate::ManagementDataPage, resync: bool) -> serde_json::Value {
+    serde_json::json!({ "version": 1, "type": "state", "resync": resync, "page": page })
+}
+
+fn data_follow_item(
+    current: DataFollowState,
+    frame: serde_json::Value,
+) -> Option<(Result<Bytes, Infallible>, DataFollowState)> {
+    let mut bytes = serde_json::to_vec(&frame).ok()?;
+    bytes.push(b'\n');
+    Some((Ok(Bytes::from(bytes)), current))
+}
+
+async fn data_follow_authorized(current: &DataFollowState) -> bool {
+    let Ok(token) = AccessToken::from_str(&current.token) else {
+        return false;
+    };
+    current
+        .identity
+        .authenticate(&token, now())
+        .await
+        .and_then(|context| {
+            context.authorize(
+                AccessScope::Environment(current.product.scope()),
+                PlatformCapability::DataRead,
+            )
+        })
+        .is_ok()
 }
 
 async fn product_data_insert(

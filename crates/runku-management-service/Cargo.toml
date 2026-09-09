@@ -17,6 +17,7 @@ runku-identity = { path = "../runku-identity" }
 runku-identity-provider = { path = "../runku-identity-provider" }
 runku-platform-identity = { path = "../runku-platform-identity" }
 runku-protocol = { path = "../runku-protocol" }
+runku-realtime = { path = "../runku-realtime" }
 runku-value = { path = "../runku-value" }
 serde.workspace = true
 serde_json.workspace = true
@@ -27,6 +28,7 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+runku-data = { path = "../runku-data" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower.workspace = true

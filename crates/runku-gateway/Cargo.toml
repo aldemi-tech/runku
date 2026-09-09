@@ -35,6 +35,8 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
+reqwest.workspace = true
 runku-data-sqlite = { path = "../runku-data-sqlite" }
 runku-execution-queue = { path = "../runku-execution-queue" }
 runku-identity-repository = { path = "../runku-identity-repository" }

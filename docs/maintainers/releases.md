@@ -186,9 +186,9 @@ the same distinction between Product conformance, hosted artifact completion, an
 The local-only `0.5.2` preparation record is
 [`v0.5.2-candidate-evidence.md`](v0.5.2-candidate-evidence.md); it explicitly does not qualify or
 authorize a remote image or coordinated publication.
-The local `0.5.3` queryable-data and database campaign is recorded in
-[`v0.5.3-candidate-evidence.md`](v0.5.3-candidate-evidence.md); its remaining hosted artifact gates
-and publication boundary are explicit.
+The published `0.5.3` queryable-data and database campaign is recorded in
+[`v0.5.3-candidate-evidence.md`](v0.5.3-candidate-evidence.md). The additive HTTP realtime work is
+being prepared separately as `0.5.4` and requires its own fresh publication approval.
 
 ## Trigger and workflow
 

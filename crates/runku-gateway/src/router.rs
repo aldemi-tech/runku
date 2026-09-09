@@ -148,7 +148,9 @@ fn build_router_inner(
         .route("/v1/mutation", post(mutation).options(preflight))
         .route("/v1/action", post(action).options(preflight));
     if state.realtime.is_some() {
-        router = router.route("/v1/realtime", get(realtime_upgrade));
+        router = router
+            .route("/v1/realtime", get(realtime_upgrade))
+            .route("/v1/query/follow", post(query_follow).options(preflight));
     }
     if state.files.is_some() {
         let file_routes = Router::new()
@@ -521,6 +523,72 @@ async fn query(
         decode_query_call_v1(bytes).map(InvokeCallV1::Query)
     })
     .await
+}
+
+async fn query_follow(
+    State(state): State<GatewayState>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(cancellation): Extension<CancellationToken>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let Some(realtime) = state.realtime else {
+        return protocol_failure(request_id, ProtocolError::InvalidRequest);
+    };
+    if !valid_content_type(&headers) || headers.contains_key(header::CONTENT_ENCODING) {
+        return protocol_failure(request_id, ProtocolError::InvalidRequest);
+    }
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => {
+            let error = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                ProtocolError::LimitExceeded
+            } else {
+                ProtocolError::InvalidRequest
+            };
+            return protocol_failure(request_id, error);
+        }
+    };
+    let call = match decode_query_call_v1(&body) {
+        Ok(call) => call,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    let credentials = match parse_credentials(&headers) {
+        Ok(credentials) => credentials,
+        Err(error) => return protocol_failure(request_id, error),
+    };
+    match realtime
+        .follow(
+            request_id,
+            credentials,
+            call.target,
+            call.function,
+            call.arguments,
+            cancellation,
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(crate::websocket::FollowFailure::Busy) => public_failure(
+            request_id,
+            public_error(ErrorClassV1::Busy, "REALTIME_BUSY", true),
+        ),
+        Err(crate::websocket::FollowFailure::Timeout) => public_failure(
+            request_id,
+            public_error(ErrorClassV1::Timeout, "REALTIME_COMMAND_TIMEOUT", true),
+        ),
+        Err(crate::websocket::FollowFailure::Gateway(GatewayFailure {
+            error,
+            invocation_id,
+        })) => invocation_id.map_or_else(
+            || public_failure(request_id, error),
+            |invocation_id| invocation_response(public_failure(request_id, error), invocation_id),
+        ),
+        Err(crate::websocket::FollowFailure::Realtime(error)) => public_failure(
+            request_id,
+            public_error(ErrorClassV1::Internal, error.code(), error.retryable()),
+        ),
+    }
 }
 
 async fn mutation(

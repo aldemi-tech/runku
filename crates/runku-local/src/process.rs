@@ -46,7 +46,8 @@ use runku_observability::{
     OperationalLogSink, SqlLogRepository,
 };
 use runku_realtime::{
-    ChangeDispatcher, DispatcherConfig, RegistryConfig, SubscriptionRegistry, SubscriptionRunner,
+    ChangeDispatcher, CommittedChange, DispatcherConfig, RegistryConfig, SubscriptionRegistry,
+    SubscriptionRunner,
 };
 use runku_release_repository::{RepositoryConfig, SqlReleaseRepository};
 use runku_releases::{
@@ -55,7 +56,11 @@ use runku_releases::{
 use runku_runtime::{ConfigurationRead, RuntimeLimits, RuntimeSupervisor};
 use runku_value::TimestampMicros;
 use thiserror::Error;
-use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, watch},
+    task::JoinHandle,
+};
 
 use crate::{
     LocalProjectState, LocalStateError, load_local, load_local_auth_config,
@@ -337,6 +342,7 @@ pub struct LocalProcess {
     service: Arc<ProductInvocationService>,
     logical_store: Arc<dyn LogicalStore>,
     registry: SubscriptionRegistry,
+    change_delivery: broadcast::Sender<CommittedChange>,
     runtime: RuntimeSupervisor,
     ready: Arc<AtomicBool>,
     telemetry: Arc<LocalProcessTelemetry>,
@@ -724,6 +730,7 @@ impl LocalProcess {
         ));
 
         let subscription_runner: Arc<dyn SubscriptionRunner> = service.clone();
+        let (change_delivery, _) = broadcast::channel(256);
         let dispatcher = ChangeDispatcher::new(
             Arc::clone(&logical_store),
             registry.clone(),
@@ -734,7 +741,8 @@ impl LocalProcess {
             WorkerId::generate(),
             DispatcherConfig::PRODUCTION,
         )
-        .map_err(|_| LocalProcessError::Composition)?;
+        .map_err(|_| LocalProcessError::Composition)?
+        .with_change_delivery(change_delivery.clone());
         tasks.push(spawn_realtime_loop(
             dispatcher,
             state.scope(),
@@ -821,6 +829,7 @@ impl LocalProcess {
             service,
             logical_store,
             registry,
+            change_delivery,
             runtime,
             ready,
             telemetry,
@@ -881,6 +890,14 @@ impl LocalProcess {
     #[must_use]
     pub const fn registry(&self) -> &SubscriptionRegistry {
         &self.registry
+    }
+
+    /// Subscribes to bounded committed table-change hints emitted by the durable dispatcher.
+    ///
+    /// A lagged receiver must rerun its authoritative read; notifications are not a replay log.
+    #[must_use]
+    pub fn subscribe_changes(&self) -> broadcast::Receiver<CommittedChange> {
+        self.change_delivery.subscribe()
     }
 
     /// Runtime worker-pool telemetry.

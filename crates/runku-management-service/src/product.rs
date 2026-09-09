@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use runku_core::{EnvironmentScope, OperationId, OperatorId};
 use runku_protocol::WireValueV1;
+use runku_realtime::CommittedChange;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
 /// Public native-application OIDC settings used by `runku login --browser`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1302,6 +1304,17 @@ pub struct ManagementDataPage {
     pub next_cursor: Option<String>,
 }
 
+/// Process-local committed-change receiver for one logical Data query.
+///
+/// Notifications are bounded wake-ups rather than a replay log. A lagged consumer reruns the
+/// authoritative query and replaces its current page.
+pub struct ManagementDataChanges {
+    /// Stable logical Table identity selected by the request's effective schema.
+    pub table_id: String,
+    /// Bounded committed-change receiver shared with the Product realtime dispatcher.
+    pub receiver: broadcast::Receiver<CommittedChange>,
+}
+
 /// Insert request; the Document ID is derived deterministically from `Idempotency-Key`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2123,6 +2136,15 @@ pub trait ManagementProduct: std::fmt::Debug + Send + Sync {
         &self,
         request: &ManagementDataQuery,
     ) -> Result<ManagementDataPage, ManagementProductError> {
+        let _ = request;
+        Err(ManagementProductError::NotFound)
+    }
+
+    /// Opens a bounded committed-change signal for one logical Data query.
+    async fn data_changes(
+        &self,
+        request: &ManagementDataQuery,
+    ) -> Result<ManagementDataChanges, ManagementProductError> {
         let _ = request;
         Err(ManagementProductError::NotFound)
     }

@@ -6,13 +6,23 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use runku_core::{EnvironmentScope, WorkerId};
+use runku_core::{EnvironmentScope, TableId, WorkerId};
 use runku_data::{LogicalStore, OutboxConsumerName, OutboxCursor, StoreError};
 use runku_execution::{ExecutionError, QueryOutcome};
 use runku_value::TimestampMicros;
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 use crate::{ChangeImpact, RealtimeError, RerunTicket, SubscriptionRegistry, SubscriptionSpec};
+
+/// One committed Environment change projected for bounded administrative followers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedChange {
+    /// Durable outbox position represented by this notification.
+    pub cursor: OutboxCursor,
+    /// Deduplicated logical tables changed by the commit.
+    pub tables: Vec<TableId>,
+}
 
 /// Bounded durable dispatcher configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,6 +219,7 @@ pub struct ChangeDispatcher {
     consumer: OutboxConsumerName,
     worker_id: WorkerId,
     config: DispatcherConfig,
+    change_delivery: Option<broadcast::Sender<CommittedChange>>,
     telemetry: Arc<DispatcherTelemetry>,
 }
 
@@ -245,8 +256,19 @@ impl ChangeDispatcher {
             consumer,
             worker_id,
             config: config.validate()?,
+            change_delivery: None,
             telemetry: Arc::new(DispatcherTelemetry::default()),
         })
+    }
+
+    /// Attaches a bounded process-local projection of committed table changes.
+    ///
+    /// This is an advisory wake-up boundary. Durable cursor ownership and acknowledgement remain
+    /// with the dispatcher, and a lagging follower must rerun its authoritative query.
+    #[must_use]
+    pub fn with_change_delivery(mut self, delivery: broadcast::Sender<CommittedChange>) -> Self {
+        self.change_delivery = Some(delivery);
+        self
     }
 
     /// Retries eligible dirty subscriptions, claims one ordered batch, reruns impacts, then ACKs.
@@ -332,6 +354,19 @@ impl ChangeDispatcher {
                     return Err(DispatcherError::Realtime(error));
                 }
             };
+            if let Some(delivery) = &self.change_delivery {
+                let tables = impact
+                    .documents()
+                    .iter()
+                    .map(|document| document.table_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let _ = delivery.send(CommittedChange {
+                    cursor: event.cursor(),
+                    tables,
+                });
+            }
             tickets.extend(
                 self.registry
                     .mark_impacted(scope, event.cursor(), &impact, now)

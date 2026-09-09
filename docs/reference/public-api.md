@@ -17,6 +17,7 @@ The base URL is the Product/application origin exposed by Self-Hosted Runku, for
 | Method and path | Purpose | Authentication |
 |---|---|---|
 | `POST /v1/query` | invoke one public Query | Application Key; functional bearer when required |
+| `POST /v1/query/follow` | stream one Query's authoritative state as NDJSON | same as Query |
 | `POST /v1/mutation` | invoke one public Mutation | same, plus operation ID in body |
 | `POST /v1/action` | invoke one public Action | Application Key; functional bearer when required |
 | `GET /v1/realtime` | open Realtime WebSocket | credentials in protocol authentication message |
@@ -333,6 +334,18 @@ content type, range, and that the stream ends successfully. Grant tokens are cre
 them in query strings, logs, analytics, or persistent filenames.
 
 ## Realtime without an SDK
+
+For an HTTP-only transport, send the exact Query envelope and normal Query credentials to
+`POST /v1/query/follow` with `Accept: application/x-ndjson`. A successful response is an NDJSON
+stream whose `state`, `error`, and `resync_required` objects use the same version-1 server-message
+contract as the WebSocket protocol. The initial `state` has a request ID; later states keep the
+same subscription ID and increase `deliveryRevision`. Decode `value` as a canonical value and
+replace the local result; it is a state stream, not an event log.
+
+Bound each line and pending decoder buffer. On `resync_required`, stream termination, authorization
+expiry, or transport loss, discard continuity assumptions and create a fresh HTTP follow request.
+The server removes the subscription when the HTTP consumer disconnects. This route uses the same
+dependency registry and committed-outbox reruns as WebSocket Realtime; it is not polling.
 
 Connect to `wss://<product-origin>/v1/realtime` with WebSocket subprotocol
 `runku.realtime.v1`. The client must implement strict versioned JSON messages for authentication,

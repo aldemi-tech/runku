@@ -72,6 +72,10 @@ Management table queries reuse the Function query planner and its fixed limits: 
 stable physical table order, arbitrary unindexed filtering/sorting stops beyond 2,000 rows, and
 word search requires an explicit search index. The console cannot request raw SQL, name a physical
 table, widen the Environment scope, or turn a bounded fallback into an unrestricted scan.
+Management Data follow rechecks the operator session during its bounded HTTP stream and reruns only
+the already-authorized exact-scope query after a committed table notification. Public HTTP Query
+follow keeps application and functional identity checks identical to Query/WebSocket admission;
+disconnect, authorization expiry, lag, or resync removes continuity and the registry subscription.
 
 Archived logs retain the exact Project/Environment namespace in subjects, object paths, manifests,
 and queries. Serving and worker NATS identities are separate; remote NATS requires TLS and rejects

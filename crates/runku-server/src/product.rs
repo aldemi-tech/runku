@@ -72,8 +72,8 @@ use runku_management_service::{
     ManagementConfigurationResult, ManagementConfigurationSet, ManagementConfigurationSnapshot,
     ManagementCreatedApplicationClient, ManagementCreatedApplicationCredential,
     ManagementCronActivationResult, ManagementCronActivationSet, ManagementCronCatalog,
-    ManagementCronEntry, ManagementCronQuery, ManagementDataDeleteRequest, ManagementDataDocument,
-    ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
+    ManagementCronEntry, ManagementCronQuery, ManagementDataChanges, ManagementDataDeleteRequest,
+    ManagementDataDocument, ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
     ManagementDataQueryFilter, ManagementDataQueryOrder, ManagementDataReplaceRequest,
     ManagementDataWriteResult, ManagementDeliverySnapshot, ManagementEnvironment,
     ManagementEnvironmentConfiguration, ManagementEnvironmentCreate,
@@ -3022,6 +3022,33 @@ impl ManagementProduct for ProductAdapter {
         })
     }
 
+    async fn data_changes(
+        &self,
+        request: &ManagementDataQuery,
+    ) -> Result<ManagementDataChanges, ManagementProductError> {
+        let target = request
+            .target
+            .parse::<CodeTarget>()
+            .map_err(|_| ManagementProductError::Invalid)?;
+        if !matches!(target, CodeTarget::Release(_)) {
+            return Err(ManagementProductError::Invalid);
+        }
+        let catalog = self.effective_catalog(&request.target).await?;
+        let table = resolve_table(&catalog.schema, &request.table)?;
+        if table.mode != TableMode::Queryable {
+            return Err(ManagementProductError::QueryTableNotQueryable);
+        }
+        self.ensure_serving().await?;
+        let process = self.process.lock().await;
+        let process = process
+            .as_ref()
+            .ok_or(ManagementProductError::Unavailable)?;
+        Ok(ManagementDataChanges {
+            table_id: table.id.to_string(),
+            receiver: process.subscribe_changes(),
+        })
+    }
+
     async fn data_insert(
         &self,
         operation_id: OperationId,
@@ -5667,6 +5694,21 @@ export const basename = action({
         assert_eq!(logical_page.documents.len(), 1);
         assert!(!logical_page.truncated);
         assert!(logical_page.next_cursor.is_none());
+        assert!(matches!(
+            product
+                .data_changes(&ManagementDataQuery {
+                    target: "workspace:local".to_owned(),
+                    table: "notes".to_owned(),
+                    index: None,
+                    prefix: Vec::new(),
+                    filters: Vec::new(),
+                    order_by: Vec::new(),
+                    limit: 20,
+                    cursor: None,
+                })
+                .await,
+            Err(ManagementProductError::Invalid)
+        ));
 
         let replacement_operation = OperationId::generate();
         let replacement = value("second", 2);

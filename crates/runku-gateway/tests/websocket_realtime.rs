@@ -236,6 +236,22 @@ async fn receive(socket: &mut ClientSocket) -> Result<RealtimeServerMessageV1, B
     Ok(decode_realtime_server_v1(text.as_bytes())?)
 }
 
+async fn receive_http(
+    stream: &mut (impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin),
+    pending: &mut Vec<u8>,
+) -> Result<RealtimeServerMessageV1, Box<dyn Error>> {
+    loop {
+        if let Some(position) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = pending.drain(..=position).collect::<Vec<_>>();
+            return Ok(decode_realtime_server_v1(&line[..line.len() - 1])?);
+        }
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await?
+            .ok_or("HTTP stream closed")??;
+        pending.extend_from_slice(&chunk);
+    }
+}
+
 fn authenticate(request: RequestId) -> serde_json::Value {
     serde_json::json!({
         "type": "authenticate", "version": 1, "requestId": request,
@@ -249,6 +265,83 @@ fn subscribe(request: RequestId) -> serde_json::Value {
         "target": "channel:stable", "function": "messages.list",
         "arguments": {"type": "null"}
     })
+}
+
+#[tokio::test]
+async fn http_follow_streams_the_same_authoritative_query_states() -> Result<(), Box<dyn Error>> {
+    let (websocket_url, registry, realtime, server) = fixture(Duration::from_secs(2)).await?;
+    let url = websocket_url
+        .replace("ws://", "http://")
+        .replace("/v1/realtime", "/v1/query/follow");
+    let response = reqwest::Client::new()
+        .post(url)
+        .header("origin", "https://app.example")
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "version": 1,
+                "target": "channel:stable",
+                "function": "messages.list",
+                "arguments": { "type": "null" }
+            })
+            .to_string(),
+        )
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.headers().get(reqwest::header::CONTENT_TYPE),
+        Some(&reqwest::header::HeaderValue::from_static(
+            "application/x-ndjson"
+        )),
+    );
+    let mut stream = response.bytes_stream();
+    let mut pending = Vec::new();
+    let subscription_id = match receive_http(&mut stream, &mut pending).await? {
+        RealtimeServerMessageV1::State {
+            request_id: Some(_),
+            subscription_id,
+            delivery_revision: 1,
+            value: CanonicalValue::String(value),
+            ..
+        } if value == "initial" => subscription_id,
+        message => return Err(format!("unexpected initial HTTP state: {message:?}").into()),
+    };
+    let current = registry.subscribe(subscription_id)?.snapshot;
+    let impact = point_impact(&current.dependencies)?;
+    let tickets = registry.mark_impacted(
+        current.spec.scope,
+        OutboxCursor {
+            commit_sequence: 2,
+            event_id: OutboxEventId::generate(),
+        },
+        &impact,
+        TimestampMicros::new(2),
+    )?;
+    registry.complete_success(
+        tickets.first().ok_or("expected HTTP follow rerun")?,
+        QueryOutcome {
+            value: CanonicalValue::String("updated".to_owned()),
+            snapshot_sequence: Some(2),
+            dependencies: current.dependencies,
+        },
+    )?;
+    assert!(matches!(
+        receive_http(&mut stream, &mut pending).await?,
+        RealtimeServerMessageV1::State {
+            request_id: None,
+            subscription_id: id,
+            delivery_revision: 2,
+            value: CanonicalValue::String(value),
+            ..
+        } if id == subscription_id && value == "updated"
+    ));
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(registry.telemetry().subscriptions, 0);
+    assert_eq!(realtime.telemetry().removals, 1);
+    server.abort();
+    Ok(())
 }
 
 #[tokio::test]

@@ -3427,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "runku-cli"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -3765,7 +3765,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "bytes",
  "futures-util",
+ "reqwest",
  "runku-core",
  "runku-data",
  "runku-data-sqlite",
@@ -3912,10 +3914,12 @@ dependencies = [
  "axum",
  "futures-util",
  "runku-core",
+ "runku-data",
  "runku-identity",
  "runku-identity-provider",
  "runku-platform-identity",
  "runku-protocol",
+ "runku-realtime",
  "runku-value",
  "serde",
  "serde_json",
@@ -4165,7 +4169,7 @@ dependencies = [
 
 [[package]]
 name = "runku-server"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-nats",
  "async-trait",

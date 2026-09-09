@@ -12,27 +12,29 @@ use std::{
 use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, StatusCode, header},
+    http::{HeaderValue, Request, StatusCode, header},
 };
-use runku_core::{EnvironmentId, EnvironmentScope, OperationId, ProjectId};
+use futures_util::StreamExt as _;
+use runku_core::{EnvironmentId, EnvironmentScope, OperationId, OutboxEventId, ProjectId, TableId};
+use runku_data::OutboxCursor;
 use runku_management_service::{
     ExternalIdentityAuthenticator, ManagedEnrollmentKey, ManagementApplicationClientList,
     ManagementBucketPage, ManagementConfigurationAuditEntry, ManagementConfigurationDelete,
     ManagementConfigurationEntry, ManagementConfigurationHistory,
     ManagementConfigurationHistoryQuery, ManagementConfigurationResult, ManagementConfigurationSet,
     ManagementConfigurationSnapshot, ManagementCronActivationResult, ManagementCronActivationSet,
-    ManagementCronCatalog, ManagementCronQuery, ManagementDataDocument,
-    ManagementDataInsertRequest, ManagementDataWriteResult, ManagementEnvironment,
-    ManagementEnvironmentConfiguration, ManagementEnvironmentLifecycleChange,
-    ManagementEnvironmentResult, ManagementHealthComponent, ManagementHttpConfig,
-    ManagementHttpExposure, ManagementInstanceHealth, ManagementLogArchiveStatus,
-    ManagementLogPage, ManagementLogPruneRequest, ManagementLogPruneResult, ManagementLogQuery,
-    ManagementMetric, ManagementMetrics, ManagementObject, ManagementObjectDownload,
-    ManagementObjectPage, ManagementObjectPut, ManagementObjectResult, ManagementProduct,
-    ManagementProductError, ManagementReleaseOutcome, ManagementReleaseStatus,
-    ManagementResolvedTarget, ManagementScheduledPage, ManagementServingCompatibility,
-    ManagementServingRelease, ManagementWorkspacePublish, OidcClientConfiguration,
-    build_management_router, build_management_router_with_product,
+    ManagementCronCatalog, ManagementCronQuery, ManagementDataChanges, ManagementDataDocument,
+    ManagementDataInsertRequest, ManagementDataPage, ManagementDataQuery,
+    ManagementDataWriteResult, ManagementEnvironment, ManagementEnvironmentConfiguration,
+    ManagementEnvironmentLifecycleChange, ManagementEnvironmentResult, ManagementHealthComponent,
+    ManagementHttpConfig, ManagementHttpExposure, ManagementInstanceHealth,
+    ManagementLogArchiveStatus, ManagementLogPage, ManagementLogPruneRequest,
+    ManagementLogPruneResult, ManagementLogQuery, ManagementMetric, ManagementMetrics,
+    ManagementObject, ManagementObjectDownload, ManagementObjectPage, ManagementObjectPut,
+    ManagementObjectResult, ManagementProduct, ManagementProductError, ManagementReleaseOutcome,
+    ManagementReleaseStatus, ManagementResolvedTarget, ManagementScheduledPage,
+    ManagementServingCompatibility, ManagementServingRelease, ManagementWorkspacePublish,
+    OidcClientConfiguration, build_management_router, build_management_router_with_product,
     build_management_router_with_products,
 };
 use runku_platform_identity::{
@@ -41,8 +43,10 @@ use runku_platform_identity::{
     PlatformIdentityRepository, PlatformIdentityRepositoryConfig, PlatformIdentityService,
     SessionTokenPolicy, SqlPlatformIdentityRepository,
 };
+use runku_realtime::CommittedChange;
 use runku_value::TimestampMicros;
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 use tower::ServiceExt as _;
 
 #[derive(Debug)]
@@ -77,6 +81,7 @@ struct DataProbeProduct {
     environment_restores: AtomicUsize,
     configuration_reads: AtomicUsize,
     configuration_writes: AtomicUsize,
+    data_changes: broadcast::Sender<CommittedChange>,
 }
 
 fn lifecycle_environment(
@@ -482,6 +487,37 @@ impl ManagementProduct for DataProbeProduct {
     ) -> Result<ManagementDataDocument, ManagementProductError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         Err(ManagementProductError::Invalid)
+    }
+
+    async fn data_query(
+        &self,
+        request: &ManagementDataQuery,
+    ) -> Result<ManagementDataPage, ManagementProductError> {
+        let sequence = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(ManagementDataPage {
+            version: 2,
+            target: ManagementResolvedTarget {
+                requested: request.target.clone(),
+                resolved: "release:rel_00000000000000000000000001".to_owned(),
+                release_id: "rel_00000000000000000000000001".to_owned(),
+                serving_revision: 1,
+                schema_contract_hash: format!("sha256:{}", "a".repeat(64)),
+            },
+            snapshot_sequence: sequence.to_string(),
+            documents: Vec::new(),
+            truncated: false,
+            next_cursor: None,
+        })
+    }
+
+    async fn data_changes(
+        &self,
+        _request: &ManagementDataQuery,
+    ) -> Result<ManagementDataChanges, ManagementProductError> {
+        Ok(ManagementDataChanges {
+            table_id: "tbl_00000000000000000000000001".to_owned(),
+            receiver: self.data_changes.subscribe(),
+        })
     }
 
     async fn data_insert(
@@ -1190,6 +1226,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
             TimestampMicros::new(1_900_000_000_000_008),
         )
         .await?;
+    let (data_changes, _) = broadcast::channel(8);
     let product = Arc::new(DataProbeProduct {
         scope,
         reads: AtomicUsize::new(0),
@@ -1208,6 +1245,7 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         environment_restores: AtomicUsize::new(0),
         configuration_reads: AtomicUsize::new(0),
         configuration_writes: AtomicUsize::new(0),
+        data_changes,
     });
     let router = build_management_router_with_product(
         ManagementHttpConfig {
@@ -1229,6 +1267,11 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
     );
     let insert_path = format!(
         "/v1/projects/{}/environments/{}/data/documents/notes",
+        scope.project_id(),
+        scope.environment_id()
+    );
+    let data_follow_path = format!(
+        "/v1/projects/{}/environments/{}/data/query/follow",
         scope.project_id(),
         scope.environment_id()
     );
@@ -1489,6 +1532,60 @@ async fn console_product_http_enforces_independent_least_privilege_capabilities(
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(product.reads.load(Ordering::SeqCst), 1);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post(&data_follow_path)
+                .header(header::AUTHORIZATION, format!("Bearer {reader_access}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "target": "workspace:local", "table": "notes" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post(&data_follow_path)
+                .header(header::AUTHORIZATION, format!("Bearer {reader_access}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "target": "release:rel_00000000000000000000000001",
+                        "table": "notes"
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE),
+        Some(&HeaderValue::from_static("application/x-ndjson")),
+    );
+    let mut stream = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+        .await?
+        .ok_or("Data follow closed before initial state")??;
+    let first: Value = serde_json::from_slice(&first)?;
+    assert_eq!(first["type"], "state");
+    assert_eq!(first["page"]["snapshotSequence"], "2");
+    product.data_changes.send(CommittedChange {
+        cursor: OutboxCursor {
+            commit_sequence: 3,
+            event_id: OutboxEventId::generate(),
+        },
+        tables: vec![TableId::from_str("tbl_00000000000000000000000001")?],
+    })?;
+    let update = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+        .await?
+        .ok_or("Data follow closed before committed update")??;
+    let update: Value = serde_json::from_slice(&update)?;
+    assert_eq!(update["type"], "state");
+    assert_eq!(update["resync"], false);
+    assert_eq!(update["page"]["snapshotSequence"], "3");
+    drop(stream);
     let response = router.clone().oneshot(insert(reader_access)?).await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(product.writes.load(Ordering::SeqCst), 0);
