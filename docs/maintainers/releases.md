@@ -188,7 +188,8 @@ The local-only `0.5.2` preparation record is
 authorize a remote image or coordinated publication.
 The published `0.5.3` queryable-data and database campaign is recorded in
 [`v0.5.3-candidate-evidence.md`](v0.5.3-candidate-evidence.md). The additive HTTP realtime work is
-being prepared separately as `0.5.4` and requires its own fresh publication approval.
+recorded separately in [`v0.5.4-candidate-evidence.md`](v0.5.4-candidate-evidence.md) and requires
+its own fresh publication approval.
 
 ## Trigger and workflow
 
