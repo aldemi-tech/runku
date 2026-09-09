@@ -35,6 +35,9 @@ All notable changes are documented in this file.
   search index is present. Existing index artifacts remain byte-identical.
 - This source state is an unpublished `0.5.3` candidate. No npm package, OCI image, Git tag, or
   GitHub Release exists until the fresh release-owner approval gate is satisfied.
+- Local PostgreSQL/YugabyteDB, package, runtime, documentation, security, and optimized CLI evidence
+  is retained in
+  [`docs/maintainers/v0.5.3-candidate-evidence.md`](docs/maintainers/v0.5.3-candidate-evidence.md).
 
 ## 0.5.2 candidate - 2026-09-08
 
