@@ -52,6 +52,34 @@ fn canonical_database_names_pass_real_configuration_check() -> Result<(), Box<dy
 }
 
 #[test]
+fn shared_platform_database_is_an_explicit_valid_opt_in() -> Result<(), Box<dyn std::error::Error>>
+{
+    let product = TempDir::new()?;
+    let output = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PLATFORM_DATABASE_URL", PLATFORM_URL),
+        ("RUNKU_PLATFORM_DATABASE_ISOLATION", "shared"),
+        (
+            "RUNKU_PRODUCT_ROOT",
+            product.path().to_str().ok_or("non-UTF-8 temp path")?,
+        ),
+    ])?;
+    assert!(output.status.success());
+
+    let invalid = check(&[
+        ("RUNKU_IDENTITY_DATABASE_URL", IDENTITY_URL),
+        ("RUNKU_PLATFORM_DATABASE_URL", PLATFORM_URL),
+        ("RUNKU_PLATFORM_DATABASE_ISOLATION", "automatic"),
+        (
+            "RUNKU_PRODUCT_ROOT",
+            product.path().to_str().ok_or("non-UTF-8 temp path")?,
+        ),
+    ])?;
+    assert_error(&invalid, "SERVER_PRODUCT_DATABASE_ISOLATION_INVALID");
+    Ok(())
+}
+
+#[test]
 fn legacy_database_names_remain_accepted() -> Result<(), Box<dyn std::error::Error>> {
     let product = TempDir::new()?;
     let output = check(&[

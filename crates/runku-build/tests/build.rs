@@ -10,10 +10,10 @@ use runku_build::{BuildError, BuildMetadata, BuildOutput, build_project, source_
 use runku_contracts::{Contract, decode_contract, decode_document_schema};
 use runku_core::{BuildId, ProjectId, ReleaseId};
 use runku_releases::{
-    ArtifactFormat, Capability, FunctionType, RuntimeClass, decode_node_esm_bundle,
-    decode_release_manifest, decode_safe_esm_bundle,
+    ArtifactFormat, AuthPolicy, Capability, FunctionType, FunctionVisibility, RuntimeClass,
+    decode_node_esm_bundle, decode_release_manifest, decode_safe_esm_bundle,
 };
-use runku_schema::decode_schema_catalog;
+use runku_schema::{IndexKind, decode_schema_catalog};
 use runku_value::TimestampMicros;
 use tempfile::tempdir;
 use ulid::Ulid;
@@ -24,13 +24,15 @@ const SCHEMA: &str = r#"
 import { defineSchema, defineTable } from "@runku/server"
 import { message } from "./model"
 export default defineSchema({
-  messages: defineTable(message).index("by_rank", ["rank"]),
+  messages: defineTable(message, { mode: "queryable" })
+    .index("by_rank", ["rank"])
+    .searchIndex("body_words", "body"),
 })
 "#;
 
 const MODEL: &str = r#"
 import { v } from "@runku/server"
-export const body = v.string({ minBytes: 1, maxBytes: 200 })
+export const body = v.string({ minLength: 1, maxLength: 200 })
 export const message = v.object({
   body,
   rank: v.int64({ minimum: 0, maximum: 100 }),
@@ -49,7 +51,7 @@ import schema from "./schema"
 import { echoInput, insertArguments, message } from "./model"
 export const echo = query({
   auth: "none", visibility: "public", capabilities: ["db:read"],
-  args: echoInput, returns: v.string({ minBytes: 1, maxBytes: 200 }),
+  args: echoInput, returns: v.string({ minLength: 1, maxLength: 200 }),
   async handler(_ctx, input) { return input.body },
 })
 export const insert = mutation({
@@ -112,6 +114,7 @@ fn assert_generated_references(output: &BuildOutput) -> TestResult {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() -> TestResult {
     let directory = tempdir()?;
     prepare(directory.path())?;
@@ -159,12 +162,24 @@ fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() 
     let schema = decode_document_schema(schema.as_bytes())?;
     assert_eq!(schema.tables.len(), 1);
     assert_eq!(schema.tables[0].name, "messages");
+    assert_eq!(schema.tables[0].mode, runku_contracts::TableMode::Queryable);
     let indexes = bundle
         .resource(manifest.index_contract_hash)
         .ok_or("missing index catalog")?;
     let indexes = decode_schema_catalog(indexes.as_bytes())?;
-    assert_eq!(indexes.indexes().len(), 1);
-    assert_eq!(indexes.indexes()[0].name(), "by_rank");
+    assert_eq!(indexes.indexes().len(), 2);
+    assert!(
+        indexes
+            .indexes()
+            .iter()
+            .any(|index| { index.name() == "by_rank" && index.kind() == IndexKind::Ordered })
+    );
+    assert!(
+        indexes
+            .indexes()
+            .iter()
+            .any(|index| { index.name() == "body_words" && index.kind() == IndexKind::Search })
+    );
     for function in &manifest.functions {
         decode_contract(
             bundle
@@ -210,6 +225,61 @@ fn declarations_generate_functions_contracts_schema_indexes_and_shared_module() 
         output.source_fingerprint,
         source_fingerprint(directory.path(), Path::new("runku"))?
     );
+    Ok(())
+}
+
+#[test]
+fn declarations_apply_safe_defaults_and_key_value_mode() -> TestResult {
+    let directory = tempdir()?;
+    std::fs::create_dir(directory.path().join(".runku"))?;
+    std::fs::create_dir(directory.path().join("runku"))?;
+    std::fs::write(
+        directory.path().join("runku/schema.ts"),
+        r#"import { defineSchema, defineTable, v } from "@runku/server"
+export default defineSchema({ cache: defineTable(v.any(), { mode: "keyValue" }) })"#,
+    )?;
+    std::fs::write(
+        directory.path().join("runku/functions.ts"),
+        r#"import { query } from "@runku/server"
+export const ping = query({ handler() { return null } })"#,
+    )?;
+    let output = build_project(
+        directory.path(),
+        Path::new("runku"),
+        project(),
+        metadata(12),
+    )?;
+    let manifest = decode_release_manifest(&std::fs::read(&output.manifest_path)?)?;
+    let bundle = decode_safe_esm_bundle(&std::fs::read(&output.artifact_path)?)?;
+    let function = &manifest.functions[0];
+    assert_eq!(function.auth_policy, AuthPolicy::None);
+    assert_eq!(function.visibility, FunctionVisibility::Public);
+    assert!(function.capabilities.is_empty());
+    assert_eq!(
+        decode_contract(
+            bundle
+                .resource(function.arguments_contract_hash)
+                .ok_or("missing arguments")?
+                .as_bytes()
+        )?,
+        Contract::Null
+    );
+    assert_eq!(
+        decode_contract(
+            bundle
+                .resource(function.result_contract_hash)
+                .ok_or("missing result")?
+                .as_bytes()
+        )?,
+        Contract::Any
+    );
+    let schema = decode_document_schema(
+        bundle
+            .resource(manifest.schema_contract_hash)
+            .ok_or("missing schema")?
+            .as_bytes(),
+    )?;
+    assert_eq!(schema.tables[0].mode, runku_contracts::TableMode::KeyValue);
     Ok(())
 }
 
@@ -350,6 +420,7 @@ fn fingerprint_tracks_add_change_remove_and_is_stable() -> TestResult {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn invalid_declarations_imports_paths_and_node_fail_closed() -> TestResult {
     let cases = [
         FUNCTIONS.replace(
@@ -391,6 +462,36 @@ fn invalid_declarations_imports_paths_and_node_fail_closed() -> TestResult {
             Path::new("runku"),
             project(),
             metadata(175),
+        ),
+        Err(BuildError::InvalidConfig),
+    );
+    let directory = tempdir()?;
+    prepare(directory.path())?;
+    std::fs::write(
+        directory.path().join("runku/model.ts"),
+        MODEL.replace("maxLength: 200", "maxBytes: 200"),
+    )?;
+    assert_eq!(
+        build_project(
+            directory.path(),
+            Path::new("runku"),
+            project(),
+            metadata(177),
+        ),
+        Err(BuildError::InvalidConfig),
+    );
+    let directory = tempdir()?;
+    prepare(directory.path())?;
+    std::fs::write(
+        directory.path().join("runku/schema.ts"),
+        SCHEMA.replace("\"body_words\", \"body\"", "\"body_words\", \"rank\""),
+    )?;
+    assert_eq!(
+        build_project(
+            directory.path(),
+            Path::new("runku"),
+            project(),
+            metadata(178),
         ),
         Err(BuildError::InvalidConfig),
     );

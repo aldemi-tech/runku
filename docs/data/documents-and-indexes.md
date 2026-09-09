@@ -163,8 +163,8 @@ the Environment; ordinary business transactions should be much smaller.
 
 ```ts
 export const order = v.object({
-  accountId: v.string({ minBytes: 1, maxBytes: 128 }),
-  state: v.string({ minBytes: 1, maxBytes: 32 }),
+  accountId: v.string({ minLength: 1, maxLength: 128 }),
+  state: v.string({ minLength: 1, maxLength: 32 }),
   createdAt: v.timestamp(),
   totalCents: v.int64({ minimum: 0 }),
 })
@@ -176,6 +176,13 @@ export default defineSchema({
     .index("by_created_at", ["createdAt"]),
 })
 ```
+
+Tables default to `mode: "queryable"`. Set `{ mode: "keyValue" }` for caches or lookup-only data
+that must expose only `get`/write-by-ID operations. Switching later to `queryable` keeps the same
+documents and backfills only the declared projections before the new Release becomes servable.
+There is no second copy or table-to-table document migration. A Release with pending projections
+remains `building`; repeating the same release operation resumes a bounded, idempotent batch until
+it becomes `servable`, so an immediate rollout is intentionally unavailable while backfill remains.
 
 `v.union` requires at least two variants. For a fixed string enum in the current validator surface,
 use a bounded string and validate its allowed values in the Function, or model the alternatives as
@@ -202,6 +209,54 @@ Bound strings/bytes used in indexes much more tightly than the document maximum.
 
 Indexes are sparse. If any indexed property is absent, Runku emits no entry for that index. An
 explicit `null` is a present, indexable value.
+
+## Query a table
+
+Application code uses one contract for indexed and bounded-scan execution:
+
+```ts
+const first = await ctx.db.query(schema.tables.notes)
+
+const page = await ctx.db.query(schema.tables.notes, {
+  where: [{ field: "ownerId", value: principal.id }], // `eq` is the default operator
+  orderBy: [{ field: "createdAt", direction: "desc" }],
+  limit: 100,
+  cursor: input.cursor,
+})
+```
+
+The defaults are `where: []`, `orderBy: []`, `limit: 100`, and no cursor. An empty query—or the
+equivalent explicit `$createdAt DESC, $id DESC` order—uses the physical table index and a keyset
+cursor, so it can page a table with millions of rows without sorting the whole table. For a
+filtered/sorted query, the planner automatically uses a matching logical index whose equality
+prefix and ordered suffix cover the request. `gt`, `gte`, `lt`, and `lte` on the first ordered
+suffix field narrow that index range rather than scanning the complete prefix. Otherwise it
+evaluates at most 2,000 documents and either returns the result or
+`DATA_QUERY_REQUIRES_INDEX`. The public maximum page size is 200.
+
+Supported predicates are `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `contains`, and `search`.
+`contains` means a case-sensitive string substring or exact array membership and may use the
+bounded fallback. `search` requires a declared word index:
+
+```ts
+export const call = v.object({
+  transcript: v.string({ maxLength: 100_000 }),
+})
+
+export default defineSchema({
+  calls: defineTable(call).searchIndex("transcript_words", "transcript"),
+})
+
+const intent = await ctx.db.query(schema.tables.calls, {
+  where: [{ field: "transcript", operator: "search", value: "comprar" }],
+  limit: 100,
+})
+```
+
+Search lowercases and splits Unicode text on non-alphanumeric characters, indexes distinct words,
+and performs a whole-word match. It supports up to 4,096 distinct words per indexed document.
+Search results have stable document-ID order (or explicit `$id` asc/desc); phrase, stemming,
+substring, relevance, and arbitrary secondary sorts require a dedicated future search facility.
 
 ## Scan an index
 
@@ -233,7 +288,7 @@ const page = await ctx.db.scan(schema.indexes.rooms.by_name, {
 `kind` is `inclusive` or `exclusive`; `key` is the canonical `Uint8Array` returned by an index
 entry.
 
-### Current Function scan limitation
+### Low-level scan limitation
 
 The current `@runku/server` API does **not** expose a public encoder that turns domain values such
 as `[accountId, state]` into an index key. It also does not expose a `(key, documentId)` continuation
@@ -244,10 +299,9 @@ token for duplicate keys. Consequently:
 - resuming after a key shared by multiple documents can skip remaining duplicates;
 - Mutation does not support index scan at all.
 
-Do not present `scan` as a general SQL-style query builder. Prefer deterministic document IDs for
-exact lookup. For production list/search features that require domain-value prefix queries or
-stable duplicate pagination, treat the missing public key/cursor helper as a current product limit
-and design an explicit lookup-document model until that API is shipped.
+`scan` remains a low-level encoded-key API. Prefer `query`, which accepts domain values, selects a
+logical index automatically, preserves duplicates with an opaque cursor, and falls back only within
+the documented bounded threshold.
 
 ### Scan limits
 
@@ -300,6 +354,12 @@ An Environment may temporarily serve multiple compatible Releases. A safe sequen
 
 Channel rollback does not undo a document written by newer code. Keep the read contract backward
 compatible for the complete rollout and rollback window.
+
+Runku retains every registered index projection needed for dual writes across building and active
+Release views. Version 0.5.3 does not automatically garbage-collect an index after its last Release
+is retired; removing a declaration therefore stops new code from selecting it but does not yet
+reclaim its existing projection. Budget that storage/write amplification and use a later explicit,
+fenced cleanup facility rather than deleting internal rows manually.
 
 ## Application design checklist
 

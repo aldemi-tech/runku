@@ -1,11 +1,14 @@
 # Data and realtime
 
 Runku exposes a logical document model instead of direct SQL. The same contract is implemented by
-SQLite for local development and PostgreSQL for production-oriented execution.
+SQLite for local development, PostgreSQL for production-oriented execution, and YugabyteDB YSQL
+for an operator-managed distributed SQL deployment.
 
 ## Schema and values
 
-The TypeScript schema defines tables, document fields, validators, and logical indexes. Generated
+The TypeScript schema defines tables, document fields, validators, table access mode, and logical
+indexes. `defineTable(...)` defaults to `mode: "queryable"`; `mode: "keyValue"` keeps only exact
+document-ID operations and rejects table queries. Generated
 types associate document IDs with their table and reject unknown Function names or invalid
 arguments before a request is sent.
 
@@ -67,6 +70,19 @@ Logical indexes encode ordered compound keys consistently across storage adapter
 old and new index entries from the trusted schema rather than accepting index keys from application
 code.
 
+`ctx.db.query(table, options?)` is the common entry point whether an index or a bounded scan serves
+the request. With no options it returns 100 documents in stable `createdAt DESC, documentId DESC`
+keyset pages using the physical table-scan index, so its cost does not grow with millions of older
+rows. Equality-prefix plus `orderBy` queries automatically use a matching declared `.index(...)`.
+Other filters and sorts may scan at most 2,000 documents; a larger table returns
+`DATA_QUERY_REQUIRES_INDEX` instead of causing an unbounded production scan.
+
+Literal `contains` is available for bounded substring/array filtering. Long natural-language text
+uses an explicit `.searchIndex("transcript_words", "transcript")` and the `search` operator. That
+projection stores at most 4,096 distinct normalized Unicode words per document and answers a
+case-insensitive whole-word match without reading the table. It is deliberately not SQL `LIKE`,
+stemming, phrase search, or relevance ranking.
+
 ## Realtime
 
 A subscription executes a Query and registers its dependency set. Committed outbox events are
@@ -87,14 +103,18 @@ Mutation reads establish an optimistic read-set. Replace/delete require exact re
 re-runs business logic from a fresh snapshot within bounded attempts. An operation ID identifies
 one Mutation intent across retry/replay and cannot be reused for different arguments.
 
-Index scans use explicit bounds and a bounded limit. Schema evolution must make an index ready
-before code assumes it and retire it only after live Releases/subscriptions/schedules no longer
-reference it.
+Index scans use explicit bounds and a bounded limit. Adding an ordered/search index registers a
+durable `building` projection, backfills it in bounded resumable batches, and keeps concurrent
+mutations dual-writing every registered projection. A Release remains `BUILDING` until all of its
+indexes are `ready`; it cannot be promoted early. Repeating the release operation resumes work.
+Removing an index from a newer schema is non-destructive: older eligible Releases and rollback keep
+their existing projection. Reusing an index identity for a different definition fails closed; add
+a new index name instead.
 
-The current Release coexistence gate keeps index contracts byte-identical; persisted
-building/ready/backfill state is not yet implemented. Optional document-field evolution is
-supported, but adding/changing an index remains a blocked rollout rather than an inferred safe
-operation.
+Changing a table from `keyValue` to `queryable` does not copy documents. Both modes share the same
+canonical document substrate; only newly declared projections require backfill. Each Release reads
+through its own schema view, and replacement preserves fields that are unknown to that view, so
+compatible old/new Releases can serve the same Environment concurrently.
 
 ## Realtime delivery model
 
@@ -107,9 +127,10 @@ and must be idempotent. Lag delays Realtime but cannot expose uncommitted state.
 
 ## Storage and recovery
 
-SQLite is the local single-process adapter. PostgreSQL is the production-oriented adapter for
-concurrency/distributed claims. Both pass the same logical conformance contract; Function code does
-not access physical SQL.
+SQLite is the local single-process adapter. PostgreSQL is the production-oriented single-cluster
+adapter for concurrency and claims. YugabyteDB uses that same YSQL adapter contract when distributed
+SQL is required. Function code does not access physical SQL and a schema never becomes per-tenant
+DDL, avoiding thousands of mutable table layouts in one shared service.
 
 An attached `runku-server` Environment can select that adapter with the optional
 `RUNKU_PLATFORM_DATABASE_URL` or `_FILE` secret. The database is atomically bound to one exact

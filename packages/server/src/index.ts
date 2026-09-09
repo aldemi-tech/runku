@@ -153,6 +153,48 @@ export interface DataRangeBound {
   readonly key: Uint8Array
 }
 
+/** Comparison supported by the bounded logical table-query planner. */
+export type DataQueryOperator =
+  | "eq"
+  | "neq"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "contains"
+  | "search"
+
+/** One exact document field predicate. Dotted paths address nested object fields. */
+export interface DataQueryFilter<T extends RunkuValue> {
+  readonly field: T extends object ? keyof T & string | `${string}.${string}` : string
+  readonly operator?: DataQueryOperator
+  readonly value: RunkuValue
+}
+
+/** Stable logical ordering. System fields begin with `$`. */
+export interface DataQueryOrder<T extends RunkuValue> {
+  readonly field:
+    | (T extends object ? keyof T & string | `${string}.${string}` : string)
+    | "$createdAt"
+    | "$updatedAt"
+    | "$id"
+  readonly direction?: "asc" | "desc"
+}
+
+/** Bounded query input shared by indexed and scan execution. */
+export interface DataQueryOptions<T extends RunkuValue> {
+  readonly where?: readonly DataQueryFilter<T>[]
+  readonly orderBy?: readonly DataQueryOrder<T>[]
+  readonly limit?: number
+  readonly cursor?: string | null
+}
+
+/** One stable page returned by `ctx.db.query`. */
+export interface DataQueryPage<T extends RunkuValue, TableName extends string> {
+  readonly documents: readonly DataDocument<T, TableName>[]
+  readonly nextCursor: string | null
+}
+
 export interface QueryDatabase {
   get<Name extends string, T extends RunkuValue, I extends string>(
     table: TableReference<Name, T, I>,
@@ -170,6 +212,10 @@ export interface QueryDatabase {
       readonly limit: number
     },
   ): Promise<readonly DataIndexEntry<Name>[]>
+  query<Name extends string, T extends RunkuValue, I extends string>(
+    table: TableReference<Name, T, I>,
+    options?: DataQueryOptions<NoInfer<T>>,
+  ): Promise<DataQueryPage<T, Name>>
 }
 
 export interface MutationReadDatabase {
@@ -454,6 +500,13 @@ export interface ByteBoundOptions {
   readonly maxBytes?: number
 }
 
+export interface StringBoundOptions {
+  /** Minimum number of Unicode code points. */
+  readonly minLength?: number
+  /** Maximum number of Unicode code points. */
+  readonly maxLength?: number
+}
+
 export interface ItemBoundOptions {
   readonly minItems?: number
   readonly maxItems?: number
@@ -466,7 +519,7 @@ export const v = Object.freeze({
   boolean: (): Validator<boolean> => validator(),
   int64: (_options: BoundOptions = {}): Validator<bigint> => validator(),
   float64: (_options: BoundOptions = {}): Validator<number> => validator(),
-  string: (_options: ByteBoundOptions = {}): Validator<string> => validator(),
+  string: (_options: StringBoundOptions = {}): Validator<string> => validator(),
   bytes: (_options: ByteBoundOptions = {}): Validator<Uint8Array> => validator(),
   timestamp: (): Validator<RunkuTimestamp> => validator(),
   id: <const K extends string>(_kind?: K): Validator<RunkuId> => validator(),
@@ -509,19 +562,19 @@ export interface FunctionDefinition<
 }
 
 type CommonDefinition<A extends Validator, R extends Validator> = {
-  readonly auth: FunctionAuth
-  readonly visibility: FunctionVisibility
-  readonly args: A
-  readonly returns: R
+  readonly auth?: FunctionAuth
+  readonly visibility?: FunctionVisibility
+  readonly args?: A
+  readonly returns?: R
 }
 
 export function query<
-  const C extends readonly QueryCapability[],
-  A extends Validator,
-  R extends Validator,
+  const C extends readonly QueryCapability[] = readonly [],
+  A extends Validator = Validator<null>,
+  R extends Validator = Validator<RunkuValue>,
 >(
   definition: CommonDefinition<A, R> & {
-    readonly capabilities: C
+    readonly capabilities?: C
     readonly handler: QueryHandler<C[number], ValidatorValue<A>, ValidatorValue<R>>
   },
 ): FunctionDefinition<"query", ValidatorValue<A>, ValidatorValue<R>> {
@@ -529,12 +582,12 @@ export function query<
 }
 
 export function mutation<
-  const C extends readonly MutationCapability[],
-  A extends Validator,
-  R extends Validator,
+  const C extends readonly MutationCapability[] = readonly [],
+  A extends Validator = Validator<null>,
+  R extends Validator = Validator<RunkuValue>,
 >(
   definition: CommonDefinition<A, R> & {
-    readonly capabilities: C
+    readonly capabilities?: C
     readonly handler: MutationHandler<C[number], ValidatorValue<A>, ValidatorValue<R>>
   },
 ): FunctionDefinition<"mutation", ValidatorValue<A>, ValidatorValue<R>> {
@@ -542,12 +595,12 @@ export function mutation<
 }
 
 export function action<
-  const C extends readonly ActionCapability[],
-  A extends Validator,
-  R extends Validator,
+  const C extends readonly ActionCapability[] = readonly [],
+  A extends Validator = Validator<null>,
+  R extends Validator = Validator<RunkuValue>,
 >(
   definition: CommonDefinition<A, R> & {
-    readonly capabilities: C
+    readonly capabilities?: C
     readonly handler: ActionHandler<C[number], ValidatorValue<A>, ValidatorValue<R>>
   },
 ): FunctionDefinition<"action", ValidatorValue<A>, ValidatorValue<R>> {
@@ -580,12 +633,28 @@ function functionDefinition<K extends "query" | "mutation" | "action", A extends
   kind: K,
   definition: object,
 ): FunctionDefinition<K, A, R> {
-  return Object.freeze({ __runkuFunction: kind, ...definition }) as FunctionDefinition<K, A, R>
+  return Object.freeze({
+    __runkuFunction: kind,
+    auth: "none",
+    visibility: "public",
+    capabilities: Object.freeze([]),
+    args: v.null(),
+    returns: v.any(),
+    ...definition,
+  }) as FunctionDefinition<K, A, R>
 }
 
 export interface IndexDeclaration {
   readonly name: string
   readonly fields: readonly string[]
+  readonly kind: "ordered" | "search"
+}
+
+export type TableMode = "keyValue" | "queryable"
+
+export interface TableOptions {
+  /** Access contract. Queryable is the safe ergonomic default. */
+  readonly mode?: TableMode
 }
 
 export interface TableDefinition<
@@ -594,24 +663,41 @@ export interface TableDefinition<
 > {
   readonly __runkuTable: true
   readonly document: Validator<T>
+  readonly mode: TableMode
   readonly indexes: readonly IndexDeclaration[]
   index<const N extends string>(
     name: N,
     fields: readonly (keyof T & string)[],
   ): TableDefinition<T, I | N>
+  /** Adds a normalized Unicode word index for one string field. */
+  searchIndex<const N extends string, const F extends keyof T & string>(
+    name: N,
+    field: Exclude<T[F], undefined> extends string ? F : never,
+  ): TableDefinition<T, I | N>
 }
 
-export function defineTable<V extends Validator>(document: V): TableDefinition<ValidatorValue<V>, never> {
+export function defineTable<V extends Validator>(
+  document: V,
+  options: TableOptions = {},
+): TableDefinition<ValidatorValue<V>, never> {
   const indexes: IndexDeclaration[] = []
   const table = {
     __runkuTable: true,
     document: document as unknown as Validator<ValidatorValue<V>>,
+    mode: options.mode ?? "queryable",
     indexes,
     index<N extends string>(
       name: N,
       fields: readonly (keyof ValidatorValue<V> & string)[],
     ): TableDefinition<ValidatorValue<V>, N> {
-      indexes.push(Object.freeze({ name, fields: Object.freeze([...fields]) }))
+      indexes.push(Object.freeze({ name, fields: Object.freeze([...fields]), kind: "ordered" }))
+      return table as TableDefinition<ValidatorValue<V>, N>
+    },
+    searchIndex<N extends string, F extends keyof ValidatorValue<V> & string>(
+      name: N,
+      field: Exclude<ValidatorValue<V>[F], undefined> extends string ? F : never,
+    ): TableDefinition<ValidatorValue<V>, N> {
+      indexes.push(Object.freeze({ name, fields: Object.freeze([field]), kind: "search" }))
       return table as TableDefinition<ValidatorValue<V>, N>
     },
   }

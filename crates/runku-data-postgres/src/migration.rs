@@ -1,13 +1,13 @@
 //! Versioned `PostgreSQL` schema migrations.
 
 use sha2::{Digest, Sha256};
+use std::time::Duration;
+
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use runku_data::StoreError;
 
 use crate::adapter::{map_sqlx_error, now_micros};
-
-const MIGRATION_LOCK_ID: i64 = 7_224_856_021;
 
 const V1_STATEMENTS: &[&str] = &[
     "CREATE TABLE runku_environment_sequences (\
@@ -71,10 +71,47 @@ const V3_STATEMENTS: &[&str] = &["CREATE TABLE runku_environment_binding (\
         singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton), \
         project_id TEXT NOT NULL, environment_id TEXT NOT NULL, bound_at_micros BIGINT NOT NULL)"];
 
+const V4_STATEMENTS: &[&str] = &["CREATE INDEX runku_document_table_scan \
+    ON runku_documents(project_id, environment_id, table_id, created_at_micros DESC, document_id DESC)"];
+
+const V5_STATEMENTS: &[&str] = &["CREATE TABLE runku_index_registry (\
+        project_id TEXT NOT NULL, environment_id TEXT NOT NULL, index_id TEXT NOT NULL, \
+        definition_bytes BYTEA NOT NULL, status TEXT NOT NULL CHECK (status IN ('building','ready')), \
+        cursor_document_id TEXT NULL, updated_at_micros BIGINT NOT NULL, \
+        PRIMARY KEY (project_id, environment_id, index_id), \
+        FOREIGN KEY (project_id, environment_id) REFERENCES runku_environment_sequences(project_id, environment_id) ON DELETE CASCADE)"];
+
+const V6_STATEMENTS: &[&str] = &["CREATE TABLE runku_database_mode (\
+        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton), \
+        mode TEXT NOT NULL CHECK (mode IN ('dedicated','shared')))"];
+
 pub(crate) async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
+    let mut remaining_attempts = 5_u8;
+    let mut retry_delay = Duration::from_millis(10);
+    loop {
+        match migrate_once(pool).await {
+            Ok(()) => return Ok(()),
+            Err(_) if remaining_attempts > 1 => {
+                remaining_attempts -= 1;
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn migrate_once(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS runku_schema_migrations (\
             version BIGINT PRIMARY KEY, checksum BYTEA NOT NULL CHECK (octet_length(checksum) = 32), applied_at_micros BIGINT NOT NULL)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| StoreError::MigrationFailed)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS runku_migration_lock (\
+            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton))",
     )
     .execute(pool)
     .await
@@ -83,14 +120,20 @@ pub(crate) async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
         .begin()
         .await
         .map_err(|_| StoreError::MigrationFailed)?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(MIGRATION_LOCK_ID)
+    sqlx::query("INSERT INTO runku_migration_lock(singleton) VALUES (TRUE) ON CONFLICT DO NOTHING")
         .execute(&mut *transaction)
+        .await
+        .map_err(|_| StoreError::MigrationFailed)?;
+    sqlx::query("SELECT singleton FROM runku_migration_lock WHERE singleton = TRUE FOR UPDATE")
+        .fetch_one(&mut *transaction)
         .await
         .map_err(|_| StoreError::MigrationFailed)?;
     apply_migration(&mut transaction, 1, V1_STATEMENTS, v1_checksum()).await?;
     apply_migration(&mut transaction, 2, V2_STATEMENTS, v2_checksum()).await?;
     apply_migration(&mut transaction, 3, V3_STATEMENTS, v3_checksum()).await?;
+    apply_migration(&mut transaction, 4, V4_STATEMENTS, v4_checksum()).await?;
+    apply_migration(&mut transaction, 5, V5_STATEMENTS, v5_checksum()).await?;
+    apply_migration(&mut transaction, 6, V6_STATEMENTS, v6_checksum()).await?;
     transaction
         .commit()
         .await
@@ -156,6 +199,18 @@ fn v2_checksum() -> [u8; 32] {
 
 fn v3_checksum() -> [u8; 32] {
     checksum(b"RUNKU_POSTGRES_SCHEMA_V3", V3_STATEMENTS)
+}
+
+fn v4_checksum() -> [u8; 32] {
+    checksum(b"RUNKU_POSTGRES_SCHEMA_V4", V4_STATEMENTS)
+}
+
+fn v5_checksum() -> [u8; 32] {
+    checksum(b"RUNKU_POSTGRES_SCHEMA_V5", V5_STATEMENTS)
+}
+
+fn v6_checksum() -> [u8; 32] {
+    checksum(b"RUNKU_POSTGRES_SCHEMA_V6", V6_STATEMENTS)
 }
 
 pub(crate) async fn begin_serializable(

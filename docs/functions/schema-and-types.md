@@ -37,18 +37,18 @@ my-app/
 import { defineSchema, defineTable, v, type Infer } from "@runku/server"
 
 export const attachment = v.object({
-  fileId: v.string({ minBytes: 1, maxBytes: 128 }),
-  contentType: v.string({ minBytes: 1, maxBytes: 255 }),
+  fileId: v.string({ minLength: 1, maxLength: 128 }),
+  contentType: v.string({ minLength: 1, maxLength: 255 }),
 })
 
 export const note = v.object({
-  ownerId: v.string({ minBytes: 1, maxBytes: 256 }),
-  title: v.string({ minBytes: 1, maxBytes: 200 }),
-  body: v.string({ maxBytes: 20_000 }),
+  ownerId: v.string({ minLength: 1, maxLength: 256 }),
+  title: v.string({ minLength: 1, maxLength: 200 }),
+  body: v.string({ maxLength: 20_000 }),
   priority: v.int64({ minimum: 0, maximum: 5 }),
   publishedAt: v.optional(v.timestamp()),
   attachment: v.optional(attachment),
-  labels: v.array(v.string({ minBytes: 1, maxBytes: 40 }), { maxItems: 20 }),
+  labels: v.array(v.string({ minLength: 1, maxLength: 40 }), { maxItems: 20 }),
 })
 
 export type Note = Infer<typeof note>
@@ -83,7 +83,7 @@ application-facing contract.
 | `v.boolean()` | `boolean` | `true` or `false` | yes |
 | `v.int64({minimum, maximum})` | `bigint` | Signed 64-bit integer; bounds are inclusive numeric literals | yes |
 | `v.float64({minimum, maximum})` | `number` | Finite IEEE-754 binary64; bounds are inclusive | yes |
-| `v.string({minBytes, maxBytes})` | `string` | Unicode scalar string; bounds count UTF-8 bytes | yes |
+| `v.string({minLength, maxLength})` | `string` | bounds count Unicode code points | yes |
 | `v.bytes({minBytes, maxBytes})` | `Uint8Array` | Opaque bytes, distinct from a string | yes |
 | `v.timestamp()` | `RunkuTimestamp` | Signed Unix-epoch microseconds | yes |
 | `v.id(kind?)` | `RunkuId` | Canonical `<kind>_<ULID>`; optionally require one kind | yes |
@@ -108,16 +108,17 @@ Declaration bounds are ordinary integer literals. Runtime values are `bigint`. U
 when a value is intentionally fractional. Floats must be finite; `NaN`, positive/negative
 infinity, and negative zero are not canonical inputs.
 
-### Strings are bounded by UTF-8 bytes
+### Strings are bounded by human-readable length
 
-`maxBytes` is not JavaScript `string.length`. Non-ASCII characters may use multiple bytes:
+`minLength` and `maxLength` count Unicode code points, so `á` and `😊` each count as one character:
 
 ```ts
-const displayName = v.string({ minBytes: 1, maxBytes: 80 })
+const displayName = v.string({ minLength: 1, maxLength: 80 })
 ```
 
-Choose a byte bound that accommodates the scripts and emoji your application accepts. Perform
-business normalization deliberately; Runku does not trim or case-fold strings for you.
+Use byte bounds only for `v.bytes`. The platform still applies its canonical encoded-value ceiling
+as a defensive storage limit. Perform business normalization deliberately; Runku does not trim or
+case-fold ordinary strings for you.
 
 ### Timestamps
 
@@ -150,13 +151,13 @@ Objects reject unknown keys and reject a missing required key. Optional and null
 ```ts
 const profile = v.object({
   // Must exist and contain a string.
-  name: v.string({ minBytes: 1, maxBytes: 80 }),
+  name: v.string({ minLength: 1, maxLength: 80 }),
 
   // May be absent; when present it must be a timestamp.
   verifiedAt: v.optional(v.timestamp()),
 
   // Must exist; its value can be null or a string.
-  avatarUrl: v.union(v.null(), v.string({ maxBytes: 2_048 })),
+  avatarUrl: v.union(v.null(), v.string({ maxLength: 2_048 })),
 })
 ```
 
@@ -170,8 +171,8 @@ types and makes later compatibility analysis weaker.
 import { v, type Infer } from "@runku/server"
 
 export const account = v.object({
-  email: v.string({ minBytes: 3, maxBytes: 320 }),
-  displayName: v.string({ minBytes: 1, maxBytes: 80 }),
+  email: v.string({ minLength: 3, maxLength: 320 }),
+  displayName: v.string({ minLength: 1, maxLength: 80 }),
   disabled: v.boolean(),
 })
 

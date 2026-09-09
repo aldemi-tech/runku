@@ -65,6 +65,16 @@ const V2_STATEMENTS: &[&str] = &["CREATE TABLE runku_outbox_consumers (\
         CHECK ((claimed_sequence IS NULL AND claimed_event_id IS NULL) OR (claimed_sequence IS NOT NULL AND claimed_event_id IS NOT NULL)), \
         FOREIGN KEY (project_id, environment_id) REFERENCES runku_environment_sequences(project_id, environment_id) ON DELETE CASCADE) STRICT"];
 
+const V3_STATEMENTS: &[&str] = &["CREATE INDEX runku_document_table_scan \
+    ON runku_documents(project_id, environment_id, table_id, created_at_micros DESC, document_id DESC)"];
+
+const V4_STATEMENTS: &[&str] = &["CREATE TABLE runku_index_registry (\
+        project_id TEXT NOT NULL, environment_id TEXT NOT NULL, index_id TEXT NOT NULL, \
+        definition_bytes BLOB NOT NULL, status TEXT NOT NULL CHECK (status IN ('building','ready')), \
+        cursor_document_id TEXT NULL, updated_at_micros INTEGER NOT NULL, \
+        PRIMARY KEY (project_id, environment_id, index_id), \
+        FOREIGN KEY (project_id, environment_id) REFERENCES runku_environment_sequences(project_id, environment_id) ON DELETE CASCADE) STRICT"];
+
 pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS runku_schema_migrations (\
@@ -80,6 +90,8 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
         .map_err(|_| StoreError::MigrationFailed)?;
     apply_migration(&mut transaction, 1, V1_STATEMENTS, v1_checksum()).await?;
     apply_migration(&mut transaction, 2, V2_STATEMENTS, v2_checksum()).await?;
+    apply_migration(&mut transaction, 3, V3_STATEMENTS, v3_checksum()).await?;
+    apply_migration(&mut transaction, 4, V4_STATEMENTS, v4_checksum()).await?;
     transaction
         .commit()
         .await
@@ -143,6 +155,14 @@ fn v2_checksum() -> [u8; 32] {
     checksum(b"RUNKU_SQLITE_SCHEMA_V2", V2_STATEMENTS)
 }
 
+fn v3_checksum() -> [u8; 32] {
+    checksum(b"RUNKU_SQLITE_SCHEMA_V3", V3_STATEMENTS)
+}
+
+fn v4_checksum() -> [u8; 32] {
+    checksum(b"RUNKU_SQLITE_SCHEMA_V4", V4_STATEMENTS)
+}
+
 pub(crate) async fn begin_immediate(
     pool: &SqlitePool,
 ) -> Result<Transaction<'static, Sqlite>, StoreError> {
@@ -190,7 +210,7 @@ mod tests {
                 .iter()
                 .map(|row| row.get::<i64, _>("version"))
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![1, 2, 3, 4]
         );
         let table: String = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runku_outbox_consumers'",

@@ -15,7 +15,7 @@ Release routing, credentials, schedules, and artifact references.
 | State | Local implementation | Production-oriented implementation | Class |
 |---|---|---|---|
 | Project/Environment identity | `.runku/local-state-v1.json` | Management metadata store | Authoritative |
-| Documents/indexes/outbox/schedules | `.runku/data.sqlite3` | PostgreSQL | Authoritative; indexes may be rebuildable only by explicit protocol |
+| Documents/indexes/outbox/schedules | `.runku/data.sqlite3` | PostgreSQL or YugabyteDB YSQL | Authoritative; indexes may be rebuildable only by explicit protocol |
 | Releases/Channels | `.runku/releases.sqlite3` | PostgreSQL/release repository | Authoritative |
 | Workspaces/Dev Revisions | `.runku/development.sqlite3` | PostgreSQL/development repository | Authoritative when development is retained |
 | Application Clients/keys | `.runku/identity.sqlite3` + pepper | Identity repository + key protection | Authoritative and sensitive |
@@ -31,6 +31,12 @@ When `RUNKU_PLATFORM_DATABASE_URL` is configured, PostgreSQL replaces only the f
 logical store. The remaining Product-root repositories stay authoritative. Treating the Function
 platform database or Product root alone as a complete backup is invalid; see
 [Environment-scoped Function platform PostgreSQL](../self-hosting/product-postgresql.md).
+
+For YugabyteDB, replica survival is availability—not protection from accidental deletion or
+correlated failure. Use a vendor-supported database-level backup/PITR procedure for the exact YSQL
+database, verify restore into an isolated cluster, and coordinate its recovery point with the same
+Product-root and object-storage manifest. A filesystem copy of one tablet/node is not a Runku
+backup.
 
 ## Consistent local backup
 

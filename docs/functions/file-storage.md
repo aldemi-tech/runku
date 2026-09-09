@@ -84,7 +84,7 @@ export const beginAvatarUpload = action({
   capabilities: ["auth:read", "storage:write"],
   args: v.object({
     sizeBytes: v.int64({ minimum: 1, maximum: 10_000_000 }),
-    sha256: v.optional(v.string({ minBytes: 64, maxBytes: 64 })),
+    sha256: v.optional(v.string({ minLength: 64, maxLength: 64 })),
   }),
   returns: uploadGrant,
   async handler(ctx, input) {

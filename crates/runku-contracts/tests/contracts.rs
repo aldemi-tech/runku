@@ -22,6 +22,8 @@ fn table(seed: u128) -> TableId {
 
 fn string(minimum: Option<u32>, maximum: Option<u32>) -> Contract {
     Contract::String {
+        minimum_length: None,
+        maximum_length: None,
         minimum_bytes: minimum,
         maximum_bytes: maximum,
     }
@@ -68,6 +70,26 @@ fn canonical_codec_rejects_alternate_unknown_and_invalid_definitions() -> TestRe
         }),
         Err(ContractError::InvalidDefinition)
     );
+    Ok(())
+}
+
+#[test]
+fn string_length_counts_unicode_code_points_independently_from_utf8_bytes() -> TestResult {
+    let contract = Contract::String {
+        minimum_length: Some(2),
+        maximum_length: Some(2),
+        minimum_bytes: None,
+        maximum_bytes: Some(8),
+    };
+    assert_eq!(
+        contract.validate_value(&CanonicalValue::String("á😊".to_owned())),
+        Ok(())
+    );
+    assert_eq!(
+        contract.validate_value(&CanonicalValue::String("😊".to_owned())),
+        Err(ValidationError::BoundViolation)
+    );
+    assert_eq!(decode_contract(&encode_contract(&contract)?)?, contract);
     Ok(())
 }
 
@@ -150,11 +172,13 @@ fn document_schema_is_sorted_unique_canonical_and_fail_closed() -> TestResult {
         DocumentTableContract {
             id: table(2),
             name: "auditLog".to_owned(),
+            mode: runku_contracts::TableMode::Queryable,
             document_contract: Contract::Any,
         },
         DocumentTableContract {
             id: table(1),
             name: "users".to_owned(),
+            mode: runku_contracts::TableMode::Queryable,
             document_contract: Contract::Boolean,
         },
     ])?;
@@ -178,11 +202,13 @@ fn document_schema_is_sorted_unique_canonical_and_fail_closed() -> TestResult {
             DocumentTableContract {
                 id: table(1),
                 name: "users".to_owned(),
+                mode: runku_contracts::TableMode::Queryable,
                 document_contract: Contract::Any
             },
             DocumentTableContract {
                 id: table(1),
                 name: "other".to_owned(),
+                mode: runku_contracts::TableMode::Queryable,
                 document_contract: Contract::Any
             },
         ])
@@ -200,6 +226,7 @@ fn release_views_project_reads_and_old_replacements_preserve_new_fields() -> Tes
     let old = DocumentSchemaV1::new(vec![DocumentTableContract {
         id: table(7),
         name: "users".to_owned(),
+        mode: runku_contracts::TableMode::Queryable,
         document_contract: Contract::Object {
             fields: BTreeMap::from([
                 ("name".to_owned(), string(Some(1), Some(100))),

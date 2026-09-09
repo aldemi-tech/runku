@@ -1,14 +1,15 @@
 //! `SQLite` conformance, recovery, migration, and production-role rejection.
 
-use std::error::Error;
+use std::{collections::BTreeMap, error::Error};
 
 use runku_core::{DocumentId, EnvironmentId, OperationId, ProjectId, TableId};
 use runku_data::{
-    CommitBatch, DocumentMutation, EnvironmentScope, ExpectedRevision, LogicalStore, StoreBackend,
-    StoreError,
+    CommitBatch, DocumentMutation, EnvironmentScope, ExpectedRevision, IndexRange, LogicalStore,
+    StoreBackend, StoreError,
 };
 use runku_data_conformance::run_conformance;
 use runku_data_sqlite::{SqliteRole, SqliteStore, SqliteStoreConfig};
+use runku_schema::{FieldPath, IndexDefinition, SchemaCatalog};
 use runku_value::CanonicalValue;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::tempdir;
@@ -134,6 +135,67 @@ async fn interrupted_uncommitted_transaction_is_absent_after_reopen() -> Result<
     let reopened = SqliteStore::open(&path, SqliteStoreConfig::TEST).await?;
     let snapshot = reopened.begin_read(scope).await?;
     assert_eq!(snapshot.commit_sequence(), 0);
+    snapshot.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn index_backfill_is_bounded_resumable_and_exposed_for_dual_writes()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let store = SqliteStore::open(
+        directory.path().join("indexes.sqlite3"),
+        SqliteStoreConfig::TEST,
+    )
+    .await?;
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let table = TableId::generate();
+    for (document, name) in [
+        (DocumentId::generate(), "Ada"),
+        (DocumentId::generate(), "Grace"),
+    ] {
+        let mut batch = CommitBatch::new(scope, OperationId::generate());
+        batch.push_document(DocumentMutation::Upsert {
+            table_id: table,
+            document_id: document,
+            expected: ExpectedRevision::Absent,
+            value: CanonicalValue::Object(BTreeMap::from([(
+                "name".to_owned(),
+                CanonicalValue::String(name.to_owned()),
+            )])),
+        });
+        store.commit(&batch).await?;
+    }
+    let index = runku_core::IndexId::generate();
+    let catalog = SchemaCatalog::new(
+        scope.project_id(),
+        vec![IndexDefinition::new(
+            index,
+            table,
+            "by_name".to_owned(),
+            vec![FieldPath::new(vec!["name".to_owned()])?],
+        )?],
+    )?;
+    let first = store.prepare_index_catalog(scope, &catalog, 1).await?;
+    assert!(!first.ready);
+    assert_eq!(first.processed_documents, 1);
+    assert_eq!(
+        store
+            .effective_write_index_catalog(scope, &SchemaCatalog::new(scope.project_id(), vec![])?)
+            .await?
+            .indexes(),
+        catalog.indexes()
+    );
+    let second = store.prepare_index_catalog(scope, &catalog, 1).await?;
+    assert!(second.ready);
+    let mut snapshot = store.begin_read(scope).await?;
+    assert_eq!(
+        snapshot
+            .scan_index(index, &IndexRange::all(), 10)
+            .await?
+            .len(),
+        2
+    );
     snapshot.close().await?;
     Ok(())
 }

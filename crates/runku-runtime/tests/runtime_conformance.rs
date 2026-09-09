@@ -494,12 +494,17 @@ async fn runku_js_enforces_arguments_results_and_document_writes() -> Result<(),
     let schema = DocumentSchemaV1::new(vec![DocumentTableContract {
         id: table_id,
         name: "events".to_owned(),
+        mode: runku_contracts::TableMode::Queryable,
         document_contract: Contract::String {
+            minimum_length: None,
+            maximum_length: None,
             minimum_bytes: Some(6),
             maximum_bytes: Some(6),
         },
     }])?;
     let text = Contract::String {
+        minimum_length: None,
+        maximum_length: None,
         minimum_bytes: Some(1),
         maximum_bytes: Some(8),
     };
@@ -860,11 +865,13 @@ async fn document_ids_are_deterministic_table_scoped_and_schema_checked()
         DocumentTableContract {
             id: rooms,
             name: "rooms".to_owned(),
+            mode: runku_contracts::TableMode::Queryable,
             document_contract: Contract::Any,
         },
         DocumentTableContract {
             id: profiles,
             name: "profiles".to_owned(),
+            mode: runku_contracts::TableMode::Queryable,
             document_contract: Contract::Any,
         },
     ])?;
@@ -1007,12 +1014,15 @@ async fn release_schema_view_projects_reads_and_preserves_unknown_fields_on_repl
     let table = TableId::from_ulid(Ulid::from(24_u128));
     let document = DocumentId::from_ulid(Ulid::from(25_u128));
     let string = Contract::String {
+        minimum_length: None,
+        maximum_length: None,
         minimum_bytes: Some(1),
         maximum_bytes: Some(100),
     };
     let old_schema = DocumentSchemaV1::new(vec![DocumentTableContract {
         id: table,
         name: "users".to_owned(),
+        mode: runku_contracts::TableMode::Queryable,
         document_contract: Contract::Object {
             fields: BTreeMap::from([("name".to_owned(), string)]),
             optional: BTreeSet::default(),
@@ -1451,6 +1461,8 @@ async fn environment_configuration_is_exactly_capability_scoped() -> Result<(), 
                 ],
                 &Contract::Null,
                 &Contract::String {
+                    minimum_length: None,
+                    maximum_length: None,
                     minimum_bytes: Some(1),
                     maximum_bytes: Some(128),
                 },
@@ -1471,6 +1483,8 @@ async fn environment_configuration_is_exactly_capability_scoped() -> Result<(), 
         vec![Capability::Variable("FEATURE_CHECKOUT_V3".to_owned())],
         &Contract::Null,
         &Contract::String {
+            minimum_length: None,
+            maximum_length: None,
             minimum_bytes: Some(1),
             maximum_bytes: Some(128),
         },
@@ -2271,6 +2285,8 @@ fn nested_contract_requests(
     let child_source = "export const child = (_ctx, value) => value;\n";
     let null_bytes = encode_contract(&Contract::Null)?;
     let text_contract = Contract::String {
+        minimum_length: None,
+        maximum_length: None,
         minimum_bytes: Some(1),
         maximum_bytes: Some(8),
     };

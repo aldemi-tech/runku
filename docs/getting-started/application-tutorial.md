@@ -44,8 +44,8 @@ Create `runku/schema.ts`:
 import { defineSchema, defineTable, v } from "@runku/server"
 
 export const note = v.object({
-  ownerId: v.string({ minBytes: 1, maxBytes: 256 }),
-  title: v.string({ minBytes: 1, maxBytes: 200 }),
+  ownerId: v.string({ minLength: 1, maxLength: 256 }),
+  title: v.string({ minLength: 1, maxLength: 200 }),
   archived: v.boolean(),
 })
 
@@ -79,7 +79,7 @@ export const create = mutation({
   auth: "user",
   visibility: "public",
   capabilities: ["auth:read", "db:read", "db:write"],
-  args: v.object({ title: v.string({ minBytes: 1, maxBytes: 200 }) }),
+  args: v.object({ title: v.string({ minLength: 1, maxLength: 200 }) }),
   returns: v.object({ id: noteId, note }),
   async handler(ctx, input) {
     const principal = ctx.auth.principal

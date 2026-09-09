@@ -219,6 +219,15 @@ impl EnvironmentServingResolver for ProductEnvironmentServingResolver {
     }
 }
 
+/// Physical tenancy mode for an external Function platform database.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformDatabaseIsolation {
+    /// Atomically bind the database to one exact Project/Environment.
+    Dedicated,
+    /// Share one database while retaining explicit scope in every logical key and operation.
+    Shared,
+}
+
 /// Validated server-owned configuration for one Product adapter.
 pub struct ProductAdapterConfig {
     /// Optional operator-owned application listener behind trusted TLS termination.
@@ -230,6 +239,8 @@ pub struct ProductAdapterConfig {
     pub embedded_application_listener: bool,
     /// Optional secret PostgreSQL DSN for Environment-scoped Function platform data.
     pub platform_database_url: Option<Zeroizing<String>>,
+    /// Physical database tenancy contract. Dedicated is the fail-closed default.
+    pub platform_database_isolation: PlatformDatabaseIsolation,
     /// Optional historical Operational Log archive.
     pub log_archive: Option<LogArchive>,
     /// Optional replicated Operational Log journal.
@@ -272,15 +283,20 @@ impl ProductAdapter {
             .await
             .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?;
         let data_store: Arc<dyn LogicalStore> = match config.platform_database_url.as_ref() {
-            Some(url) => Arc::new(
-                PostgresStore::connect_scoped(
+            Some(url) => Arc::new(match config.platform_database_isolation {
+                PlatformDatabaseIsolation::Dedicated => PostgresStore::connect_scoped(
                     url.as_str(),
                     PostgresStoreConfig::PRODUCTION,
                     state.scope(),
                 )
                 .await
                 .map_err(map_product_database)?,
-            ),
+                PlatformDatabaseIsolation::Shared => {
+                    PostgresStore::connect(url.as_str(), PostgresStoreConfig::PRODUCTION)
+                        .await
+                        .map_err(map_product_database)?
+                }
+            }),
             None => Arc::new(
                 SqliteStore::open(&paths.data_database, SqliteStoreConfig::LOCAL)
                     .await
@@ -936,14 +952,21 @@ impl CatalogResources {
 pub async fn migrate_platform_database(
     root: &std::path::Path,
     url: &str,
+    isolation: PlatformDatabaseIsolation,
 ) -> Result<(), &'static str> {
     let state = load_local(root)
         .await
         .map_err(|_| "SERVER_PRODUCT_ROOT_INVALID")?
         .0;
-    let store = PostgresStore::connect_scoped(url, PostgresStoreConfig::PRODUCTION, state.scope())
-        .await
-        .map_err(map_product_database)?;
+    let store = match isolation {
+        PlatformDatabaseIsolation::Dedicated => {
+            PostgresStore::connect_scoped(url, PostgresStoreConfig::PRODUCTION, state.scope()).await
+        }
+        PlatformDatabaseIsolation::Shared => {
+            PostgresStore::connect(url, PostgresStoreConfig::PRODUCTION).await
+        }
+    }
+    .map_err(map_product_database)?;
     store.close().await;
     Ok(())
 }
@@ -2491,7 +2514,7 @@ impl ManagementProduct for ProductAdapter {
             .map_err(map_release)?;
         Ok(outcome(
             manager
-                .release(release, against.as_ref())
+                .release_with_store(release, against.as_ref(), self.data_store.as_ref(), 500)
                 .await
                 .map_err(map_release)?,
         ))
@@ -4176,7 +4199,7 @@ mod tests {
     const SCHEMA: &str = r#"
 import { defineSchema, defineTable, v } from "@runku/server"
 export const note = v.object({
-  body: v.string({ minBytes: 1, maxBytes: 200 }),
+  body: v.string({ minLength: 1, maxLength: 200 }),
   rank: v.int64({ minimum: 0, maximum: 100 }),
 })
 export default defineSchema({
@@ -4317,6 +4340,7 @@ export const basename = action({
                 trusted_application_listen: None,
                 embedded_application_listener: false,
                 platform_database_url: None,
+                platform_database_isolation: PlatformDatabaseIsolation::Dedicated,
                 log_archive: None,
                 log_journal: None,
                 allowed_origins: BTreeSet::new(),
@@ -4700,7 +4724,8 @@ export const basename = action({
             .and_then(Value::as_str)
             .ok_or("missing lifecycle release")?
             .to_owned();
-        product.release(&release_id, None).await?;
+        assert_eq!(product.release(&release_id, None).await?.status, "building");
+        assert_eq!(product.release(&release_id, None).await?.status, "servable");
         product.promote("stable", &release_id, Some(None)).await?;
         assert!(product.process.lock().await.is_some());
         let create_operation = OperationId::generate();
@@ -5257,6 +5282,8 @@ export const basename = action({
                 .await?,
             candidate
         );
+        let building = product.release(&release_id, None).await?;
+        assert_eq!(building.status, "building");
         let released = product.release(&release_id, None).await?;
         assert_eq!(released.status, "servable");
         let request = ManagementServingPolicySet {
@@ -5615,6 +5642,7 @@ export const basename = action({
                     trusted_application_listen: None,
                     embedded_application_listener: false,
                     platform_database_url: Some(Zeroizing::new(database_url)),
+                    platform_database_isolation: PlatformDatabaseIsolation::Dedicated,
                     log_archive: None,
                     log_journal: None,
                     allowed_origins: BTreeSet::new(),

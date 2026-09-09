@@ -59,7 +59,9 @@ use tokio::net::TcpListener;
 use zeroize::Zeroizing;
 
 use crate::cell::{CellManifest, CellMode, build_cell_router};
-use crate::product::{ProductAdapter, ProductAdapterConfig, migrate_platform_database};
+use crate::product::{
+    PlatformDatabaseIsolation, ProductAdapter, ProductAdapterConfig, migrate_platform_database,
+};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3220";
 const BOOTSTRAP_RECOVERY_CONFIRMATION: &str = "replace-lost-initial-owner-code";
@@ -133,12 +135,18 @@ async fn run() -> Result<(), &'static str> {
             config.product_root.as_deref(),
             config.platform_database_url.as_ref(),
         ) {
-            migrate_platform_database(root, url.as_str()).await?;
+            migrate_platform_database(root, url.as_str(), config.platform_database_isolation)
+                .await?;
         }
         if let Some(manifest) = &config.cell_manifest {
             for (environment, url) in manifest.environments.iter().zip(&cell_database_urls) {
                 if let Some(url) = url {
-                    migrate_platform_database(&environment.root, url.as_str()).await?;
+                    migrate_platform_database(
+                        &environment.root,
+                        url.as_str(),
+                        config.platform_database_isolation,
+                    )
+                    .await?;
                 }
             }
         }
@@ -183,6 +191,7 @@ async fn run() -> Result<(), &'static str> {
                     trusted_application_listen: config.trusted_application_listen,
                     embedded_application_listener: false,
                     platform_database_url: config.platform_database_url.clone(),
+                    platform_database_isolation: config.platform_database_isolation,
                     log_archive: config.log_archive.clone(),
                     log_journal: log_journal.clone(),
                     allowed_origins: config.product_allowed_origins.clone(),
@@ -219,6 +228,7 @@ async fn run() -> Result<(), &'static str> {
                         trusted_application_listen: None,
                         embedded_application_listener: true,
                         platform_database_url,
+                        platform_database_isolation: config.platform_database_isolation,
                         log_archive: config.log_archive.clone(),
                         log_journal: log_journal.clone(),
                         allowed_origins,
@@ -513,6 +523,7 @@ struct ServerConfig {
     cell_manifest: Option<CellManifest>,
     trusted_application_listen: Option<SocketAddr>,
     platform_database_url: Option<Zeroizing<String>>,
+    platform_database_isolation: PlatformDatabaseIsolation,
     product_allowed_origins: BTreeSet<CorsOrigin>,
     product_auth_config: Option<PathBuf>,
     log_archive: Option<LogArchive>,
@@ -714,6 +725,20 @@ impl ServerConfig {
         if platform_database_url.is_some() && product_root.is_none() {
             return Err("SERVER_PRODUCT_DATABASE_WITHOUT_PRODUCT_ROOT");
         }
+        let platform_database_isolation = match env::var("RUNKU_PLATFORM_DATABASE_ISOLATION") {
+            Ok(value) if value == "dedicated" => PlatformDatabaseIsolation::Dedicated,
+            Ok(value) if value == "shared" => PlatformDatabaseIsolation::Shared,
+            Err(env::VarError::NotPresent) => PlatformDatabaseIsolation::Dedicated,
+            Ok(_) | Err(env::VarError::NotUnicode(_)) => {
+                return Err("SERVER_PRODUCT_DATABASE_ISOLATION_INVALID");
+            }
+        };
+        if platform_database_url.is_none()
+            && cell_manifest.is_none()
+            && platform_database_isolation == PlatformDatabaseIsolation::Shared
+        {
+            return Err("SERVER_PRODUCT_DATABASE_ISOLATION_WITHOUT_DATABASE");
+        }
         let product_allowed_origins = load_product_allowed_origins()?;
         let product_auth_config = env::var_os("RUNKU_PRODUCT_AUTH_CONFIG")
             .map(PathBuf::from)
@@ -772,6 +797,7 @@ impl ServerConfig {
             cell_manifest,
             trusted_application_listen,
             platform_database_url,
+            platform_database_isolation,
             product_allowed_origins,
             product_auth_config,
             log_archive,

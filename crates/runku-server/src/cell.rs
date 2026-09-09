@@ -235,7 +235,7 @@ mod tests {
     use std::{collections::BTreeSet, net::SocketAddr};
 
     use super::*;
-    use crate::product::{ProductAdapter, ProductAdapterConfig};
+    use crate::product::{PlatformDatabaseIsolation, ProductAdapter, ProductAdapterConfig};
     use axum::body::to_bytes;
     use runku_core::{
         ApplicationClientId, BuildId, CodeTarget, CredentialId, FunctionId, ReleaseId, WorkspaceRef,
@@ -449,6 +449,7 @@ mod tests {
                     trusted_application_listen: None,
                     embedded_application_listener: true,
                     platform_database_url: None,
+                    platform_database_isolation: PlatformDatabaseIsolation::Dedicated,
                     log_archive: None,
                     log_journal: None,
                     allowed_origins: BTreeSet::new(),

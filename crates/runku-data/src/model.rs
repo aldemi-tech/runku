@@ -107,6 +107,15 @@ pub struct DocumentRecord {
     pub value: CanonicalValue,
 }
 
+/// Exclusive keyset cursor for the built-in newest-first table order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TableScanCursor {
+    /// Creation timestamp of the last returned document.
+    pub created_at: TimestampMicros,
+    /// Document-ID tie-breaker of the last returned document.
+    pub document_id: DocumentId,
+}
+
 /// One logical index entry returned in bytewise key order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexEntry {
@@ -122,6 +131,24 @@ pub struct IndexEntry {
     pub document_revision: u64,
     /// Commit sequence that last inserted the entry.
     pub commit_sequence: u64,
+}
+
+/// Direction for stable logical-index pagination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexScanDirection {
+    /// `(key, document_id)` ascending.
+    Ascending,
+    /// `(key, document_id)` descending.
+    Descending,
+}
+
+/// Exclusive keyset cursor for a logical-index scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexScanCursor {
+    /// Last observed canonical key.
+    pub key: IndexKey,
+    /// Last observed document-ID tie-breaker.
+    pub document_id: DocumentId,
 }
 
 /// Lower or upper byte bound used by an index scan.

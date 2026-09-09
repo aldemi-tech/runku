@@ -7,6 +7,7 @@ import {
   op_runku_data_replace,
   op_runku_data_delete,
   op_runku_data_scan,
+  op_runku_data_query,
   op_runku_https,
   op_runku_function_query,
   op_runku_function_mutation,
@@ -228,6 +229,46 @@ async function dataScan(indexId, options) {
     commitSequence: BigIntCtor(entry.commitSequence),
   })]);
   return ObjectFreeze(output);
+}
+
+async function dataQuery(tableId, options = {}) {
+  if (options === null || typeof options !== "object" || ArrayIsArray(options)) {
+    throw new TypeError("data query options must be an object");
+  }
+  const filters = options.where === undefined ? [] : options.where;
+  const order = options.orderBy === undefined ? [] : options.orderBy;
+  if (!ArrayIsArray(filters) || !ArrayIsArray(order)) {
+    throw new TypeError("data query where and orderBy must be arrays");
+  }
+  const page = await op_runku_data_query({
+    tableId: StringCtor(tableId),
+    filters: ReflectApply(ArrayMap, filters, [(filter) => {
+      if (filter === null || typeof filter !== "object" || ArrayIsArray(filter)) {
+        throw new TypeError("data query filter must be an object");
+      }
+      return {
+        field: StringCtor(filter.field),
+        operator: filter.operator === undefined ? "eq" : filter.operator,
+        value: encode(filter.value),
+      };
+    }]),
+    order: ReflectApply(ArrayMap, order, [(component) => {
+      if (component === null || typeof component !== "object" || ArrayIsArray(component)) {
+        throw new TypeError("data query order must be an object");
+      }
+      return {
+        field: StringCtor(component.field),
+        direction: component.direction === undefined ? "asc" : component.direction,
+      };
+    }]),
+    limit: options.limit === undefined ? 100 : options.limit,
+    cursor: options.cursor === undefined ? null : options.cursor,
+  });
+  const documents = ReflectApply(ArrayMap, page.documents, [decodeDocument]);
+  return ObjectFreeze({
+    documents: ObjectFreeze(documents),
+    nextCursor: page.nextCursor,
+  });
 }
 
 async function dataInsert(tableId, documentId, value) {
@@ -466,7 +507,10 @@ ObjectDefineProperty(globalThis, "__runkuPlatformInvoke", {
         get: ObjectFreeze(dataGet),
         documentId: ObjectFreeze(dataDocumentId),
       };
-      if (metadata.functionType === "query") database.scan = ObjectFreeze(dataScan);
+      if (metadata.functionType === "query") {
+        database.scan = ObjectFreeze(dataScan);
+        database.query = ObjectFreeze(dataQuery);
+      }
       context.db = ObjectFreeze(database);
     }
     if (metadata.dataWriteEnabled === true) {

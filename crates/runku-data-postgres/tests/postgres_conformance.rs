@@ -18,6 +18,10 @@ fn test_url() -> Option<String> {
     std::env::var("RUNKU_TEST_POSTGRES_URL").ok()
 }
 
+fn yugabyte_test_url() -> Option<String> {
+    std::env::var("RUNKU_TEST_YUGABYTE_URL").ok()
+}
+
 #[tokio::test]
 async fn common_logical_store_conformance() -> Result<(), Box<dyn std::error::Error>> {
     let Some(url) = test_url() else {
@@ -25,6 +29,19 @@ async fn common_logical_store_conformance() -> Result<(), Box<dyn std::error::Er
     };
     let store = PostgresStore::connect(&url, PostgresStoreConfig::TEST).await?;
     runku_data_conformance::run_conformance(&store, StoreBackend::PostgreSQL).await?;
+    store.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn yugabytedb_ysql_common_logical_store_conformance() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(url) = yugabyte_test_url() else {
+        return Ok(());
+    };
+    let store = PostgresStore::connect(&url, PostgresStoreConfig::TEST).await?;
+    assert_eq!(store.backend(), StoreBackend::YugabyteDB);
+    runku_data_conformance::run_conformance(&store, StoreBackend::YugabyteDB).await?;
     store.close().await;
     Ok(())
 }

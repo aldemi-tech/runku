@@ -3427,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "runku-cli"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -3520,6 +3520,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "runku-core",
+ "runku-schema",
  "runku-value",
  "sha2 0.11.0",
  "thiserror",
@@ -3545,6 +3546,7 @@ dependencies = [
  "runku-core",
  "runku-data",
  "runku-data-conformance",
+ "runku-schema",
  "runku-value",
  "sha2 0.11.0",
  "sqlx",
@@ -3560,6 +3562,7 @@ dependencies = [
  "runku-core",
  "runku-data",
  "runku-data-conformance",
+ "runku-schema",
  "runku-value",
  "sha2 0.11.0",
  "sqlx",
@@ -3698,6 +3701,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "proptest",
+ "runku-contracts",
  "runku-core",
  "runku-data",
  "runku-data-conformance",
@@ -4161,7 +4165,7 @@ dependencies = [
 
 [[package]]
 name = "runku-server"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "async-nats",
  "async-trait",

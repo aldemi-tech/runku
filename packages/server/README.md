@@ -19,8 +19,8 @@ Exactly one module under `runku/` must default-export a schema:
 import { defineSchema, defineTable, v } from "@runku/server"
 
 export const note = v.object({
-  ownerId: v.string({ minBytes: 1, maxBytes: 256 }),
-  title: v.string({ minBytes: 1, maxBytes: 200 }),
+  ownerId: v.string({ minLength: 1, maxLength: 256 }),
+  title: v.string({ minLength: 1, maxLength: 200 }),
   archived: v.boolean(),
 })
 
@@ -42,7 +42,7 @@ values.
 - `any`, `null`, `boolean`;
 - `int64({ minimum, maximum })`, represented by `bigint`;
 - `float64({ minimum, maximum })`, represented by `number`;
-- `string({ minBytes, maxBytes })`, `bytes({ minBytes, maxBytes })`;
+- `string({ minLength, maxLength })`, `bytes({ minBytes, maxBytes })`;
 - `timestamp`, `id(kind?)`, `documentId(table)`;
 - `array(item, { minItems, maxItems })`;
 - `object(fields)`, `pick(object, keys)`, `union(...)`, `optional(value)`.
@@ -60,7 +60,7 @@ export const create = mutation({
   auth: "user",
   visibility: "public",
   capabilities: ["auth:read", "db:read", "db:write"],
-  args: v.object({ title: v.string({ minBytes: 1, maxBytes: 200 }) }),
+  args: v.object({ title: v.string({ minLength: 1, maxLength: 200 }) }),
   returns: v.object({ id: v.documentId("notes"), note }),
   async handler(ctx, input) {
     const principal = ctx.auth.principal
@@ -73,8 +73,10 @@ export const create = mutation({
 })
 ```
 
-All fields are required and statically extractable. `auth` is `none|optional|guest|user|service`;
-`visibility` is `public|internal`.
+Only `handler` is required; omitted metadata defaults to `auth: "none"`, `visibility: "public"`,
+`capabilities: []`, `args: v.null()`, and `returns: v.any()`. Any supplied field must remain
+statically extractable. `auth` is `none|optional|guest|user|service`; `visibility` is
+`public|internal`.
 
 ### Capability matrix
 
@@ -103,7 +105,8 @@ inside an authorized Action. See
 
 ## Data operations
 
-Queries can `get`, derive a typed `documentId`, and `scan` a typed index with explicit bounds/limit.
+Queries can `get`, derive a typed `documentId`, call `query(table, options?)` through one indexed
+or bounded-scan contract, and `scan` a typed index with explicit bounds/limit.
 Mutations read documents and `insert`, `replace(expectedRevision)`, or
 `delete(expectedRevision)`. Mutation writes commit atomically with logical indexes, outbox, and
 schedules. Actions access data through nested Query/Mutation instead of direct writes.

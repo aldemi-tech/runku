@@ -188,13 +188,6 @@ impl CompatibilityEngine {
         let mut diagnostics = Vec::new();
         compare_functions(base, candidate, &mut diagnostics)?;
         compare_schema(base, candidate, &mut diagnostics)?;
-        if base.manifest.index_contract_hash != candidate.manifest.index_contract_hash {
-            push_diagnostic(
-                &mut diagnostics,
-                "INDEX_CONTRACT_CHANGE_UNPROVEN",
-                "release",
-            )?;
-        }
         diagnostics.sort();
         diagnostics.dedup();
         Ok(CompatibilityReport {
@@ -226,8 +219,8 @@ impl CompatibilityEngine {
     /// Proves symmetric coexistence of two immutable Release data views in one Environment.
     ///
     /// A field present in only one view is safe only when optional. Fields present in both views
-    /// must accept the same value set. Logical indexes and Cron declarations remain exact until
-    /// their independent build/activation lifecycles carry durable readiness evidence.
+    /// must accept the same value set. Logical-index changes are admitted here because the Release
+    /// lifecycle independently requires durable backfill readiness before `SERVABLE`.
     ///
     /// # Errors
     ///
@@ -239,13 +232,6 @@ impl CompatibilityEngine {
         validate_pair(left, right)?;
         let mut diagnostics = Vec::new();
         compare_schema_coexistence(left, right, &mut diagnostics)?;
-        if left.manifest.index_contract_hash != right.manifest.index_contract_hash {
-            push_diagnostic(
-                &mut diagnostics,
-                "INDEX_CONTRACT_CHANGE_REQUIRES_READINESS",
-                "release",
-            )?;
-        }
         if left.manifest.cron_definitions != right.manifest.cron_definitions {
             push_diagnostic(&mut diagnostics, "CRON_DECLARATIONS_DIVERGED", "release")?;
         }
@@ -565,24 +551,32 @@ fn contract_subset_at(
         )),
         (
             Contract::String {
-                minimum_bytes: left_min,
-                maximum_bytes: left_max,
+                minimum_length: left_min_length,
+                maximum_length: left_max_length,
+                minimum_bytes: left_min_bytes,
+                maximum_bytes: left_max_bytes,
             },
             Contract::String {
-                minimum_bytes: right_min,
-                maximum_bytes: right_max,
+                minimum_length: right_min_length,
+                maximum_length: right_max_length,
+                minimum_bytes: right_min_bytes,
+                maximum_bytes: right_max_bytes,
             },
-        )
-        | (
+        ) => Ok(lower_inside(*left_min_length, *right_min_length)
+            && upper_inside(*left_max_length, *right_max_length)
+            && lower_inside(*left_min_bytes, *right_min_bytes)
+            && upper_inside(*left_max_bytes, *right_max_bytes)),
+        (
             Contract::Bytes {
-                minimum_bytes: left_min,
-                maximum_bytes: left_max,
+                minimum_bytes: left_min_bytes,
+                maximum_bytes: left_max_bytes,
             },
             Contract::Bytes {
-                minimum_bytes: right_min,
-                maximum_bytes: right_max,
+                minimum_bytes: right_min_bytes,
+                maximum_bytes: right_max_bytes,
             },
-        ) => Ok(lower_inside(*left_min, *right_min) && upper_inside(*left_max, *right_max)),
+        ) => Ok(lower_inside(*left_min_bytes, *right_min_bytes)
+            && upper_inside(*left_max_bytes, *right_max_bytes)),
         (Contract::TypedId { kind: left }, Contract::TypedId { kind: right }) => {
             Ok(right.is_none() || left == right)
         }
@@ -685,10 +679,14 @@ mod tests {
         )?);
         assert!(contract_is_subset(
             &Contract::String {
+                minimum_length: None,
+                maximum_length: None,
                 minimum_bytes: Some(2),
                 maximum_bytes: Some(8),
             },
             &Contract::String {
+                minimum_length: None,
+                maximum_length: None,
                 minimum_bytes: None,
                 maximum_bytes: Some(10),
             }
@@ -730,6 +728,8 @@ mod tests {
             fields: BTreeMap::from([(
                 "name".to_owned(),
                 Contract::String {
+                    minimum_length: None,
+                    maximum_length: None,
                     minimum_bytes: None,
                     maximum_bytes: None,
                 },
@@ -741,6 +741,8 @@ mod tests {
                 (
                     "name".to_owned(),
                     Contract::String {
+                        minimum_length: None,
+                        maximum_length: None,
                         minimum_bytes: None,
                         maximum_bytes: None,
                     },
@@ -748,6 +750,8 @@ mod tests {
                 (
                     "tag".to_owned(),
                     Contract::String {
+                        minimum_length: None,
+                        maximum_length: None,
                         minimum_bytes: None,
                         maximum_bytes: None,
                     },
@@ -786,6 +790,7 @@ mod tests {
         let schema = DocumentSchemaV1::new(vec![DocumentTableContract {
             id: TableId::from_ulid(ulid::Ulid::from(700)),
             name: "users".to_owned(),
+            mode: runku_contracts::TableMode::Queryable,
             document_contract: document.clone(),
         }])?;
         let schema_bytes = encode_document_schema(&schema)?;
@@ -894,6 +899,8 @@ mod tests {
     fn storage_coexistence_accepts_optional_add_hide_and_rejects_required_add() -> TestResult {
         let project = ProjectId::from_ulid(ulid::Ulid::from(602));
         let string = Contract::String {
+            minimum_length: None,
+            maximum_length: None,
             minimum_bytes: None,
             maximum_bytes: Some(100),
         };

@@ -54,6 +54,80 @@ pub struct DataScanRequest {
     pub limit: u32,
 }
 
+/// Comparison supported by the bounded logical table-query planner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataQueryOperator {
+    /// Equal canonical values.
+    Equal,
+    /// Unequal canonical values.
+    NotEqual,
+    /// Strictly greater comparable scalar.
+    GreaterThan,
+    /// Greater-or-equal comparable scalar.
+    GreaterThanOrEqual,
+    /// Strictly less comparable scalar.
+    LessThan,
+    /// Less-or-equal comparable scalar.
+    LessThanOrEqual,
+    /// Unicode substring or exact array-element membership.
+    Contains,
+    /// Normalized Unicode whole-word match backed by a declared search index.
+    Search,
+}
+
+/// One validated user-field predicate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataQueryFilter {
+    /// Dotted object-property path.
+    pub field: String,
+    /// Comparison operation.
+    pub operator: DataQueryOperator,
+    /// Canonical comparison value.
+    pub value: CanonicalValue,
+}
+
+/// Stable ordering direction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataQueryDirection {
+    /// Smallest values first.
+    Ascending,
+    /// Largest values first.
+    Descending,
+}
+
+/// One requested user or system-field ordering component.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataQueryOrder {
+    /// Dotted field path or `$createdAt`, `$updatedAt`, `$id`.
+    pub field: String,
+    /// Ordering direction.
+    pub direction: DataQueryDirection,
+}
+
+/// One bounded logical table query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataQueryRequest {
+    /// Logical table.
+    pub table_id: TableId,
+    /// Conjunctive predicates.
+    pub filters: Vec<DataQueryFilter>,
+    /// Ordering components. Empty selects the platform default.
+    pub order: Vec<DataQueryOrder>,
+    /// Maximum returned documents in `1..=200`.
+    pub limit: u32,
+    /// Opaque continuation token from an identical query.
+    pub cursor: Option<String>,
+}
+
+/// One bounded logical table-query page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataQueryPage {
+    /// Matching documents in stable requested order.
+    pub documents: Vec<DataDocument>,
+    /// Opaque continuation token, when more matches exist.
+    pub next_cursor: Option<String>,
+}
+
 /// One application document observed through the Query snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataDocument {
@@ -111,6 +185,9 @@ pub enum DataReadError {
     /// Aggregate invocation data limits were exceeded.
     #[error("data read exceeds a limit")]
     LimitExceeded,
+    /// An unindexed query exceeded the bounded table-scan threshold.
+    #[error("data query requires an index")]
+    QueryRequiresIndex,
 }
 
 impl DataReadError {
@@ -124,6 +201,7 @@ impl DataReadError {
             Self::Timeout => "DATA_READ_TIMEOUT",
             Self::Cancelled => "DATA_READ_CANCELLED",
             Self::LimitExceeded => "DATA_READ_LIMIT_EXCEEDED",
+            Self::QueryRequiresIndex => "DATA_QUERY_REQUIRES_INDEX",
         }
     }
 }
@@ -146,6 +224,16 @@ pub trait DataRead: fmt::Debug + Send + Sync {
         deadline: Instant,
         cancellation: CancellationToken,
     ) -> Result<Vec<DataIndexEntry>, DataReadError>;
+
+    /// Executes one bounded table query from the same invocation snapshot.
+    async fn query(
+        &self,
+        _request: DataQueryRequest,
+        _deadline: Instant,
+        _cancellation: CancellationToken,
+    ) -> Result<DataQueryPage, DataReadError> {
+        Err(DataReadError::InvalidRequest)
+    }
 }
 
 /// Buffered document write authority injected into one trusted Mutation invocation.

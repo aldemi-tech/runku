@@ -1,10 +1,10 @@
 import { v } from "@runku/server"
 
-export const principalId = v.string({ minBytes: 16, maxBytes: 96 })
-export const displayName = v.string({ minBytes: 1, maxBytes: 48 })
-export const roomName = v.string({ minBytes: 1, maxBytes: 80 })
-export const messageId = v.string({ minBytes: 36, maxBytes: 36 })
-export const messageBody = v.string({ minBytes: 1, maxBytes: 1_000 })
+export const principalId = v.string({ minLength: 16, maxLength: 96 })
+export const displayName = v.string({ minLength: 1, maxLength: 48 })
+export const roomName = v.string({ minLength: 1, maxLength: 80 })
+export const messageId = v.string({ minLength: 36, maxLength: 36 })
+export const messageBody = v.string({ minLength: 1, maxLength: 1_000 })
 
 export const profile = v.object({ principalId, displayName })
 export const member = v.object({ principalId, displayName })

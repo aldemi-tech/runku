@@ -7,6 +7,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use runku_contracts::{
+    Contract, DocumentSchemaV1, DocumentTableContract, TableMode, encode_contract,
+    encode_document_schema,
+};
 use runku_core::{
     BuildId, DocumentId, EnvironmentId, EnvironmentScope, FunctionId, IndexId, InvocationId,
     OperationId, OutboxEventId, ProjectId, ReleaseId, RequestId, ScheduledInvocationId, TableId,
@@ -26,6 +30,9 @@ use runku_releases::{
     RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_safe_esm_bundle,
 };
 use runku_runtime::{CancellationToken, InvocationRequest, RuntimeLimits, RuntimeSupervisor};
+use runku_schema::{
+    FieldPath, IndexDefinition, SchemaCatalog, encode_schema_catalog, extract_index_keys,
+};
 use runku_value::{CanonicalValue, IndexKey, IndexValue, TimestampMicros};
 use tempfile::TempDir;
 use ulid::Ulid;
@@ -169,6 +176,26 @@ impl ReadSnapshot for FakeSnapshot {
         Ok(None)
     }
 
+    async fn scan_documents(
+        &mut self,
+        table_id: TableId,
+        _after: Option<runku_data::TableScanCursor>,
+        limit: u32,
+    ) -> Result<Vec<DocumentRecord>, StoreError> {
+        if limit == 0 || limit > 2_001 {
+            return Err(StoreError::InvalidRange);
+        }
+        Ok(vec![DocumentRecord {
+            table_id,
+            document_id: document_id_for(12),
+            revision: 3,
+            commit_sequence: 7,
+            created_at: TimestampMicros::new(10),
+            updated_at: TimestampMicros::new(20),
+            value: CanonicalValue::String("Ada".to_owned()),
+        }])
+    }
+
     async fn scan_index(
         &mut self,
         index_id: IndexId,
@@ -189,6 +216,17 @@ impl ReadSnapshot for FakeSnapshot {
             document_revision: 3,
             commit_sequence: 7,
         }])
+    }
+
+    async fn scan_index_page(
+        &mut self,
+        index_id: IndexId,
+        range: &IndexRange,
+        _after: Option<runku_data::IndexScanCursor>,
+        _direction: runku_data::IndexScanDirection,
+        limit: u32,
+    ) -> Result<Vec<IndexEntry>, StoreError> {
+        self.scan_index(index_id, range, limit).await
     }
 
     async fn get_outbox(
@@ -596,6 +634,188 @@ async fn sqlite_query_engine_conformance() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_search_index_avoids_table_scan_for_long_text() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let store = Arc::new(
+        SqliteStore::open(
+            directory.path().join("search.sqlite3"),
+            SqliteStoreConfig {
+                role: SqliteRole::Test,
+                ..SqliteStoreConfig::TEST
+            },
+        )
+        .await?,
+    );
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let definition = IndexDefinition::new_search(
+        index_id(),
+        table_id(),
+        "transcript_words".to_owned(),
+        FieldPath::new(vec!["transcript".to_owned()])?,
+    )?;
+    let catalog = SchemaCatalog::new(scope.project_id(), vec![definition.clone()])?;
+    assert!(
+        store
+            .prepare_index_catalog(scope, &catalog, 10)
+            .await?
+            .ready
+    );
+
+    let document_id = document_id_for(31);
+    let value = CanonicalValue::Object(std::collections::BTreeMap::from([(
+        "transcript".to_owned(),
+        CanonicalValue::String(format!("{} comprar mañana", "conversación ".repeat(2_500))),
+    )]));
+    let mut batch = CommitBatch::new(scope, OperationId::generate());
+    batch.push_document(DocumentMutation::Upsert {
+        table_id: table_id(),
+        document_id,
+        expected: ExpectedRevision::Absent,
+        value: value.clone(),
+    });
+    for key in extract_index_keys(&definition, &value)? {
+        batch.push_index(IndexMutation::Put {
+            index_id: definition.index_id(),
+            key,
+            table_id: table_id(),
+            document_id,
+            document_revision: 1,
+        });
+    }
+    store.commit(&batch).await?;
+    let source = format!(
+        r#"export const query = async (ctx) => {{
+          const page = await ctx.db.query("{}", {{
+            where: [{{ field: "transcript", operator: "search", value: "COMPRAR" }}],
+            limit: 10
+          }});
+          return {{ count: BigInt(page.documents.length), id: page.documents[0].documentId }};
+        }};"#,
+        table_id()
+    );
+    let executor = executor(store)?;
+    let outcome = executor
+        .execute(query_request_scoped_with_catalog(
+            &source,
+            CanonicalValue::Null,
+            Duration::from_secs(2),
+            scope,
+            &catalog,
+        )?)
+        .await?;
+    let CanonicalValue::Object(result) = outcome.value else {
+        return Err("expected search result".into());
+    };
+    assert_eq!(result["count"], CanonicalValue::Int64(1));
+    assert_eq!(
+        result["id"],
+        CanonicalValue::TypedId(document_id.to_string().parse()?)
+    );
+    assert!(outcome.dependencies.iter().any(|dependency| matches!(
+        dependency,
+        ReadDependency::Range { index_id: value, .. } if *value == index_id()
+    )));
+    assert!(outcome.dependencies.iter().any(|dependency| matches!(
+        dependency,
+        ReadDependency::Point { document_id: value, observed_revision: Some(1), .. }
+            if *value == document_id
+    )));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_ordered_range_query_avoids_the_unindexed_scan_ceiling() -> Result<(), Box<dyn Error>>
+{
+    let directory = TempDir::new()?;
+    let store = Arc::new(
+        SqliteStore::open(
+            directory.path().join("ordered-range.sqlite3"),
+            SqliteStoreConfig {
+                role: SqliteRole::Test,
+                ..SqliteStoreConfig::TEST
+            },
+        )
+        .await?,
+    );
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let definition = IndexDefinition::new(
+        index_id(),
+        table_id(),
+        "by_score".to_owned(),
+        vec![FieldPath::new(vec!["score".to_owned()])?],
+    )?;
+    let catalog = SchemaCatalog::new(scope.project_id(), vec![definition.clone()])?;
+    assert!(
+        store
+            .prepare_index_catalog(scope, &catalog, 10)
+            .await?
+            .ready
+    );
+
+    for start in (0_u128..=2_000).step_by(400) {
+        let mut batch = CommitBatch::new(scope, OperationId::generate());
+        for score in start..=(start + 399).min(2_000) {
+            let document_id = document_id_for(10_000 + score);
+            let value = CanonicalValue::Object(std::collections::BTreeMap::from([(
+                "score".to_owned(),
+                CanonicalValue::Int64(i64::try_from(score)?),
+            )]));
+            batch.push_document(DocumentMutation::Upsert {
+                table_id: table_id(),
+                document_id,
+                expected: ExpectedRevision::Absent,
+                value: value.clone(),
+            });
+            for key in extract_index_keys(&definition, &value)? {
+                batch.push_index(IndexMutation::Put {
+                    index_id: definition.index_id(),
+                    key,
+                    table_id: table_id(),
+                    document_id,
+                    document_revision: 1,
+                });
+            }
+        }
+        store.commit(&batch).await?;
+    }
+
+    let source = format!(
+        r#"export const query = async (ctx) => {{
+          const page = await ctx.db.query("{}", {{
+            where: [{{ field: "score", operator: "gte", value: 1990n }}],
+            orderBy: [{{ field: "score", direction: "asc" }}],
+            limit: 5
+          }});
+          return page.documents.map((document) => document.value.score);
+        }};"#,
+        table_id()
+    );
+    let executor = executor(store)?;
+    let outcome = executor
+        .execute(query_request_scoped_with_catalog(
+            &source,
+            CanonicalValue::Null,
+            Duration::from_secs(3),
+            scope,
+            &catalog,
+        )?)
+        .await?;
+    assert_eq!(
+        outcome.value,
+        CanonicalValue::Array(
+            (1_990..1_995)
+                .map(CanonicalValue::Int64)
+                .collect::<Vec<_>>()
+        )
+    );
+    assert!(outcome.dependencies.iter().any(|dependency| matches!(
+        dependency,
+        ReadDependency::Range { index_id: value, .. } if *value == index_id()
+    )));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_query_engine_conformance() -> Result<(), Box<dyn Error>> {
     let Ok(url) = std::env::var("RUNKU_TEST_POSTGRES_URL") else {
         return Ok(());
@@ -632,20 +852,28 @@ where
     let commit = store.commit(&batch).await?;
     let source = format!(
         r#"
-        export default async (ctx, key) => {{
+        export const query = async (ctx, key) => {{
           const document = await ctx.db.get("{table}", "{document}");
           const rows = await ctx.db.scan("{index}", {{
             lower: {{ kind: "inclusive", key }},
             upper: {{ kind: "inclusive", key }},
             limit: 10
           }});
-          return {{ value: document.value, rows: BigInt(rows.length), same: rows[0].documentId.value === document.documentId.value }};
+          const page = await ctx.db.query("{table}");
+          return {{
+            value: document.value,
+            rows: BigInt(rows.length),
+            same: rows[0].documentId.value === document.documentId.value,
+            pageRows: BigInt(page.documents.length),
+            pageValue: page.documents[0].value,
+            cursor: page.nextCursor
+          }};
         }};
         "#
     );
     let executor = executor(store)?;
     let outcome = executor
-        .execute(query_request_scoped(
+        .execute(query_request_scoped_with_schema(
             &source,
             CanonicalValue::Bytes(key.as_bytes().to_vec()),
             Duration::from_secs(2),
@@ -653,13 +881,19 @@ where
         )?)
         .await?;
     assert_eq!(outcome.snapshot_sequence, Some(commit.commit_sequence));
-    assert_eq!(outcome.dependencies.len(), 2);
+    assert_eq!(outcome.dependencies.len(), 3);
     let CanonicalValue::Object(value) = outcome.value else {
         return Err("expected query object".into());
     };
     assert_eq!(value["value"], CanonicalValue::String("real".to_owned()));
     assert_eq!(value["rows"], CanonicalValue::Int64(1));
     assert_eq!(value["same"], CanonicalValue::Boolean(true));
+    assert_eq!(value["pageRows"], CanonicalValue::Int64(1));
+    assert_eq!(
+        value["pageValue"],
+        CanonicalValue::String("real".to_owned())
+    );
+    assert_eq!(value["cursor"], CanonicalValue::Null);
     Ok(())
 }
 
@@ -730,6 +964,82 @@ fn query_request_scoped(
             implementation_hash: Sha256Digest::of(source.as_bytes()),
             arguments_contract_hash: Sha256Digest::from_bytes([5; 32]),
             result_contract_hash: Sha256Digest::from_bytes([6; 32]),
+            capabilities: vec![Capability::DbRead],
+        }],
+        cron_definitions: Vec::new(),
+    };
+    Ok(InvocationRequest::new(
+        scope,
+        release_id,
+        RequestId::generate(),
+        InvocationId::generate(),
+        function_id,
+        Arc::new(manifest),
+        artifact,
+        arguments,
+        timeout,
+        CancellationToken::new(),
+    )?)
+}
+
+fn query_request_scoped_with_schema(
+    source: &str,
+    arguments: CanonicalValue,
+    timeout: Duration,
+    scope: EnvironmentScope,
+) -> Result<InvocationRequest, Box<dyn Error>> {
+    let catalog = SchemaCatalog::new(scope.project_id(), Vec::new())?;
+    query_request_scoped_with_catalog(source, arguments, timeout, scope, &catalog)
+}
+
+fn query_request_scoped_with_catalog(
+    source: &str,
+    arguments: CanonicalValue,
+    timeout: Duration,
+    scope: EnvironmentScope,
+    catalog: &SchemaCatalog,
+) -> Result<InvocationRequest, Box<dyn Error>> {
+    let schema = DocumentSchemaV1::new(vec![DocumentTableContract {
+        id: table_id(),
+        name: "messages".to_owned(),
+        mode: TableMode::Queryable,
+        document_contract: Contract::Any,
+    }])?;
+    let schema_bytes = encode_document_schema(&schema)?;
+    let index_bytes = encode_schema_catalog(catalog)?;
+    let arguments_bytes = encode_contract(&Contract::Any)?;
+    let result_bytes = encode_contract(&Contract::Any)?;
+    let resources = [
+        source.to_owned(),
+        String::from_utf8(schema_bytes.clone())?,
+        String::from_utf8(index_bytes.clone())?,
+        String::from_utf8(arguments_bytes.clone())?,
+        String::from_utf8(result_bytes.clone())?,
+    ];
+    let bundle = SafeEsmBundleV1::from_sources(resources)?;
+    let artifact: Arc<[u8]> = encode_safe_esm_bundle(&bundle)?.into();
+    let release_id = ReleaseId::from_ulid(Ulid::from(1_u128));
+    let function_id = FunctionId::from_ulid(Ulid::from(4_u128));
+    let manifest = ReleaseManifestV1 {
+        release_id,
+        project_id: scope.project_id(),
+        build_id: BuildId::from_ulid(Ulid::from(3_u128)),
+        created_at: TimestampMicros::new(1_700_000_000_000_000),
+        runtime_version: "runku-js".parse()?,
+        artifact: bundle.descriptor()?,
+        function_contract_hash: Sha256Digest::from_bytes([2; 32]),
+        schema_contract_hash: Sha256Digest::of(&schema_bytes),
+        index_contract_hash: Sha256Digest::of(&index_bytes),
+        functions: vec![FunctionManifest {
+            id: function_id,
+            name: "tests.query".parse()?,
+            function_type: FunctionType::Query,
+            visibility: FunctionVisibility::Public,
+            auth_policy: AuthPolicy::None,
+            runtime_class: RuntimeClass::SafeV8,
+            implementation_hash: Sha256Digest::of(source.as_bytes()),
+            arguments_contract_hash: Sha256Digest::of(&arguments_bytes),
+            result_contract_hash: Sha256Digest::of(&result_bytes),
             capabilities: vec![Capability::DbRead],
         }],
         cron_definitions: Vec::new(),

@@ -53,8 +53,14 @@ pub enum Contract {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<FiniteBound>,
     },
-    /// Accepts Unicode strings measured in UTF-8 bytes.
+    /// Accepts Unicode strings with optional human-readable code-point and defensive byte bounds.
     String {
+        /// Minimum Unicode code-point length.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum_length: Option<u32>,
+        /// Maximum Unicode code-point length.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        maximum_length: Option<u32>,
         /// Minimum UTF-8 byte length.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         minimum_bytes: Option<u32>,
@@ -145,8 +151,29 @@ pub struct DocumentTableContract {
     pub id: TableId,
     /// Stable code-generation name.
     pub name: String,
+    /// Declared access capability. Existing schemas default to queryable.
+    #[serde(default, skip_serializing_if = "TableMode::is_default")]
+    pub mode: TableMode,
     /// Contract enforced for the complete stored document value.
     pub document_contract: Contract,
+}
+
+/// Logical access capability requested for one table.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableMode {
+    /// Point reads and writes only; no table query contract.
+    KeyValue,
+    /// Point operations plus bounded/index-planned table queries.
+    #[default]
+    Queryable,
+}
+
+impl TableMode {
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip predicate receives `&Self`.
+    fn is_default(&self) -> bool {
+        *self == Self::Queryable
+    }
 }
 
 /// Canonical Document Schema v1 embedded in a Release artifact.
@@ -302,10 +329,15 @@ impl Contract {
                 }
             }
             Self::String {
+                minimum_length,
+                maximum_length,
                 minimum_bytes,
                 maximum_bytes,
+            } => {
+                validate_bounds(*minimum_length, *maximum_length)?;
+                validate_bounds(*minimum_bytes, *maximum_bytes)
             }
-            | Self::Bytes {
+            Self::Bytes {
                 minimum_bytes,
                 maximum_bytes,
             } => validate_bounds(*minimum_bytes, *maximum_bytes),
@@ -506,11 +538,16 @@ impl Contract {
             }
             (
                 Self::String {
+                    minimum_length,
+                    maximum_length,
                     minimum_bytes,
                     maximum_bytes,
                 },
                 CanonicalValue::String(value),
-            ) => validate_length(value.len(), *minimum_bytes, *maximum_bytes),
+            ) => {
+                validate_length(value.chars().count(), *minimum_length, *maximum_length)?;
+                validate_length(value.len(), *minimum_bytes, *maximum_bytes)
+            }
             (
                 Self::Bytes {
                     minimum_bytes,

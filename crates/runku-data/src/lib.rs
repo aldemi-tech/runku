@@ -16,10 +16,10 @@ pub use batch::{
 pub use error::StoreError;
 pub use model::{
     ClaimedOutboxBatch, ClaimedScheduledInvocation, CommitResult, DocumentRecord,
-    DocumentRevisionResult, IndexEntry, IndexRange, KeyBound, OutboxConsumerName, OutboxCursor,
-    OutboxEventRecord, ScheduleCancelResult, ScheduleCompletion, ScheduleStatus,
-    ScheduledInvocationRecord,
+    DocumentRevisionResult, IndexEntry, IndexRange, IndexScanCursor, IndexScanDirection, KeyBound,
+    OutboxConsumerName, OutboxCursor, OutboxEventRecord, ScheduleCancelResult, ScheduleCompletion,
+    ScheduleStatus, ScheduledInvocationRecord, TableScanCursor,
 };
 pub use runku_core::{EnvironmentScope, FunctionName, ParseFunctionNameError, PinnedCode};
-pub use store::{LogicalStore, ReadSnapshot, StoreBackend};
+pub use store::{IndexPreparation, LogicalStore, ReadSnapshot, StoreBackend};
 pub use telemetry::{StoreTelemetry, StoreTelemetryRecorder, StoreTelemetrySnapshot};

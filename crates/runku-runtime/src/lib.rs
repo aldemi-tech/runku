@@ -21,7 +21,8 @@ mod worker;
 
 pub use configuration::{ConfigurationRead, ConfigurationReadError, ConfigurationValueKind};
 pub use data::{
-    DataBoundKind, DataDocument, DataGetRequest, DataIndexEntry, DataKeyBound, DataRead,
+    DataBoundKind, DataDocument, DataGetRequest, DataIndexEntry, DataKeyBound, DataQueryDirection,
+    DataQueryFilter, DataQueryOperator, DataQueryOrder, DataQueryPage, DataQueryRequest, DataRead,
     DataReadError, DataScanRequest, DataWrite,
 };
 pub use error::RuntimeError;

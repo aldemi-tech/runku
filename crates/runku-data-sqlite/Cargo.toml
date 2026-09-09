@@ -12,6 +12,7 @@ publish.workspace = true
 async-trait.workspace = true
 runku-core = { path = "../runku-core" }
 runku-data = { path = "../runku-data" }
+runku-schema = { path = "../runku-schema" }
 runku-value = { path = "../runku-value" }
 sha2.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite-bundled"] }

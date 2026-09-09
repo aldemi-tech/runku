@@ -29,7 +29,7 @@ use runku_runtime::{
     FunctionInvoke, InvocationRequest, RuntimeError, RuntimeSupervisor, ScheduleCreate,
     ScheduleError, ScheduleRequest, ScheduleTime,
 };
-use runku_schema::{SchemaCatalog, SchemaError, decode_schema_catalog, extract_index_key};
+use runku_schema::{SchemaCatalog, SchemaError, decode_schema_catalog, extract_index_keys};
 use runku_value::{CanonicalValue, TimestampMicros, encode_stored_value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -270,6 +270,15 @@ impl MutationExecutor {
         {
             return Err(MutationExecutionError::Schema(SchemaError::InvalidCatalog));
         }
+        let active_schema = match active_schema {
+            Some(schema) => Some(Arc::new(
+                self.store
+                    .effective_write_index_catalog(request.scope(), &schema)
+                    .await
+                    .map_err(MutationExecutionError::Storage)?,
+            )),
+            None => None,
+        };
         let event_id = OutboxEventId::from_ulid(operation_id.as_ulid());
         let schedule_base = operation_time_micros(operation_id)?;
         let pinned_code = request.pinned_code();
@@ -706,29 +715,31 @@ pub fn plan_document_index_mutations<'a>(
             DocumentMutation::Delete { .. } => (None, 0),
         };
         for definition in schema.indexes_for_table(mutation.table_id()) {
-            let old_key = old_value
-                .map(|value| extract_index_key(definition, value))
+            let old_keys = old_value
+                .map(|value| extract_index_keys(definition, value))
                 .transpose()
                 .map_err(MutationExecutionError::Schema)?
-                .flatten();
-            let new_key = new_value
-                .map(|value| extract_index_key(definition, value))
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let new_keys = new_value
+                .map(|value| extract_index_keys(definition, value))
                 .transpose()
                 .map_err(MutationExecutionError::Schema)?
-                .flatten();
-            if let Some(old_key) = old_key.as_ref()
-                && new_key.as_ref() != Some(old_key)
-            {
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            for old_key in old_keys.difference(&new_keys) {
                 indexes.push(IndexMutation::Delete {
                     index_id: definition.index_id(),
                     key: old_key.clone(),
                     document_id: mutation.document_id(),
                 });
             }
-            if let Some(new_key) = new_key {
+            for new_key in &new_keys {
                 indexes.push(IndexMutation::Put {
                     index_id: definition.index_id(),
-                    key: new_key,
+                    key: new_key.clone(),
                     table_id: mutation.table_id(),
                     document_id: mutation.document_id(),
                     document_revision: new_revision,

@@ -1613,7 +1613,9 @@ fn map_store(error: StoreError) -> GatewayFailure {
 
 fn map_data(error: DataReadError) -> GatewayFailure {
     let class = match error {
-        DataReadError::InvalidRequest => ErrorClassV1::InvalidRequest,
+        DataReadError::InvalidRequest | DataReadError::QueryRequiresIndex => {
+            ErrorClassV1::InvalidRequest
+        }
         DataReadError::Unavailable | DataReadError::Storage => ErrorClassV1::Unavailable,
         DataReadError::Timeout | DataReadError::Cancelled => ErrorClassV1::Timeout,
         DataReadError::LimitExceeded => ErrorClassV1::LimitExceeded,

@@ -12,7 +12,7 @@ silently falls back to `latest`, another Release, a weaker runtime, or a differe
 ## Current distribution matrix
 
 The latest published coordinated product distribution and frontend SDK pair report version
-`0.5.1`. The source tree is preparing an unpublished `0.5.2` candidate; it is not a published SDK,
+`0.5.1`. The source tree is preparing an unpublished `0.5.3` candidate; it is not a published SDK,
 CLI, Git tag, GitHub Release, or final distribution. Neither track has established a general stable
 compatibility window. Version 0.3.0 is the first supported compact Docker installation floor;
 0.5.1 supports a deliberate forward upgrade from that floor.
@@ -53,6 +53,14 @@ read-only Release/artifact projection. Both profiles share one trust domain and 
 boundary required for mutually hostile tenants. The packaged separate worker does not yet attach a
 remote Environment configuration broker and rejects Node Actions with `variable:*` or `secret:*`
 during Release admission.
+
+The 0.5.3 candidate adds logical table queries, table access modes, ordered and word-search index
+planning, and durable index backfill/readiness. An empty query pages by the physical
+`createdAt DESC, documentId DESC` index; arbitrary unindexed filters/sorts are bounded to 2,000
+documents and then require a declared index. Both table modes keep the same canonical documents,
+so `keyValue` to `queryable` migrates projections rather than copying data. PostgreSQL and
+YugabyteDB YSQL may be dedicated per Environment or explicitly shared across scoped Environments.
+The latter is logical multitenancy and does not provide per-Environment database-role isolation.
 
 Management compatibility evidence is v2. Candidate preflight is available before freeze and a
 revision-bound POST prevents applying evidence after Release/Channel or serving-policy state has
@@ -105,15 +113,15 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Boundary | Current rule |
 |---|---|
 | Published CLI | Same version on GitHub and npm; macOS/Linux GNU glibc 2.31+/Windows on ARM64/x86_64 |
-| Source CLI | Record the Git commit; a modified checkout or 0.5.2 candidate is not identified by a published version alone |
+| Source CLI | Record the Git commit; a modified checkout or 0.5.3 candidate is not identified by a published version alone |
 | Rust | Exact repository toolchain; workspace MSRV is a separate crate contract |
 | Node | 20.18.1+ for current SDK/examples; build/runtime contracts must agree |
 | Frontend SDK packages | `@runku/client` and `@runku/react` update together with exact peer versions; currently 0.5.1 |
 | Distribution JavaScript packages | `@runku/server` and `@runku/cli` remain coordinated with the product distribution; currently 0.5.1 |
 | HTTP/WebSocket | v1 envelopes; unknown versions rejected |
-| Values/index keys | v1 canonical encodings; existing vectors immutable |
+| Values/index keys | value/key v1; ordered-only catalog v1 and search-capable catalog v2; existing vectors immutable |
 | Release/artifact | Version/digest/size/runtime descriptors verified |
-| SQLite/PostgreSQL | Same logical contract; physical schema/files are internal |
+| SQLite/PostgreSQL/YugabyteDB | Same logical contract; physical schema/files are internal |
 | Server composition | Linux GNU glibc 2.31+ ARM64/x86_64 binary and multi-platform OCI image; Safe V8 always present; optional in-container or separate-container trusted Full Node for one Product root or a `dedicated` one-Environment cell |
 | Compact deployment | Dedicated Linux host, Compose v2, one active Environment writer, PostgreSQL 16, host TLS proxy, backup/empty restore |
 | Distributed deployment | No published separated-role/Agent/Kubernetes support window yet |
@@ -130,7 +138,7 @@ behavioral fix for 0.4.6 responses that could otherwise leave the desired revisi
 | Public API | strict HTTP/WebSocket v1 envelopes and canonical values |
 | Compact server | Linux GNU glibc 2.31+ ARM64/x86-64 binary and multi-platform non-root image |
 | Deployment | Docker Compose v2 compact profile or externally orchestrated cell member; PostgreSQL 16 Platform Identity, Safe runtime always, optional `dedicated-host` or `dedicated-worker` trusted Node, one active writer per Environment |
-| Function data | Product-root SQLite by default; optional exact-scope PostgreSQL 16 profile |
+| Function data | Product-root SQLite by default; optional PostgreSQL 16+ or YugabyteDB YSQL, dedicated by default or explicitly shared |
 | Distributed roles/Kubernetes | no published general-purpose Agent, active-active, or Helm support window |
 
 Node.js 20.18.1 or newer is required for the current npm/application tooling. The native CLI does

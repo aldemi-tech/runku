@@ -12,10 +12,14 @@ use runku_core::{DocumentId, IndexId, OutboxEventId, ScheduledInvocationId, Tabl
 use runku_data::{
     ClaimedOutboxBatch, ClaimedScheduledInvocation, CommitBatch, CommitResult, DocumentMutation,
     DocumentReadAssertion, DocumentRecord, DocumentRevisionResult, EnvironmentScope,
-    ExpectedRevision, IndexEntry, IndexMutation, IndexRange, KeyBound, LogicalStore,
-    OutboxConsumerName, OutboxCursor, OutboxEventRecord, PinnedCode, ReadSnapshot,
-    ScheduleCancelResult, ScheduleCompletion, ScheduleStatus, ScheduledInvocationRecord,
-    StoreBackend, StoreError, StoreTelemetry, StoreTelemetryRecorder, StoreTelemetrySnapshot,
+    ExpectedRevision, IndexEntry, IndexMutation, IndexPreparation, IndexRange, IndexScanCursor,
+    IndexScanDirection, KeyBound, LogicalStore, OutboxConsumerName, OutboxCursor,
+    OutboxEventRecord, PinnedCode, ReadSnapshot, ScheduleCancelResult, ScheduleCompletion,
+    ScheduleStatus, ScheduledInvocationRecord, StoreBackend, StoreError, StoreTelemetry,
+    StoreTelemetryRecorder, StoreTelemetrySnapshot,
+};
+use runku_schema::{
+    SchemaCatalog, decode_schema_catalog, encode_schema_catalog, extract_index_keys,
 };
 use runku_value::{
     CanonicalValue, IndexKey, TimestampMicros, decode_stored_value, encode_stored_value,
@@ -344,6 +348,205 @@ impl SqliteStore {
     }
 }
 
+#[allow(clippy::too_many_lines)]
+async fn prepare_sqlite_indexes(
+    pool: &SqlitePool,
+    scope: EnvironmentScope,
+    catalog: &SchemaCatalog,
+    document_limit: u32,
+) -> Result<IndexPreparation, StoreError> {
+    if catalog.project_id() != scope.project_id() || !(1..=1_000).contains(&document_limit) {
+        return Err(StoreError::InvalidRange);
+    }
+    let project = scope.project_id().to_string();
+    let environment = scope.environment_id().to_string();
+    let mut transaction = migration::begin_immediate(pool).await?;
+    sqlx::query(
+        "INSERT INTO runku_environment_sequences(project_id, environment_id, commit_sequence) \
+         VALUES (?, ?, 0) ON CONFLICT DO NOTHING",
+    )
+    .bind(&project)
+    .bind(&environment)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_sqlx_error)?;
+    for definition in catalog.indexes() {
+        let single = SchemaCatalog::new(scope.project_id(), vec![definition.clone()])
+            .map_err(|_| StoreError::Corruption)?;
+        let bytes = encode_schema_catalog(&single).map_err(|_| StoreError::Corruption)?;
+        let existing = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT definition_bytes FROM runku_index_registry \
+             WHERE project_id = ? AND environment_id = ? AND index_id = ?",
+        )
+        .bind(&project)
+        .bind(&environment)
+        .bind(definition.index_id().to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+        if existing.as_ref().is_some_and(|stored| stored != &bytes) {
+            return Err(StoreError::Corruption);
+        }
+        if existing.is_none() {
+            sqlx::query(
+                "INSERT INTO runku_index_registry(project_id, environment_id, index_id, definition_bytes, status, cursor_document_id, updated_at_micros) \
+                 VALUES (?, ?, ?, ?, 'building', NULL, ?)",
+            )
+            .bind(&project)
+            .bind(&environment)
+            .bind(definition.index_id().to_string())
+            .bind(bytes)
+            .bind(now_micros()?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+    }
+    let building = sqlx::query(
+        "SELECT index_id, definition_bytes, cursor_document_id FROM runku_index_registry \
+         WHERE project_id = ? AND environment_id = ? AND status = 'building' \
+         AND index_id IN (SELECT index_id FROM runku_index_registry WHERE project_id = ? AND environment_id = ?) \
+         ORDER BY index_id LIMIT 1",
+    )
+    .bind(&project)
+    .bind(&environment)
+    .bind(&project)
+    .bind(&environment)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_sqlx_error)?;
+    let mut processed = 0_u32;
+    if let Some(building) = building {
+        let index_id: String = building
+            .try_get("index_id")
+            .map_err(|_| StoreError::Corruption)?;
+        let bytes: Vec<u8> = building
+            .try_get("definition_bytes")
+            .map_err(|_| StoreError::Corruption)?;
+        let cursor: Option<String> = building
+            .try_get("cursor_document_id")
+            .map_err(|_| StoreError::Corruption)?;
+        let single = decode_schema_catalog(&bytes).map_err(|_| StoreError::Corruption)?;
+        let definition = single.indexes().first().ok_or(StoreError::Corruption)?;
+        if definition.index_id().to_string() != index_id {
+            return Err(StoreError::Corruption);
+        }
+        let rows = sqlx::query(
+            "SELECT table_id, document_id, revision, commit_sequence, created_at_micros, updated_at_micros, value_bytes \
+             FROM runku_documents WHERE project_id = ? AND environment_id = ? AND table_id = ? \
+             AND (? IS NULL OR document_id > ?) ORDER BY document_id LIMIT ?",
+        )
+        .bind(&project)
+        .bind(&environment)
+        .bind(definition.table_id().to_string())
+        .bind(cursor.as_deref())
+        .bind(cursor.as_deref())
+        .bind(i64::from(document_limit) + 1)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+        let has_more = rows.len() > usize::try_from(document_limit).unwrap_or(usize::MAX);
+        let mut last = cursor;
+        for row in rows
+            .iter()
+            .take(usize::try_from(document_limit).unwrap_or(usize::MAX))
+        {
+            let document = decode_document_row(row)?;
+            sqlx::query(
+                "DELETE FROM runku_index_entries WHERE project_id = ? AND environment_id = ? AND index_id = ? AND document_id = ?",
+            )
+            .bind(&project)
+            .bind(&environment)
+            .bind(&index_id)
+            .bind(document.document_id.to_string())
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_error)?;
+            for key in extract_index_keys(definition, &document.value)
+                .map_err(|_| StoreError::Corruption)?
+            {
+                sqlx::query(
+                    "INSERT INTO runku_index_entries(project_id, environment_id, index_id, key_bytes, table_id, document_id, document_revision, commit_sequence) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&project)
+                .bind(&environment)
+                .bind(&index_id)
+                .bind(key.as_bytes())
+                .bind(document.table_id.to_string())
+                .bind(document.document_id.to_string())
+                .bind(positive_i64(document.revision)?)
+                .bind(positive_i64(document.commit_sequence)?)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+            last = Some(document.document_id.to_string());
+            processed = processed.saturating_add(1);
+        }
+        sqlx::query(
+            "UPDATE runku_index_registry SET status = ?, cursor_document_id = ?, updated_at_micros = ? \
+             WHERE project_id = ? AND environment_id = ? AND index_id = ?",
+        )
+        .bind(if has_more { "building" } else { "ready" })
+        .bind(if has_more { last.as_deref() } else { None })
+        .bind(now_micros()?)
+        .bind(&project)
+        .bind(&environment)
+        .bind(&index_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    let building_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM runku_index_registry WHERE project_id = ? AND environment_id = ? AND status = 'building'",
+    )
+    .bind(&project)
+    .bind(&environment)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(map_sqlx_error)?;
+    transaction.commit().await.map_err(map_commit_error)?;
+    Ok(IndexPreparation {
+        ready: building_count == 0,
+        processed_documents: processed,
+    })
+}
+
+async fn effective_sqlite_catalog(
+    pool: &SqlitePool,
+    scope: EnvironmentScope,
+    release_catalog: &SchemaCatalog,
+) -> Result<SchemaCatalog, StoreError> {
+    if release_catalog.project_id() != scope.project_id() {
+        return Err(StoreError::InvalidRange);
+    }
+    let rows = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT definition_bytes FROM runku_index_registry WHERE project_id = ? AND environment_id = ? ORDER BY index_id",
+    )
+    .bind(scope.project_id().to_string())
+    .bind(scope.environment_id().to_string())
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    let mut definitions = release_catalog.indexes().to_vec();
+    for bytes in rows {
+        let catalog = decode_schema_catalog(&bytes).map_err(|_| StoreError::Corruption)?;
+        let definition = catalog.indexes().first().ok_or(StoreError::Corruption)?;
+        if let Some(existing) = definitions
+            .iter()
+            .find(|existing| existing.index_id() == definition.index_id())
+        {
+            if existing != definition {
+                return Err(StoreError::Corruption);
+            }
+        } else {
+            definitions.push(definition.clone());
+        }
+    }
+    SchemaCatalog::new(scope.project_id(), definitions).map_err(|_| StoreError::Corruption)
+}
+
 #[async_trait]
 impl LogicalStore for SqliteStore {
     fn backend(&self) -> StoreBackend {
@@ -400,6 +603,23 @@ impl LogicalStore for SqliteStore {
                 Err(error)
             }
         }
+    }
+
+    async fn prepare_index_catalog(
+        &self,
+        scope: EnvironmentScope,
+        catalog: &SchemaCatalog,
+        document_limit: u32,
+    ) -> Result<IndexPreparation, StoreError> {
+        prepare_sqlite_indexes(&self.pool, scope, catalog, document_limit).await
+    }
+
+    async fn effective_write_index_catalog(
+        &self,
+        scope: EnvironmentScope,
+        release_catalog: &SchemaCatalog,
+    ) -> Result<SchemaCatalog, StoreError> {
+        effective_sqlite_catalog(&self.pool, scope, release_catalog).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -744,6 +964,47 @@ impl ReadSnapshot for SqliteSnapshot {
         row.map(|value| decode_document_row(&value)).transpose()
     }
 
+    async fn scan_documents(
+        &mut self,
+        table_id: TableId,
+        after: Option<runku_data::TableScanCursor>,
+        limit: u32,
+    ) -> Result<Vec<DocumentRecord>, StoreError> {
+        if limit == 0 || limit > 2_001 {
+            return Err(StoreError::InvalidRange);
+        }
+        self.recorder.read();
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT table_id, document_id, revision, commit_sequence, created_at_micros, updated_at_micros, value_bytes \
+             FROM runku_documents WHERE project_id = ",
+        );
+        query
+            .push_bind(self.scope.project_id().to_string())
+            .push(" AND environment_id = ")
+            .push_bind(self.scope.environment_id().to_string())
+            .push(" AND table_id = ")
+            .push_bind(table_id.to_string());
+        if let Some(after) = after {
+            query
+                .push(" AND (created_at_micros < ")
+                .push_bind(after.created_at.get())
+                .push(" OR (created_at_micros = ")
+                .push_bind(after.created_at.get())
+                .push(" AND document_id < ")
+                .push_bind(after.document_id.to_string())
+                .push("))");
+        }
+        query
+            .push(" ORDER BY created_at_micros DESC, document_id DESC LIMIT ")
+            .push_bind(i64::from(limit));
+        let rows = query
+            .build()
+            .fetch_all(&mut **self.transaction()?)
+            .await
+            .map_err(map_sqlx_error)?;
+        rows.iter().map(decode_document_row).collect()
+    }
+
     async fn scan_index(
         &mut self,
         index_id: IndexId,
@@ -766,6 +1027,60 @@ impl ReadSnapshot for SqliteSnapshot {
         query
             .push(" ORDER BY key_bytes, document_id LIMIT ")
             .push_bind(i64::from(limit));
+        let rows = query
+            .build()
+            .fetch_all(&mut **self.transaction()?)
+            .await
+            .map_err(map_sqlx_error)?;
+        rows.iter().map(decode_index_row).collect()
+    }
+
+    async fn scan_index_page(
+        &mut self,
+        index_id: IndexId,
+        range: &IndexRange,
+        after: Option<IndexScanCursor>,
+        direction: IndexScanDirection,
+        limit: u32,
+    ) -> Result<Vec<IndexEntry>, StoreError> {
+        range.validate(limit)?;
+        self.recorder.read();
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT index_id, key_bytes, table_id, document_id, document_revision, commit_sequence \
+             FROM runku_index_entries WHERE project_id = ",
+        );
+        query
+            .push_bind(self.scope.project_id().to_string())
+            .push(" AND environment_id = ")
+            .push_bind(self.scope.environment_id().to_string())
+            .push(" AND index_id = ")
+            .push_bind(index_id.to_string());
+        push_range(&mut query, range);
+        if let Some(after) = after {
+            let comparison = match direction {
+                IndexScanDirection::Ascending => ">",
+                IndexScanDirection::Descending => "<",
+            };
+            query
+                .push(" AND (key_bytes ")
+                .push(comparison)
+                .push(" ")
+                .push_bind(after.key.as_bytes().to_vec())
+                .push(" OR (key_bytes = ")
+                .push_bind(after.key.as_bytes().to_vec())
+                .push(" AND document_id ")
+                .push(comparison)
+                .push(" ")
+                .push_bind(after.document_id.to_string())
+                .push("))");
+        }
+        match direction {
+            IndexScanDirection::Ascending => query.push(" ORDER BY key_bytes, document_id LIMIT "),
+            IndexScanDirection::Descending => {
+                query.push(" ORDER BY key_bytes DESC, document_id DESC LIMIT ")
+            }
+        };
+        query.push_bind(i64::from(limit));
         let rows = query
             .build()
             .fetch_all(&mut **self.transaction()?)

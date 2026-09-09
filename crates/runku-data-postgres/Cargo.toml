@@ -12,9 +12,11 @@ publish.workspace = true
 async-trait.workspace = true
 runku-core = { path = "../runku-core" }
 runku-data = { path = "../runku-data" }
+runku-schema = { path = "../runku-schema" }
 runku-value = { path = "../runku-value" }
 sha2.workspace = true
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 runku-data-conformance = { path = "../runku-data-conformance" }

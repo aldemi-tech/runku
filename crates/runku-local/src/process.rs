@@ -1716,8 +1716,6 @@ mod tests {
             return Ok(());
         };
         let (database_name, database_url) = product_database(&base_url).await?;
-        let migrated = PostgresStore::connect(&database_url, PostgresStoreConfig::TEST).await?;
-        migrated.close().await;
         let first_scope = runku_core::EnvironmentScope::new(
             ProjectId::generate(),
             runku_core::EnvironmentId::generate(),
@@ -1745,6 +1743,10 @@ mod tests {
         assert!(matches!(
             PostgresStore::connect_scoped(&database_url, PostgresStoreConfig::TEST, loser_scope)
                 .await,
+            Err(StoreError::Corruption)
+        ));
+        assert!(matches!(
+            PostgresStore::connect(&database_url, PostgresStoreConfig::TEST).await,
             Err(StoreError::Corruption)
         ));
         drop_product_database(&base_url, &database_name).await?;

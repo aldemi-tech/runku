@@ -250,7 +250,7 @@ export const create = mutation({
   auth: "user",
   visibility: "public",
   capabilities: ["auth:read", "db:read", "db:write"],
-  args: v.object({ title: v.string({ minBytes: 1, maxBytes: 200 }) }),
+  args: v.object({ title: v.string({ minLength: 1, maxLength: 200 }) }),
   returns: v.documentId("notes"),
   async handler(ctx, input) {
     const principal = ctx.auth.principal

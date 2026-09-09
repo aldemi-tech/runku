@@ -2,13 +2,14 @@
 
 use async_trait::async_trait;
 use runku_core::{DocumentId, IndexId, OutboxEventId, ScheduledInvocationId, TableId, WorkerId};
+use runku_schema::SchemaCatalog;
 use runku_value::{CanonicalValue, TimestampMicros};
 
 use crate::{
     ClaimedOutboxBatch, ClaimedScheduledInvocation, CommitBatch, CommitResult, DocumentRecord,
-    EnvironmentScope, IndexEntry, IndexRange, OutboxConsumerName, OutboxCursor,
-    ScheduleCancelResult, ScheduleCompletion, ScheduledInvocationRecord, StoreError,
-    StoreTelemetrySnapshot,
+    EnvironmentScope, IndexEntry, IndexRange, IndexScanCursor, IndexScanDirection,
+    OutboxConsumerName, OutboxCursor, ScheduleCancelResult, ScheduleCompletion,
+    ScheduledInvocationRecord, StoreError, StoreTelemetrySnapshot, TableScanCursor,
 };
 
 /// Physical backend selected by composition.
@@ -18,6 +19,17 @@ pub enum StoreBackend {
     SQLite,
     /// Authoritative `PostgreSQL`.
     PostgreSQL,
+    /// Distributed PostgreSQL-compatible `YugabyteDB` YSQL.
+    YugabyteDB,
+}
+
+/// Durable progress from one bounded logical-index preparation step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IndexPreparation {
+    /// True only when every definition in the requested catalog is fully backfilled.
+    pub ready: bool,
+    /// Documents reconciled by this step.
+    pub processed_documents: u32,
 }
 
 /// A real consistent read transaction.
@@ -33,11 +45,31 @@ pub trait ReadSnapshot: Send {
         document_id: DocumentId,
     ) -> Result<Option<DocumentRecord>, StoreError>;
 
+    /// Scans one logical table in stable `(created_at DESC, document_id DESC)` order.
+    ///
+    /// This primitive exists for bounded query planning; callers must enforce their own scan cap.
+    async fn scan_documents(
+        &mut self,
+        table_id: TableId,
+        after: Option<TableScanCursor>,
+        limit: u32,
+    ) -> Result<Vec<DocumentRecord>, StoreError>;
+
     /// Scans one logical index in `(key, document_id)` order.
     async fn scan_index(
         &mut self,
         index_id: IndexId,
         range: &IndexRange,
+        limit: u32,
+    ) -> Result<Vec<IndexEntry>, StoreError>;
+
+    /// Scans one logical index with stable keyset pagination in either direction.
+    async fn scan_index_page(
+        &mut self,
+        index_id: IndexId,
+        range: &IndexRange,
+        after: Option<IndexScanCursor>,
+        direction: IndexScanDirection,
         limit: u32,
     ) -> Result<Vec<IndexEntry>, StoreError>;
 
@@ -78,6 +110,25 @@ pub trait LogicalStore: Send + Sync {
 
     /// Validates and commits documents/index/outbox/scheduling atomically.
     async fn commit(&self, batch: &CommitBatch) -> Result<CommitResult, StoreError>;
+
+    /// Registers and advances a bounded, resumable index backfill for one catalog.
+    async fn prepare_index_catalog(
+        &self,
+        _scope: EnvironmentScope,
+        _catalog: &SchemaCatalog,
+        _document_limit: u32,
+    ) -> Result<IndexPreparation, StoreError> {
+        Err(StoreError::Internal)
+    }
+
+    /// Merges release indexes with every durable building/ready projection for dual writes.
+    async fn effective_write_index_catalog(
+        &self,
+        _scope: EnvironmentScope,
+        release_catalog: &SchemaCatalog,
+    ) -> Result<SchemaCatalog, StoreError> {
+        Ok(release_catalog.clone())
+    }
 
     /// Claims the next ordered outbox batch under a fenced consumer lease.
     async fn claim_outbox(

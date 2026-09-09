@@ -101,11 +101,14 @@ const noNestedCapability = (async (ctx) => {
 }) satisfies ActionHandler<"network:https", null, null>
 
 const messageValidator = v.object({
-  body: v.string({ minBytes: 1, maxBytes: 200 }),
+  body: v.string({ minLength: 1, maxLength: 200 }),
   tag: v.optional(v.string()),
 })
 const schema = defineSchema({
-  messages: defineTable(messageValidator).index("by_body", ["body"]),
+  messages: defineTable(messageValidator, { mode: "queryable" })
+    .index("by_body", ["body"])
+    .searchIndex("body_words", "body"),
+  cache: defineTable(v.any(), { mode: "keyValue" }),
 })
 
 const messageInput = v.pick(messageValidator, ["body"])
@@ -113,11 +116,14 @@ type MessageInput = Infer<typeof messageInput>
 const validMessageInput: MessageInput = { body: "hello" }
 void validMessageInput
 schema.indexes.messages.by_body satisfies string
+schema.indexes.messages.body_words satisfies string
 // @ts-expect-error undeclared index names are absent
 void schema.indexes.messages.missing
 
 // @ts-expect-error indexes can reference only declared top-level document fields
 defineTable(v.object({ body: v.string() })).index("invalid", ["missing"])
+// @ts-expect-error search indexes require a string-valued field
+defineTable(v.object({ rank: v.int64() })).searchIndex("invalid", "rank")
 
 const declaredQuery = defineQuery({
   auth: "optional",
@@ -155,6 +161,24 @@ declare const writableDatabase: import("../src/index.js").MutationWriteDatabase
 declare const messageDocumentId: DocumentId<"messages">
 // @ts-expect-error writes must satisfy the table document validator
 void writableDatabase.insert(schema.tables.messages, messageDocumentId, { tag: "missing body" })
+
+const messagePage = queryDatabase.query(schema.tables.messages)
+const filteredMessagePage = queryDatabase.query(schema.tables.messages, {
+  where: [{ field: "body", operator: "contains", value: "buy" }],
+  orderBy: [{ field: "$createdAt", direction: "desc" }],
+  limit: 100,
+  cursor: null,
+})
+const searchedMessagePage = queryDatabase.query(schema.tables.messages, {
+  where: [{ field: "body", operator: "search", value: "buy" }],
+})
+void [messagePage, filteredMessagePage, searchedMessagePage]
+
+const defaultedQuery = defineQuery({
+  handler() {
+    return null
+  },
+})
 
 const declaredAction = defineAction({
   auth: "user",
@@ -195,6 +219,7 @@ void [
   declaredQuery,
   declaredMutation,
   declaredAction,
+  defaultedQuery,
   hourly,
   Runku.timestamp(1n),
   Runku.id("doc_00000000000000000000000001"),

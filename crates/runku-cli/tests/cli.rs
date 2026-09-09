@@ -1213,7 +1213,7 @@ async fn structured_contracts_enforce_public_calls_results_and_documents_e2e()
     std::fs::create_dir(&functions)?;
     std::fs::write(
         functions.join("schema.ts"),
-        "import { defineSchema, defineTable, v } from '@runku/server';\nexport default defineSchema({ messages: defineTable(v.string({ minBytes: 1, maxBytes: 64 })) });\n",
+        "import { defineSchema, defineTable, v } from '@runku/server';\nexport default defineSchema({ messages: defineTable(v.string({ minLength: 1, maxLength: 64 })) });\n",
     )?;
     std::fs::write(
         functions.join("queries.ts"),
@@ -1221,8 +1221,8 @@ async fn structured_contracts_enforce_public_calls_results_and_documents_e2e()
 import { query, v } from "@runku/server";
 export const echo = query({
   auth: "none", visibility: "public", capabilities: [],
-  args: v.object({ value: v.string({ minBytes: 1, maxBytes: 32 }) }),
-  returns: v.string({ minBytes: 1, maxBytes: 32 }), handler: (_ctx, input) => input.value,
+  args: v.object({ value: v.string({ minLength: 1, maxLength: 32 }) }),
+  returns: v.string({ minLength: 1, maxLength: 32 }), handler: (_ctx, input) => input.value,
 });
 export const badResult = query({
   auth: "none", visibility: "public", capabilities: [], args: v.null(), returns: v.string(),

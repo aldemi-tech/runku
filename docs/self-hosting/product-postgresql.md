@@ -1,9 +1,9 @@
-# Environment-scoped Function platform PostgreSQL
+# Function platform PostgreSQL and YugabyteDB YSQL
 
 Runku Server can place the transactional Function data path for its attached Product Environment
-in PostgreSQL. This is an optional Self-Hosted profile for operators that need PostgreSQL durability,
-concurrency, and database-level isolation while retaining the same Query, Mutation, Realtime,
-outbox, and scheduling semantics as local SQLite.
+in PostgreSQL or YugabyteDB through YSQL. This is an optional Self-Hosted profile for operators that
+need concurrent durable storage—or distributed SQL—while retaining the same Query, Mutation,
+Realtime, outbox, and scheduling semantics as local SQLite.
 
 ## Exact boundary
 
@@ -31,6 +31,8 @@ Function platform database through one secret source:
 ```sh
 export RUNKU_PRODUCT_ROOT=/var/lib/runku/product
 export RUNKU_PLATFORM_DATABASE_URL_FILE=/run/secrets/platform-database-url
+# Default: bind this database to exactly one Environment.
+export RUNKU_PLATFORM_DATABASE_ISOLATION=dedicated
 
 runku-server check
 runku-server migrate
@@ -55,11 +57,36 @@ Use one database and one least-privilege login role per Environment. Revoke `CON
 grant it only to that Environment's role, restrict the role to its own database, and constrain
 network access to the owning Runku workload. Do not reuse the Platform Identity credential.
 
-On first scoped connection Runku atomically writes a singleton binding containing the exact Project
-and Environment IDs. The database rejects a later or concurrent attempt to attach another scope.
-Every scoped store operation also checks the process binding before issuing SQL. These guards detect
-misconfiguration; PostgreSQL roles, database grants, and network policy remain the isolation
-boundary.
+`RUNKU_PLATFORM_DATABASE_ISOLATION=dedicated` is the fail-closed default. On first scoped
+connection Runku atomically writes a singleton binding containing the exact Project and Environment
+IDs. The database rejects a later or concurrent attempt to attach another scope. Every scoped store
+operation also checks the process binding before issuing SQL.
+
+An operator running hundreds of trusted Runku Environments may explicitly select `shared`. In that
+mode the singleton binding is not used; every primary/foreign/index key and every transaction still
+contains the exact Project and Environment IDs. Shared mode reduces database/catalog and connection
+overhead, but database roles no longer isolate one Environment from another: Runku authorization,
+scope checks, credentials, network policy, pool budgets, noisy-neighbor limits, and backup tooling
+must be operated as a shared multitenant boundary. Use separate databases for tenants requiring
+hard database-level isolation.
+
+The adapter detects YugabyteDB from `version()` and reports the `YugabyteDB` backend while using the
+same YSQL URL and logical contract. Migration coordination uses a portable locked singleton row;
+it does not depend on PostgreSQL advisory locks. Validate the exact YugabyteDB version and topology
+with `RUNKU_TEST_YUGABYTE_URL` before production admission.
+
+The [YugabyteDB legal page](https://docs.yugabyte.com/stable/legal/) states that its ordinary
+database binaries, including database features, are Apache 2.0; artifacts whose name contains
+`-managed` use the Polyform Free Trial license. Runku integrates only through YSQL and does not
+bundle YugabyteDB, YugabyteDB Anywhere, or Aeon. Verify the exact downloaded artifact and its
+license before redistribution; commercial management/support remains a separate operator choice.
+
+Distributed does not mean that every node contains an independent complete database. YugabyteDB
+replicates tablets with Raft. Its
+[deployment checklist](https://docs.yugabyte.com/stable/deploy/checklist/) documents that RF=3
+needs at least three nodes and tolerates one node failure; place those nodes in distinct failure
+domains and still keep tested backups. Runku 0.5.3 remains one active application writer per Environment: YugabyteDB can
+make the data tier distributed, but it does not make Runku serving or scheduling active-active.
 
 ## Readiness and failure handling
 
@@ -77,7 +104,8 @@ in 0.4.4 so monitoring and automation do not break.
 | `SERVER_PRODUCT_DATABASE_URL_INVALID` | unsupported or malformed URL scheme | correct secret configuration |
 | `SERVER_PRODUCT_DATABASE_WITHOUT_PRODUCT_ROOT` | Function platform database configured without an attached Environment | configure the exact initialized root |
 | `SERVER_PRODUCT_DATABASE_NOT_ISOLATED` | Function platform and Identity URLs target the same database | provision a separate database and credential |
-| `SERVER_PRODUCT_DATABASE_SCOPE_CONFLICT` | database is bound to or contains rows for another scope | stop; preserve evidence and select the correct empty/restored database |
+| `SERVER_PRODUCT_DATABASE_SCOPE_CONFLICT` | a dedicated database is bound to or contains rows for another scope | stop; preserve evidence and select the correct empty/restored database |
+| `SERVER_PRODUCT_DATABASE_ISOLATION_INVALID` | isolation is not `dedicated` or `shared` | correct the explicit mode |
 | `SERVER_PRODUCT_DATABASE_MIGRATION_FAILED` | schema/checksum migration failed | stop writers; inspect version and migration evidence |
 | `SERVER_PRODUCT_DATABASE_UNAVAILABLE` | connection, TLS, credentials, capacity, or dependency failed | restore the dependency, then repeat the idempotent startup/migration step |
 
@@ -108,7 +136,7 @@ here.
 
 Before using the optional database for live data:
 
-1. bind an empty PostgreSQL 16+ database to the intended exact Project/Environment;
+1. select PostgreSQL 16+ or a tested YugabyteDB YSQL release and choose `dedicated` or `shared` deliberately;
 2. prove a second scope cannot attach to it;
 3. run one authenticated Query and Mutation, then repeat the Mutation with the same operation ID;
 4. verify document/index Data Admin reads observe the same logical state;

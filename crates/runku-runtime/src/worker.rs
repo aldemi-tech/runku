@@ -17,7 +17,9 @@ use deno_core::{
     Extension, ExtensionFileSource, JsRuntime, NoopModuleLoader, OpDecl, OpState,
     PollEventLoopOptions, RuntimeOptions, op2, serde_v8, v8,
 };
-use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_document_schema};
+use runku_contracts::{
+    Contract, DocumentSchemaV1, TableMode, decode_contract, decode_document_schema,
+};
 use runku_identity::{ApplicationAssurance, PrincipalContext, PrincipalKind, RequestIdentity};
 use runku_observability::{
     InvocationPerformanceTimer, LogLevel, PerformanceComponent, PerformanceOperation,
@@ -33,10 +35,12 @@ use ulid::Ulid;
 
 use crate::{
     ConfigurationRead, ConfigurationValueKind, DataDocument, DataGetRequest, DataIndexEntry,
-    DataRead, DataScanRequest, DataWrite, FileBytes, FileDownloadGrant, FileDownloadGrantRequest,
-    FileMetadata, FileStorage, FileStoreRequest, FileUploadGrant, FileUploadGrantRequest,
-    FunctionCallError, FunctionCallKind, FunctionCallRequest, FunctionInvoke, HttpsEgress,
-    HttpsRequest, HttpsResponse, RuntimeError, ScheduleCreate, ScheduleRequest, ScheduleTime,
+    DataQueryDirection, DataQueryFilter, DataQueryOperator, DataQueryOrder, DataQueryPage,
+    DataQueryRequest, DataRead, DataScanRequest, DataWrite, FileBytes, FileDownloadGrant,
+    FileDownloadGrantRequest, FileMetadata, FileStorage, FileStoreRequest, FileUploadGrant,
+    FileUploadGrantRequest, FunctionCallError, FunctionCallKind, FunctionCallRequest,
+    FunctionInvoke, HttpsEgress, HttpsRequest, HttpsResponse, RuntimeError, ScheduleCreate,
+    ScheduleRequest, ScheduleTime,
     invocation::{InvocationRequest, RuntimeLimits},
     logging::InvocationLogContext,
     value_bridge::{WireValue, from_wire, to_wire},
@@ -129,6 +133,47 @@ impl From<DataIndexEntry> for WireDataIndexEntry {
             document_id: value.document_id.to_string(),
             document_revision: value.document_revision.to_string(),
             commit_sequence: value.commit_sequence.to_string(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireDataQueryFilter {
+    field: String,
+    operator: String,
+    value: WireValue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireDataQueryOrder {
+    field: String,
+    direction: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireDataQueryRequest {
+    table_id: runku_core::TableId,
+    filters: Vec<WireDataQueryFilter>,
+    order: Vec<WireDataQueryOrder>,
+    limit: u32,
+    cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireDataQueryPage {
+    documents: Vec<WireDataDocument>,
+    next_cursor: Option<String>,
+}
+
+impl From<DataQueryPage> for WireDataQueryPage {
+    fn from(value: DataQueryPage) -> Self {
+        Self {
+            documents: value.documents.into_iter().map(Into::into).collect(),
+            next_cursor: value.next_cursor,
         }
     }
 }
@@ -453,6 +498,95 @@ async fn op_runku_data_scan(
         .await
         .map(|entries| entries.into_iter().map(Into::into).collect())
         .map_err(|error| deno_error::JsErrorBox::generic(error.code()))
+}
+
+#[op2]
+#[serde]
+async fn op_runku_data_query(
+    state: Rc<RefCell<OpState>>,
+    #[serde] request: WireDataQueryRequest,
+) -> Result<WireDataQueryPage, deno_error::JsErrorBox> {
+    let platform = state.borrow().borrow::<Arc<PlatformState>>().clone();
+    platform.budget.take()?;
+    if platform.function_type != FunctionType::Query || !platform.data_read {
+        return Err(deno_error::JsErrorBox::generic("DATA_CAPABILITY_DENIED"));
+    }
+    let schema = platform
+        .document_schema
+        .as_ref()
+        .ok_or_else(|| deno_error::JsErrorBox::generic("SCHEMA_CONTRACT_UNAVAILABLE"))?;
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.id == request.table_id)
+        .ok_or_else(|| deno_error::JsErrorBox::generic("SCHEMA_TABLE_UNKNOWN"))?;
+    if table.mode != TableMode::Queryable {
+        return Err(deno_error::JsErrorBox::generic(
+            "DATA_QUERY_TABLE_NOT_QUERYABLE",
+        ));
+    }
+    let filters = request
+        .filters
+        .into_iter()
+        .map(|filter| {
+            let operator = match filter.operator.as_str() {
+                "eq" => DataQueryOperator::Equal,
+                "neq" => DataQueryOperator::NotEqual,
+                "gt" => DataQueryOperator::GreaterThan,
+                "gte" => DataQueryOperator::GreaterThanOrEqual,
+                "lt" => DataQueryOperator::LessThan,
+                "lte" => DataQueryOperator::LessThanOrEqual,
+                "contains" => DataQueryOperator::Contains,
+                "search" => DataQueryOperator::Search,
+                _ => return Err(deno_error::JsErrorBox::generic("DATA_QUERY_INVALID")),
+            };
+            Ok(DataQueryFilter {
+                field: filter.field,
+                operator,
+                value: from_wire(filter.value)
+                    .map_err(|_| deno_error::JsErrorBox::generic("DATA_QUERY_INVALID"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let order = request
+        .order
+        .into_iter()
+        .map(|order| {
+            let direction = match order.direction.as_str() {
+                "asc" => DataQueryDirection::Ascending,
+                "desc" => DataQueryDirection::Descending,
+                _ => return Err(deno_error::JsErrorBox::generic("DATA_QUERY_INVALID")),
+            };
+            Ok(DataQueryOrder {
+                field: order.field,
+                direction,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let data = platform
+        .data
+        .as_ref()
+        .ok_or_else(|| deno_error::JsErrorBox::generic("DATA_BROKER_UNAVAILABLE"))?;
+    let mut page = data
+        .query(
+            DataQueryRequest {
+                table_id: request.table_id,
+                filters,
+                order,
+                limit: request.limit,
+                cursor: request.cursor,
+            },
+            platform.deadline,
+            platform.cancellation.clone(),
+        )
+        .await
+        .map_err(|error| deno_error::JsErrorBox::generic(error.code()))?;
+    for document in &mut page.documents {
+        document.value = schema
+            .project_document(document.table_id, &document.value)
+            .map_err(|_| deno_error::JsErrorBox::generic("DATA_READ_DOCUMENT_INCOMPATIBLE"))?;
+    }
+    Ok(page.into())
 }
 
 fn data_writer(platform: &PlatformState) -> Result<&Arc<dyn DataWrite>, deno_error::JsErrorBox> {
@@ -807,6 +941,7 @@ fn platform_extension() -> Extension {
     const HTTPS_OP: OpDecl = op_runku_https();
     const DATA_GET_OP: OpDecl = op_runku_data_get();
     const DATA_SCAN_OP: OpDecl = op_runku_data_scan();
+    const DATA_QUERY_OP: OpDecl = op_runku_data_query();
     const DATA_INSERT_OP: OpDecl = op_runku_data_insert();
     const DATA_DOCUMENT_ID_OP: OpDecl = op_runku_data_document_id();
     const DATA_REPLACE_OP: OpDecl = op_runku_data_replace();
@@ -840,6 +975,7 @@ fn platform_extension() -> Extension {
             HTTPS_OP,
             DATA_GET_OP,
             DATA_SCAN_OP,
+            DATA_QUERY_OP,
             DATA_INSERT_OP,
             DATA_DOCUMENT_ID_OP,
             DATA_REPLACE_OP,

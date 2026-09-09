@@ -32,8 +32,9 @@ import {
 
 ## Function declaration
 
-`query()`, `mutation()`, and `action()` accept the same six declaration fields. No field is
-optional.
+`query()`, `mutation()`, and `action()` accept the same six declaration fields. Only `handler` is
+required; omitted metadata defaults to `auth: "none"`, `visibility: "public"`,
+`capabilities: []`, `args: v.null()`, and `returns: v.any()`.
 
 ```ts
 export const getProfile = query({
@@ -157,7 +158,7 @@ from the TypeScript `ctx` type and denied by the runtime.
 | Capability | Query | Mutation | Action | Context surface |
 |---|---:|---:|---:|---|
 | `auth:read` | yes | yes | yes | `ctx.auth` |
-| `db:read` | yes | yes | no | `ctx.db.get`, `documentId`; Query also has `scan` |
+| `db:read` | yes | yes | no | `ctx.db.get`, `documentId`; Query also has `query` and `scan` |
 | `db:write` | no | yes | no | `ctx.db.insert`, `replace`, `delete` |
 | `function:query` | yes | yes | yes | `ctx.runQuery` |
 | `function:mutation` | no | yes | yes | `ctx.runMutation` |
@@ -295,6 +296,7 @@ With `db:read`, Query receives:
 ```ts
 ctx.db.get(table, documentId): Promise<DataDocument<T> | null>
 ctx.db.documentId(table, stableKey): DocumentId<TableName>
+ctx.db.query(table, { where?, orderBy?, limit?, cursor? }?): Promise<DataQueryPage<T>>
 ctx.db.scan(index, { lower?, upper?, limit }): Promise<readonly DataIndexEntry[]>
 ```
 
@@ -327,7 +329,7 @@ interface DataDocument<T> {
 
 An entry contains `indexId`, encoded `key`, `tableId`, `documentId`, `documentRevision`, and
 `commitSequence`. The current SDK has no public domain-value index-key encoder or duplicate-safe
-cursor. See [Documents, indexes, and concurrency](../data/documents-and-indexes.md#current-function-scan-limitation)
+cursor. See [Documents, indexes, and concurrency](../data/documents-and-indexes.md#low-level-scan-limitation)
 before designing pagination.
 
 Query limits are 10,000 aggregate scan rows and 10,000 recorded dependencies per invocation.
@@ -506,7 +508,7 @@ and `value.bytes(number[])` for non-JSON constants in `args`.
 | `v.boolean()` | `boolean` | none |
 | `v.int64({minimum?, maximum?})` | `bigint` | inclusive numeric bounds |
 | `v.float64({minimum?, maximum?})` | finite `number` | inclusive numeric bounds |
-| `v.string({minBytes?, maxBytes?})` | `string` | UTF-8 byte length |
+| `v.string({minLength?, maxLength?})` | `string` | Unicode code-point length |
 | `v.bytes({minBytes?, maxBytes?})` | `Uint8Array` | byte length |
 | `v.timestamp()` | `RunkuTimestamp` | signed Unix microseconds |
 | `v.id(kind?)` | `RunkuId` | optional typed-ID kind |
@@ -525,8 +527,8 @@ Use `Infer<typeof validator>` to derive application types:
 
 ```ts
 const createInput = v.object({
-  title: v.string({ minBytes: 1, maxBytes: 200 }),
-  labels: v.array(v.string({ maxBytes: 40 }), { maxItems: 20 }),
+  title: v.string({ minLength: 1, maxLength: 200 }),
+  labels: v.array(v.string({ maxLength: 40 }), { maxItems: 20 }),
 })
 
 type CreateInput = Infer<typeof createInput>
@@ -543,17 +545,19 @@ const document = v.object({ /* fields */ })
 const table = defineTable(document)
   .index("by_owner", ["ownerId"])
   .index("by_owner_created", ["ownerId", "createdAt"])
+  .searchIndex("body_words", "body")
 
 export default defineSchema({
   notes: table,
 })
 ```
 
-Exactly one default schema declaration is allowed below `runku/`. `defineTable()` accepts the
-complete document validator. `.index(name, fields)` declares an ordered list of document field
-paths and returns the same table definition for chaining. `defineSchema()` maps logical table names
-to table definitions and exposes typed `schema.tables` and `schema.indexes` references for handler
-calls.
+Exactly one default schema declaration is allowed below `runku/`. `defineTable(document, options?)`
+defaults to `{ mode: "queryable" }`; `{ mode: "keyValue" }` disables table queries while retaining
+exact ID access. `.index(name, fields)` declares an ordered list of document field paths and
+`.searchIndex(name, field)` declares one Unicode whole-word string index. Both return the same table
+definition for chaining. `defineSchema()` maps logical table names to table definitions and exposes
+typed `schema.tables` and `schema.indexes` references for handler calls.
 
 ## Common runtime budgets
 

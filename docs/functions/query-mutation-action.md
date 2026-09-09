@@ -31,7 +31,8 @@ A logical Function name is its relative module path plus export name. It is at m
 bytes, begins with an ASCII letter, and may contain ASCII letters, digits, `_`, `.`, `/`, or `-`.
 Treat it as a public API name.
 
-Every declaration has exactly six fields:
+Every declaration accepts six fields; only `handler` is required. The defaults are `auth: "none"`,
+`visibility: "public"`, `capabilities: []`, `args: v.null()`, and `returns: v.any()`:
 
 ```ts
 export const example = query({
@@ -138,8 +139,8 @@ export const create = mutation({
   visibility: "public",
   capabilities: ["auth:read", "db:read", "db:write"],
   args: v.object({
-    title: v.string({ minBytes: 1, maxBytes: 200 }),
-    body: v.string({ maxBytes: 20_000 }),
+    title: v.string({ minLength: 1, maxLength: 200 }),
+    body: v.string({ maxLength: 20_000 }),
   }),
   returns: v.object({ id: v.documentId("notes"), note }),
   async handler(ctx, input) {
@@ -229,7 +230,7 @@ export const notifyLater = action({
   auth: "user",
   visibility: "public",
   capabilities: ["scheduler:create"],
-  args: v.object({ notificationId: v.string({ minBytes: 1, maxBytes: 128 }) }),
+  args: v.object({ notificationId: v.string({ minLength: 1, maxLength: 128 }) }),
   returns: v.string(),
   handler(ctx, input) {
     return ctx.scheduler.runAfter(
@@ -284,8 +285,8 @@ export const digest = action({
   auth: "none",
   visibility: "public",
   capabilities: [],
-  args: v.string({ maxBytes: 1_000_000 }),
-  returns: v.string({ minBytes: 64, maxBytes: 64 }),
+  args: v.string({ maxLength: 1_000_000 }),
+  returns: v.string({ minLength: 64, maxLength: 64 }),
   handler(_ctx, input) {
     return createHash("sha256").update(input).digest("hex")
   },

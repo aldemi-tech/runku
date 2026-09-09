@@ -1,9 +1,9 @@
 import { v } from "@runku/server"
 
 export const task = v.object({
-  title: v.string({ minBytes: 1, maxBytes: 120 }),
+  title: v.string({ minLength: 1, maxLength: 120 }),
   done: v.boolean(),
-  attachmentFileId: v.optional(v.string({ minBytes: 30, maxBytes: 30 })),
+  attachmentFileId: v.optional(v.string({ minLength: 30, maxLength: 30 })),
 })
 export const taskId = v.documentId("tasks")
 export const taskView = v.object({ taskId, task })

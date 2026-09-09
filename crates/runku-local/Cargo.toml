@@ -37,6 +37,7 @@ runku-realtime = { path = "../runku-realtime" }
 runku-release-repository = { path = "../runku-release-repository" }
 runku-releases = { path = "../runku-releases" }
 runku-runtime = { path = "../runku-runtime" }
+runku-schema = { path = "../runku-schema" }
 runku-serving = { path = "../runku-serving" }
 runku-value = { path = "../runku-value" }
 serde.workspace = true
@@ -56,7 +57,6 @@ runku-contracts = { path = "../runku-contracts" }
 runku-data-postgres = { path = "../runku-data-postgres" }
 runku-protocol = { path = "../runku-protocol" }
 runku-object-storage-repository = { path = "../runku-object-storage-repository" }
-runku-schema = { path = "../runku-schema" }
 sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

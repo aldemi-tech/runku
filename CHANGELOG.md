@@ -2,6 +2,40 @@
 
 All notable changes are documented in this file.
 
+## 0.5.3 candidate - 2026-09-08
+
+### Added
+
+- Added `ctx.db.query(table, options?)` with one typed input/output contract for indexed and bounded
+  scan execution, stable opaque cursors, a 100-row default page, and a 200-row public page limit.
+- Added `queryable` (default) and `keyValue` table modes, ordered-index auto-selection, a stable
+  physical table scan, and `DATA_QUERY_REQUIRES_INDEX` after a 2,000-document fallback ceiling.
+- Added `.searchIndex(name, field)` and the `search` predicate for normalized case-insensitive
+  Unicode whole-word lookup in long text without a table scan.
+- Added durable bounded index registration/backfill, resume, readiness gating, and dual writes so
+  index additions and `keyValue` to `queryable` transitions do not require an immediate rollout.
+- Added YugabyteDB YSQL detection/conformance and explicit `dedicated` or `shared` Function-platform
+  database isolation. Shared mode retains Project/Environment scope in every logical key.
+
+### Changed
+
+- Function declarations now require only `handler`; authentication, visibility, capabilities,
+  arguments, and return validators have safe documented defaults.
+- String validators use human-readable Unicode `minLength`/`maxLength`. Legacy persisted byte-bound
+  contracts remain decodable, while new declarations reserve byte bounds for `v.bytes`.
+- Compatible Release views continue to share canonical documents and preserve fields unknown to an
+  older schema. Index contract changes are admitted only through lifecycle backfill readiness.
+
+### Compatibility and publication
+
+- PostgreSQL adds append-only document-scan, index-registry, and durable database-isolation-mode
+  migrations; SQLite adds the scan and registry equivalents. Server downgrade after applying these
+  schemas is unsupported.
+- The index catalog emits its existing v1 bytes when all indexes are ordered and v2 only when a
+  search index is present. Existing index artifacts remain byte-identical.
+- This source state is an unpublished `0.5.3` candidate. No npm package, OCI image, Git tag, or
+  GitHub Release exists until the fresh release-owner approval gate is satisfied.
+
 ## 0.5.2 candidate - 2026-09-08
 
 ### Added

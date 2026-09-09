@@ -13,7 +13,7 @@ use deno_ast::{
     },
     swc::ecma_visit::{VisitMut, VisitMutWith},
 };
-use runku_contracts::{Contract, DocumentSchemaV1, DocumentTableContract, FiniteBound};
+use runku_contracts::{Contract, DocumentSchemaV1, DocumentTableContract, FiniteBound, TableMode};
 use runku_core::{FunctionName, IndexId, ProjectId, TableId};
 use runku_releases::{
     AuthPolicy, Capability, CronName, CronSchedule, FunctionType, FunctionVisibility, RuntimeClass,
@@ -35,7 +35,13 @@ const FINGERPRINT_DOMAIN: &[u8] = b"RUNKU_DECLARATIVE_SOURCE_V1\0";
 const TABLE_ID_DOMAIN: &[u8] = b"RUNKU_TABLE_ID_V1";
 const INDEX_ID_DOMAIN: &[u8] = b"RUNKU_INDEX_ID_V1";
 
-type DeclaredIndexes = Vec<(String, Vec<Vec<String>>)>;
+#[derive(Clone, Copy)]
+enum DeclaredIndexKind {
+    Ordered,
+    Search,
+}
+
+type DeclaredIndexes = Vec<(DeclaredIndexKind, String, Vec<Vec<String>>)>;
 type IndexIdMap = BTreeMap<String, BTreeMap<String, String>>;
 type SchemaBuild = (
     DocumentSchemaV1,
@@ -112,7 +118,8 @@ struct SchemaDeclaration {
 struct SchemaTableDeclaration {
     name: String,
     contract: Contract,
-    indexes: Vec<(String, Vec<Vec<String>>)>,
+    mode: TableMode,
+    indexes: DeclaredIndexes,
 }
 
 pub(crate) fn load_project(
@@ -546,13 +553,17 @@ fn parse_function(
         "capabilities",
         "handler",
     ]);
-    if properties.keys().any(|key| !allowed.contains(key.as_str()))
-        || properties.len() + usize::from(method_handler) != allowed.len()
-    {
+    if properties.keys().any(|key| !allowed.contains(key.as_str())) {
         return Err(BuildError::InvalidConfig);
     }
-    let arguments_contract = parse_validator(required(&properties, "args")?, constants, 0)?;
-    let result_contract = parse_validator(required(&properties, "returns")?, constants, 0)?;
+    let arguments_contract = properties.get("args").map_or_else(
+        || Ok(Contract::Null),
+        |value| parse_validator(value, constants, 0),
+    )?;
+    let result_contract = properties.get("returns").map_or_else(
+        || Ok(Contract::Any),
+        |value| parse_validator(value, constants, 0),
+    )?;
     arguments_contract
         .validate_definition()
         .map_err(crate::map_contract)?;
@@ -564,7 +575,10 @@ fn parse_function(
     } else if !method_handler {
         return Err(BuildError::InvalidConfig);
     }
-    let auth_policy = match string_literal(required(&properties, "auth")?)? {
+    let auth_policy = match properties
+        .get("auth")
+        .map_or(Ok("none"), |value| string_literal(value))?
+    {
         "none" => AuthPolicy::None,
         "optional" => AuthPolicy::Optional,
         "guest" => AuthPolicy::Guest,
@@ -572,12 +586,17 @@ fn parse_function(
         "service" => AuthPolicy::Service,
         _ => return Err(BuildError::InvalidConfig),
     };
-    let visibility = match string_literal(required(&properties, "visibility")?)? {
+    let visibility = match properties
+        .get("visibility")
+        .map_or(Ok("public"), |value| string_literal(value))?
+    {
         "public" => FunctionVisibility::Public,
         "internal" => FunctionVisibility::Internal,
         _ => return Err(BuildError::InvalidConfig),
     };
-    let mut capabilities = string_array(required(&properties, "capabilities")?)?
+    let mut capabilities = properties
+        .get("capabilities")
+        .map_or_else(|| Ok(Vec::new()), |value| string_array(value))?
         .into_iter()
         .map(parse_capability)
         .collect::<Result<Vec<_>, _>>()?;
@@ -743,10 +762,11 @@ fn parse_schema(
     let tables = object_expression(call.args[0].expr.as_ref(), constants)?;
     let mut declarations = Vec::new();
     for (name, expression) in object_properties(tables)? {
-        let (contract, indexes) = parse_table(expression, constants)?;
+        let (contract, mode, indexes) = parse_table(expression, constants)?;
         declarations.push(SchemaTableDeclaration {
             name,
             contract,
+            mode,
             indexes,
         });
     }
@@ -759,19 +779,33 @@ fn parse_schema(
 fn parse_table(
     expression: &Expr,
     constants: &BTreeMap<String, Box<Expr>>,
-) -> Result<(Contract, DeclaredIndexes), BuildError> {
+) -> Result<(Contract, TableMode, DeclaredIndexes), BuildError> {
     let expression = resolve_expression(expression, constants, 0)?;
     if let Expr::Call(call) = expression
         && let Callee::Expr(callee) = &call.callee
         && let Expr::Member(member) = callee.as_ref()
-        && member_property(member) == Some("index")
+        && matches!(member_property(member), Some("index" | "searchIndex"))
     {
         if call.args.len() != 2 || call.args.iter().any(|argument| argument.spread.is_some()) {
             return Err(BuildError::InvalidConfig);
         }
-        let (contract, mut indexes) = parse_table(member.obj.as_ref(), constants)?;
+        let kind = match member_property(member) {
+            Some("index") => DeclaredIndexKind::Ordered,
+            Some("searchIndex") => DeclaredIndexKind::Search,
+            _ => return Err(BuildError::InvalidConfig),
+        };
+        let (contract, mode, mut indexes) = parse_table(member.obj.as_ref(), constants)?;
         let name = string_literal(call.args[0].expr.as_ref())?.to_owned();
-        let fields = string_array(call.args[1].expr.as_ref())?
+        let declared_fields = match kind {
+            DeclaredIndexKind::Ordered => string_array(call.args[1].expr.as_ref())?
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            DeclaredIndexKind::Search => {
+                vec![string_literal(call.args[1].expr.as_ref())?.to_owned()]
+            }
+        };
+        let fields = declared_fields
             .into_iter()
             .map(|field| {
                 let segments = field.split('.').map(str::to_owned).collect::<Vec<_>>();
@@ -779,16 +813,39 @@ fn parse_table(
                 Ok(segments)
             })
             .collect::<Result<Vec<_>, BuildError>>()?;
-        indexes.push((name, fields));
-        return Ok((contract, indexes));
+        if matches!(kind, DeclaredIndexKind::Search) && fields.len() != 1 {
+            return Err(BuildError::InvalidConfig);
+        }
+        indexes.push((kind, name, fields));
+        return Ok((contract, mode, indexes));
     }
     let call = call_expression(expression)?;
-    if callee_name(call)? != "defineTable" || call.args.len() != 1 || call.args[0].spread.is_some()
+    if callee_name(call)? != "defineTable"
+        || !(1..=2).contains(&call.args.len())
+        || call.args.iter().any(|argument| argument.spread.is_some())
     {
         return Err(BuildError::InvalidConfig);
     }
+    let mode = if let Some(options) = call.args.get(1) {
+        let Expr::Object(object) = options.expr.as_ref() else {
+            return Err(BuildError::InvalidConfig);
+        };
+        let properties = object_properties(object)?;
+        reject_unknown_options(&properties, &["mode"])?;
+        match properties.get("mode") {
+            None => TableMode::Queryable,
+            Some(value) => match string_literal(value)? {
+                "keyValue" => TableMode::KeyValue,
+                "queryable" => TableMode::Queryable,
+                _ => return Err(BuildError::InvalidConfig),
+            },
+        }
+    } else {
+        TableMode::Queryable
+    };
     Ok((
         parse_validator(call.args[0].expr.as_ref(), constants, 0)?,
+        mode,
         Vec::new(),
     ))
 }
@@ -807,26 +864,46 @@ fn build_schema(
         tables.push(DocumentTableContract {
             id: table_id,
             name: table.name.clone(),
+            mode: table.mode,
             document_contract: table.contract.clone(),
         });
-        for (name, fields) in &table.indexes {
+        for (kind, name, fields) in &table.indexes {
             let index_id = stable_index_id(project_id, &table.name, name);
             index_ids
                 .entry(table.name.clone())
                 .or_default()
                 .insert(name.clone(), index_id.to_string());
+            let fields = fields
+                .iter()
+                .cloned()
+                .map(FieldPath::new)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| BuildError::InvalidConfig)?;
+            for field in &fields {
+                let field_contract =
+                    contract_at_path(&table.contract, field).ok_or(BuildError::InvalidConfig)?;
+                let supported = match kind {
+                    DeclaredIndexKind::Ordered => ordered_index_contract(field_contract),
+                    DeclaredIndexKind::Search => {
+                        matches!(field_contract, Contract::String { .. })
+                    }
+                };
+                if !supported {
+                    return Err(BuildError::InvalidConfig);
+                }
+            }
             indexes.push(
-                IndexDefinition::new(
-                    index_id,
-                    table_id,
-                    name.clone(),
-                    fields
-                        .iter()
-                        .cloned()
-                        .map(FieldPath::new)
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|_| BuildError::InvalidConfig)?,
-                )
+                match kind {
+                    DeclaredIndexKind::Ordered => {
+                        IndexDefinition::new(index_id, table_id, name.clone(), fields)
+                    }
+                    DeclaredIndexKind::Search => {
+                        let [field] = fields.as_slice() else {
+                            return Err(BuildError::InvalidConfig);
+                        };
+                        IndexDefinition::new_search(index_id, table_id, name.clone(), field.clone())
+                    }
+                }
                 .map_err(|_| BuildError::InvalidConfig)?,
             );
         }
@@ -834,6 +911,35 @@ fn build_schema(
     let schema = DocumentSchemaV1::new(tables).map_err(crate::map_contract)?;
     let catalog = SchemaCatalog::new(project_id, indexes).map_err(|_| BuildError::InvalidConfig)?;
     Ok((schema, catalog, table_ids, index_ids))
+}
+
+fn contract_at_path<'a>(contract: &'a Contract, field: &FieldPath) -> Option<&'a Contract> {
+    let mut current = contract;
+    for segment in field.segments() {
+        current = match current {
+            Contract::Object { fields, .. } => fields.get(segment)?,
+            Contract::Any => return Some(current),
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn ordered_index_contract(contract: &Contract) -> bool {
+    match contract {
+        Contract::Any
+        | Contract::Null
+        | Contract::Boolean
+        | Contract::Int64 { .. }
+        | Contract::Float64 { .. }
+        | Contract::String { .. }
+        | Contract::Bytes { .. }
+        | Contract::Timestamp
+        | Contract::TypedId { .. }
+        | Contract::DocumentId { .. } => true,
+        Contract::Union { variants } => variants.iter().all(ordered_index_contract),
+        Contract::Array { .. } | Contract::Object { .. } => false,
+    }
 }
 
 fn compile_runtime_module(
@@ -887,12 +993,12 @@ fn compile_runtime_module(
     };
     let mut output = format!(
         "{native_prelude}const __tableIds={tables};\nconst __indexIds={indexes};\n\
-const __v=Object.freeze({{any:()=>({{}}),null:()=>({{}}),boolean:()=>({{}}),int64:()=>({{}}),float64:()=>({{}}),string:()=>({{}}),bytes:()=>({{}}),timestamp:()=>({{}}),id:()=>({{}}),documentId:()=>({{}}),array:()=>({{}}),object:()=>({{}}),pick:()=>({{}}),union:()=>({{}}),optional:()=>({{}})}});\n\
-function __defineTable(document){{const indexes=[];const table={{document,indexes,index(name,fields){{indexes.push({{name,fields}});return table}}}};return table}}\n\
-const __sdk=Object.freeze({{query:(definition)=>definition,mutation:(definition)=>definition,action:(definition)=>definition,cron:(definition)=>definition,value:Object.freeze({{int64:(value)=>value,float64:(value)=>value,timestamp:(value)=>Runku.timestamp(value),id:(value)=>Runku.id(value),bytes:(value)=>new Uint8Array(value)}}),v:__v,defineTable:__defineTable,defineSchema:(definitions)=>Object.freeze({{definitions,tables:__tableIds,indexes:__indexIds}})}});\n\
-const __factories={{{factories}}};\nconst __deps={dependencies};\nconst __cache=Object.create(null);\n\
-function __load(id){{if(Object.prototype.hasOwnProperty.call(__cache,id))return __cache[id].exports;const factory=__factories[id];if(typeof factory!==\"function\")throw new Error(\"MODULE_NOT_FOUND\");const module={{exports:{{}}}};__cache[id]=module;factory(module,module.exports,(specifier)=>{{if(specifier===\"@runku/server\")return __sdk;const target=__deps[id]&&__deps[id][specifier];if(typeof target!==\"string\"||target.length===0){{{unresolved_fallback}}};return __load(target)}});return module.exports}}\n\
-const __entry=__load({entry_id});\n"
+    const __v=Object.freeze({{any:()=>({{}}),null:()=>({{}}),boolean:()=>({{}}),int64:()=>({{}}),float64:()=>({{}}),string:()=>({{}}),bytes:()=>({{}}),timestamp:()=>({{}}),id:()=>({{}}),documentId:()=>({{}}),array:()=>({{}}),object:()=>({{}}),pick:()=>({{}}),union:()=>({{}}),optional:()=>({{}})}});\n\
+function __defineTable(document,options={{}}){{const indexes=[];const table={{document,mode:options.mode??\"queryable\",indexes,index(name,fields){{indexes.push({{name,fields,kind:\"ordered\"}});return table}},searchIndex(name,field){{indexes.push({{name,fields:[field],kind:\"search\"}});return table}}}};return table}}\n\
+    const __sdk=Object.freeze({{query:(definition)=>definition,mutation:(definition)=>definition,action:(definition)=>definition,cron:(definition)=>definition,value:Object.freeze({{int64:(value)=>value,float64:(value)=>value,timestamp:(value)=>Runku.timestamp(value),id:(value)=>Runku.id(value),bytes:(value)=>new Uint8Array(value)}}),v:__v,defineTable:__defineTable,defineSchema:(definitions)=>Object.freeze({{definitions,tables:__tableIds,indexes:__indexIds}})}});\n\
+    const __factories={{{factories}}};\nconst __deps={dependencies};\nconst __cache=Object.create(null);\n\
+    function __load(id){{if(Object.prototype.hasOwnProperty.call(__cache,id))return __cache[id].exports;const factory=__factories[id];if(typeof factory!==\"function\")throw new Error(\"MODULE_NOT_FOUND\");const module={{exports:{{}}}};__cache[id]=module;factory(module,module.exports,(specifier)=>{{if(specifier===\"@runku/server\")return __sdk;const target=__deps[id]&&__deps[id][specifier];if(typeof target!==\"string\"||target.length===0){{{unresolved_fallback}}};return __load(target)}});return module.exports}}\n\
+    const __entry=__load({entry_id});\n"
     );
     for function in &entry.functions {
         let export = &function.export_name;
@@ -1206,18 +1312,20 @@ fn parse_validator(
             let (minimum, maximum) = float_bounds(call.args.first())?;
             Contract::Float64 { minimum, maximum }
         }
-        "string" | "bytes" => {
+        "string" => {
+            let (minimum_length, maximum_length) = string_bounds(call.args.first())?;
+            Contract::String {
+                minimum_length,
+                maximum_length,
+                minimum_bytes: None,
+                maximum_bytes: None,
+            }
+        }
+        "bytes" => {
             let (minimum_bytes, maximum_bytes) = byte_bounds(call.args.first())?;
-            if name == "string" {
-                Contract::String {
-                    minimum_bytes,
-                    maximum_bytes,
-                }
-            } else {
-                Contract::Bytes {
-                    minimum_bytes,
-                    maximum_bytes,
-                }
+            Contract::Bytes {
+                minimum_bytes,
+                maximum_bytes,
             }
         }
         "id" if call.args.len() <= 1 => Contract::TypedId {
@@ -1588,6 +1696,31 @@ fn float_bounds(
 
 fn byte_bounds(argument: Option<&ExprOrSpread>) -> Result<(Option<u32>, Option<u32>), BuildError> {
     option_u32_bounds(argument, "minBytes", "maxBytes")
+}
+
+fn string_bounds(
+    argument: Option<&ExprOrSpread>,
+) -> Result<(Option<u32>, Option<u32>), BuildError> {
+    let Some(argument) = argument else {
+        return Ok((None, None));
+    };
+    if argument.spread.is_some() {
+        return Err(BuildError::InvalidConfig);
+    }
+    let Expr::Object(object) = argument.expr.as_ref() else {
+        return Err(BuildError::InvalidConfig);
+    };
+    let properties = object_properties(object)?;
+    reject_unknown_options(&properties, &["minLength", "maxLength"])?;
+    let parse = |name: &str| {
+        properties
+            .get(name)
+            .map(|value| {
+                u32::try_from(integer_literal(value)?).map_err(|_| BuildError::InvalidConfig)
+            })
+            .transpose()
+    };
+    Ok((parse("minLength")?, parse("maxLength")?))
 }
 
 fn item_bounds(argument: Option<&ExprOrSpread>) -> Result<(Option<u32>, Option<u32>), BuildError> {

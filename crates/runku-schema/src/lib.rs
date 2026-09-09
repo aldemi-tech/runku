@@ -10,12 +10,23 @@ use runku_value::{CanonicalValue, IndexKey, IndexValue};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const CATALOG_RESOURCE_MAGIC: &[u8] = b"RUNKU_INDEX_CATALOG_RESOURCE_V1\n";
+const CATALOG_RESOURCE_MAGIC_V1: &[u8] = b"RUNKU_INDEX_CATALOG_RESOURCE_V1\n";
+const CATALOG_RESOURCE_MAGIC_V2: &[u8] = b"RUNKU_INDEX_CATALOG_RESOURCE_V2\n";
 const CATALOG_RESOURCE_MAX_BYTES: usize = 1024 * 1024;
 const MAX_INDEXES: usize = 1_000;
 const MAX_FIELDS: usize = 16;
 const MAX_PATH_SEGMENTS: usize = 16;
 const MAX_NAME_BYTES: usize = 64;
+const MAX_SEARCH_TERMS: usize = 4_096;
+
+/// Physical projection maintained for one logical index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexKind {
+    /// One ordered scalar tuple per document.
+    Ordered,
+    /// One normalized Unicode word entry per distinct term in one string field.
+    Search,
+}
 
 /// Stable schema/index validation or extraction failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -88,6 +99,7 @@ pub struct IndexDefinition {
     table_id: TableId,
     name: String,
     fields: Vec<FieldPath>,
+    kind: IndexKind,
 }
 
 impl IndexDefinition {
@@ -117,7 +129,24 @@ impl IndexDefinition {
             table_id,
             name,
             fields,
+            kind: IndexKind::Ordered,
         })
+    }
+
+    /// Creates a validated single-field Unicode word-search index.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid names or any field count other than one.
+    pub fn new_search(
+        index_id: IndexId,
+        table_id: TableId,
+        name: String,
+        field: FieldPath,
+    ) -> Result<Self, SchemaError> {
+        let mut definition = Self::new(index_id, table_id, name, vec![field])?;
+        definition.kind = IndexKind::Search;
+        Ok(definition)
     }
 
     /// Stable logical index ID.
@@ -142,6 +171,12 @@ impl IndexDefinition {
     #[must_use]
     pub fn fields(&self) -> &[FieldPath] {
         &self.fields
+    }
+
+    /// Projection kind.
+    #[must_use]
+    pub const fn kind(&self) -> IndexKind {
+        self.kind
     }
 }
 
@@ -222,10 +257,29 @@ impl SchemaCatalog {
 /// Returns a limit error if the resource exceeds the v1 bound.
 pub fn encode_schema_catalog(catalog: &SchemaCatalog) -> Result<Vec<u8>, SchemaError> {
     let mut output = Vec::new();
-    output.extend_from_slice(CATALOG_RESOURCE_MAGIC);
+    let version = if catalog
+        .indexes
+        .iter()
+        .any(|definition| definition.kind == IndexKind::Search)
+    {
+        output.extend_from_slice(CATALOG_RESOURCE_MAGIC_V2);
+        2
+    } else {
+        output.extend_from_slice(CATALOG_RESOURCE_MAGIC_V1);
+        1
+    };
     push_text(&mut output, &catalog.project_id.to_string())?;
     push_count(&mut output, catalog.indexes.len())?;
     for index in &catalog.indexes {
+        if version == 2 {
+            push_text(
+                &mut output,
+                match index.kind {
+                    IndexKind::Ordered => "ordered",
+                    IndexKind::Search => "search",
+                },
+            )?;
+        }
         push_text(&mut output, &index.index_id.to_string())?;
         push_text(&mut output, &index.table_id.to_string())?;
         push_text(&mut output, &index.name)?;
@@ -249,12 +303,19 @@ pub fn encode_schema_catalog(catalog: &SchemaCatalog) -> Result<Vec<u8>, SchemaE
 ///
 /// Rejects malformed, oversized, trailing, noncanonical, or semantically invalid bytes.
 pub fn decode_schema_catalog(bytes: &[u8]) -> Result<SchemaCatalog, SchemaError> {
-    if bytes.len() > CATALOG_RESOURCE_MAX_BYTES || !bytes.starts_with(CATALOG_RESOURCE_MAGIC) {
+    let (magic, version) = if bytes.starts_with(CATALOG_RESOURCE_MAGIC_V1) {
+        (CATALOG_RESOURCE_MAGIC_V1, 1)
+    } else if bytes.starts_with(CATALOG_RESOURCE_MAGIC_V2) {
+        (CATALOG_RESOURCE_MAGIC_V2, 2)
+    } else {
+        return Err(SchemaError::InvalidCatalog);
+    };
+    if bytes.len() > CATALOG_RESOURCE_MAX_BYTES {
         return Err(SchemaError::InvalidCatalog);
     }
     let mut cursor = CatalogCursor {
         bytes,
-        offset: CATALOG_RESOURCE_MAGIC.len(),
+        offset: magic.len(),
     };
     let project_id = cursor
         .text()?
@@ -266,6 +327,15 @@ pub fn decode_schema_catalog(bytes: &[u8]) -> Result<SchemaCatalog, SchemaError>
     }
     let mut indexes = Vec::with_capacity(count);
     for _ in 0..count {
+        let kind = if version == 1 {
+            IndexKind::Ordered
+        } else {
+            match cursor.text()?.as_str() {
+                "ordered" => IndexKind::Ordered,
+                "search" => IndexKind::Search,
+                _ => return Err(SchemaError::InvalidCatalog),
+            }
+        };
         let index_id = cursor
             .text()?
             .parse::<IndexId>()
@@ -290,7 +360,16 @@ pub fn decode_schema_catalog(bytes: &[u8]) -> Result<SchemaCatalog, SchemaError>
                 .collect::<Result<Vec<_>, _>>()?;
             fields.push(FieldPath::new(segments)?);
         }
-        indexes.push(IndexDefinition::new(index_id, table_id, name, fields)?);
+        let definition = match kind {
+            IndexKind::Ordered => IndexDefinition::new(index_id, table_id, name, fields)?,
+            IndexKind::Search => {
+                let [field] = fields.as_slice() else {
+                    return Err(SchemaError::InvalidCatalog);
+                };
+                IndexDefinition::new_search(index_id, table_id, name, field.clone())?
+            }
+        };
+        indexes.push(definition);
     }
     if cursor.offset != bytes.len() {
         return Err(SchemaError::InvalidCatalog);
@@ -373,6 +452,9 @@ pub fn extract_index_key(
     definition: &IndexDefinition,
     document: &CanonicalValue,
 ) -> Result<Option<IndexKey>, SchemaError> {
+    if definition.kind != IndexKind::Ordered {
+        return Err(SchemaError::InvalidCatalog);
+    }
     let mut values = Vec::with_capacity(definition.fields.len());
     for path in &definition.fields {
         let Some(value) = resolve(document, path)? else {
@@ -383,6 +465,69 @@ pub fn extract_index_key(
     IndexKey::encode(&values)
         .map(Some)
         .map_err(|_| SchemaError::LimitExceeded)
+}
+
+/// Extracts every sparse key maintained by an ordered or word-search index.
+///
+/// Ordered indexes produce zero or one key. Search indexes accept one string field, split it on
+/// non-alphanumeric Unicode characters, lowercase each word, deduplicate it, and produce at most
+/// 4,096 keys. A missing field produces no keys.
+///
+/// # Errors
+///
+/// Returns a stable schema error for unsupported field values or projection limits.
+pub fn extract_index_keys(
+    definition: &IndexDefinition,
+    document: &CanonicalValue,
+) -> Result<Vec<IndexKey>, SchemaError> {
+    if definition.kind == IndexKind::Ordered {
+        return Ok(extract_index_key(definition, document)?
+            .into_iter()
+            .collect());
+    }
+    let Some(value) = resolve(document, &definition.fields[0])? else {
+        return Ok(Vec::new());
+    };
+    let CanonicalValue::String(value) = value else {
+        return Err(SchemaError::UnsupportedValue);
+    };
+    let terms = search_terms(value)?;
+    terms
+        .into_iter()
+        .map(|term| {
+            IndexKey::encode(&[IndexValue::String(term)]).map_err(|_| SchemaError::LimitExceeded)
+        })
+        .collect()
+}
+
+/// Normalizes one word used by a search predicate.
+///
+/// # Errors
+///
+/// Requires exactly one non-empty Unicode-alphanumeric word that fits Index Key v1.
+pub fn normalize_search_term(value: &str) -> Result<String, SchemaError> {
+    let terms = search_terms(value)?;
+    let [term] = terms.as_slice() else {
+        return Err(SchemaError::InvalidName);
+    };
+    Ok(term.clone())
+}
+
+fn search_terms(value: &str) -> Result<Vec<String>, SchemaError> {
+    let mut terms = BTreeSet::new();
+    for raw in value.split(|character: char| !character.is_alphanumeric()) {
+        if raw.is_empty() {
+            continue;
+        }
+        let term = raw.chars().flat_map(char::to_lowercase).collect::<String>();
+        IndexKey::encode(&[IndexValue::String(term.clone())])
+            .map_err(|_| SchemaError::LimitExceeded)?;
+        terms.insert(term);
+        if terms.len() > MAX_SEARCH_TERMS {
+            return Err(SchemaError::LimitExceeded);
+        }
+    }
+    Ok(terms.into_iter().collect())
 }
 
 fn resolve<'a>(
@@ -489,6 +634,46 @@ mod tests {
         assert_eq!(
             decode_schema_catalog(&trailing),
             Err(SchemaError::InvalidCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_catalog_v2_extracts_normalized_distinct_words() -> Result<(), Box<dyn Error>> {
+        let project = ProjectId::from_ulid(Ulid::from(10_u128));
+        let table = TableId::from_ulid(Ulid::from(11_u128));
+        let definition = IndexDefinition::new_search(
+            IndexId::from_ulid(Ulid::from(12_u128)),
+            table,
+            "transcript_words".to_owned(),
+            path(&["transcript"])?,
+        )?;
+        let catalog = SchemaCatalog::new(project, vec![definition.clone()])?;
+        let encoded = encode_schema_catalog(&catalog)?;
+        assert!(encoded.starts_with(CATALOG_RESOURCE_MAGIC_V2));
+        assert_eq!(decode_schema_catalog(&encoded)?, catalog);
+
+        let document = CanonicalValue::Object(BTreeMap::from([(
+            "transcript".to_owned(),
+            CanonicalValue::String("Quiero COMPRAR, comprar mañana.".to_owned()),
+        )]));
+        let keys = extract_index_keys(&definition, &document)?;
+        let terms = keys
+            .iter()
+            .map(|key| key.components()[0].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terms,
+            vec![
+                IndexValue::String("comprar".to_owned()),
+                IndexValue::String("mañana".to_owned()),
+                IndexValue::String("quiero".to_owned()),
+            ]
+        );
+        assert_eq!(normalize_search_term("COMPRAR")?, "comprar");
+        assert_eq!(
+            normalize_search_term("comprar ahora"),
+            Err(SchemaError::InvalidName)
         );
         Ok(())
     }

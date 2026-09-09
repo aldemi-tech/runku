@@ -22,7 +22,7 @@ export const create = mutation({
   auth: "none",
   visibility: "public",
   capabilities: ["db:read", "db:write"],
-  args: v.object({ title: v.string({ minBytes: 1, maxBytes: 120 }) }),
+  args: v.object({ title: v.string({ minLength: 1, maxLength: 120 }) }),
   returns: taskView,
   async handler(ctx, input) {
     const next = { title: input.title.trim(), done: false }

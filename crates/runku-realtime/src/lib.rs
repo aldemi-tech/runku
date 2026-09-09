@@ -229,6 +229,10 @@ impl ChangeImpact {
             } => self.indexes.iter().any(|impact| {
                 impact.index_id == *index_id && key_in_bounds(impact.key.as_bytes(), lower, upper)
             }),
+            ReadDependency::Table { table_id, .. } => self
+                .documents
+                .iter()
+                .any(|impact| impact.table_id == *table_id),
         })
     }
 }

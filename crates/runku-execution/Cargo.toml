@@ -24,6 +24,7 @@ ulid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+runku-contracts = { path = "../runku-contracts" }
 runku-data-conformance = { path = "../runku-data-conformance" }
 runku-data-postgres = { path = "../runku-data-postgres" }
 runku-data-sqlite = { path = "../runku-data-sqlite" }

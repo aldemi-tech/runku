@@ -4,6 +4,8 @@ use std::{path::Path, time::SystemTime};
 
 use runku_compatibility::{CompatibilityEngine, CompatibilityReport, ReleasePackage};
 use runku_core::{ChannelName, CodeTarget, OperationId, PinnedCode, ReleaseId};
+use runku_data::{IndexPreparation, LogicalStore};
+use runku_data_sqlite::{SqliteStore, SqliteStoreConfig};
 use runku_development::{
     DevelopmentContext, DevelopmentRepository, DevelopmentRepositoryConfig,
     SqlDevelopmentRepository,
@@ -14,6 +16,7 @@ use runku_releases::{
     ReleaseManifestV1, ReleaseRepository, ReleaseRouter, ReleaseStatus, ServingSnapshot,
     encode_release_manifest,
 };
+use runku_schema::decode_schema_catalog;
 use runku_serving::canonical_cron_declarations_hash;
 use runku_value::TimestampMicros;
 use sha2::{Digest, Sha256};
@@ -237,6 +240,94 @@ impl LocalReleaseManager {
         })
     }
 
+    /// Idempotently places one created Release in `BUILDING` before bounded data preparation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable lifecycle error when the Release is absent, terminal, or storage fails.
+    pub async fn begin_release(
+        &self,
+        release_id: ReleaseId,
+    ) -> Result<LocalReleaseOutcome, LocalReleaseError> {
+        let initial = self.snapshot().await?;
+        let entry = initial
+            .release(release_id)
+            .ok_or(LocalReleaseError::NotFound)?;
+        if matches!(
+            entry.status,
+            ReleaseStatus::Servable | ReleaseStatus::Active
+        ) {
+            return Ok(outcome(
+                release_id,
+                None,
+                entry.status,
+                initial.revision(),
+                true,
+                Vec::new(),
+            ));
+        }
+        self.advance_if(release_id, entry.status, ReleaseStatus::Building)
+            .await?;
+        let snapshot = self.snapshot().await?;
+        let status = snapshot
+            .release(release_id)
+            .ok_or(LocalReleaseError::Corruption)?
+            .status;
+        Ok(outcome(
+            release_id,
+            None,
+            status,
+            snapshot.revision(),
+            entry.status == status,
+            Vec::new(),
+        ))
+    }
+
+    /// Registers and advances one resumable candidate-index backfill on the supplied data store.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable lifecycle error for invalid Release artifacts, scope mismatch, or storage
+    /// failure.
+    pub async fn prepare_release_indexes(
+        &self,
+        release_id: ReleaseId,
+        store: &dyn LogicalStore,
+        document_limit: u32,
+    ) -> Result<IndexPreparation, LocalReleaseError> {
+        let _ = self.begin_release(release_id).await?;
+        let package = self.package(release_id).await?;
+        if !matches!(
+            package.manifest().runtime_version.as_str(),
+            "runku-js-1"
+                | "runku-js-2"
+                | "runku-js-3"
+                | "runku-js"
+                | "runku-hybrid-1"
+                | "runku-hybrid-2"
+                | "runku-hybrid-3"
+                | "runku-hybrid"
+        ) {
+            return Ok(IndexPreparation {
+                ready: true,
+                processed_documents: 0,
+            });
+        }
+        let source = package
+            .bundle()
+            .resource(package.manifest().index_contract_hash)
+            .ok_or(LocalReleaseError::Corruption)?;
+        let catalog =
+            decode_schema_catalog(source.as_bytes()).map_err(|_| LocalReleaseError::Corruption)?;
+        if catalog.project_id() != self.state.project_id {
+            return Err(LocalReleaseError::Corruption);
+        }
+        store
+            .prepare_index_catalog(self.state.scope(), &catalog, document_limit)
+            .await
+            .map_err(map_data_store)
+    }
+
     /// Validates one published candidate and advances it to `SERVABLE` if compatible.
     ///
     /// `against` optionally selects an exact Channel API baseline. When absent, compatibility is
@@ -251,6 +342,29 @@ impl LocalReleaseManager {
         &self,
         release_id: ReleaseId,
         against: Option<&ChannelName>,
+    ) -> Result<LocalReleaseOutcome, LocalReleaseError> {
+        let store = SqliteStore::open(&self.paths.data_database, SqliteStoreConfig::LOCAL)
+            .await
+            .map_err(map_data_store)?;
+        self.release_with_store(release_id, against, &store, 500)
+            .await
+    }
+
+    /// Validates a candidate while preparing indexes in the supplied authoritative data store.
+    ///
+    /// Repeating this operation resumes bounded backfill until the Release becomes servable.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same stable lifecycle failures as [`Self::release`], plus invalid preparation
+    /// bounds or failures from the supplied store.
+    #[allow(clippy::too_many_lines)]
+    pub async fn release_with_store(
+        &self,
+        release_id: ReleaseId,
+        against: Option<&ChannelName>,
+        store: &dyn LogicalStore,
+        document_limit: u32,
     ) -> Result<LocalReleaseOutcome, LocalReleaseError> {
         let initial = self.snapshot().await?;
         let entry = initial
@@ -270,35 +384,54 @@ impl LocalReleaseManager {
             ));
         }
         let baseline = selected_baseline(&initial, against)?;
-        self.advance_if(release_id, entry.status, ReleaseStatus::Building)
-            .await?;
+        let _ = self.begin_release(release_id).await?;
         let mut snapshot = self.snapshot().await?;
         let mut status = snapshot
             .release(release_id)
             .ok_or(LocalReleaseError::Corruption)?
             .status;
-        if matches!(
-            status,
-            ReleaseStatus::Building | ReleaseStatus::CompatibilityBlocked
-        ) {
-            if status == ReleaseStatus::CompatibilityBlocked {
-                let report = self
-                    .compatibility_report(release_id, baseline, &snapshot)
-                    .await?;
-                if !report.compatible {
-                    return Ok(outcome(
-                        release_id,
-                        None,
-                        status,
-                        snapshot.revision(),
-                        true,
-                        report.diagnostics,
-                    ));
-                }
+        if status == ReleaseStatus::Building {
+            let preparation = self
+                .prepare_release_indexes(release_id, store, document_limit)
+                .await?;
+            if !preparation.ready {
+                snapshot = self.snapshot().await?;
+                return Ok(outcome(
+                    release_id,
+                    None,
+                    ReleaseStatus::Building,
+                    snapshot.revision(),
+                    false,
+                    Vec::new(),
+                ));
             }
             self.transition(release_id, status, ReleaseStatus::Validating)
                 .await?;
             status = ReleaseStatus::Validating;
+            snapshot = self.snapshot().await?;
+        }
+        if status == ReleaseStatus::CompatibilityBlocked {
+            let report = self
+                .compatibility_report(release_id, baseline, &snapshot)
+                .await?;
+            if !report.compatible {
+                return Ok(outcome(
+                    release_id,
+                    None,
+                    status,
+                    snapshot.revision(),
+                    true,
+                    report.diagnostics,
+                ));
+            }
+            self.transition(
+                release_id,
+                ReleaseStatus::CompatibilityBlocked,
+                ReleaseStatus::Validating,
+            )
+            .await?;
+            status = ReleaseStatus::Validating;
+            snapshot = self.snapshot().await?;
         }
         if status == ReleaseStatus::Validating {
             let report = self
@@ -1034,6 +1167,19 @@ fn map_repository(error: ReleaseError) -> LocalReleaseError {
     }
 }
 
+fn map_data_store(error: runku_data::StoreError) -> LocalReleaseError {
+    if error.retryable() {
+        LocalReleaseError::Unavailable
+    } else if matches!(
+        error,
+        runku_data::StoreError::Corruption | runku_data::StoreError::MigrationFailed
+    ) {
+        LocalReleaseError::Corruption
+    } else {
+        LocalReleaseError::InvalidRequest
+    }
+}
+
 fn map_development(error: runku_development::DevelopmentError) -> LocalReleaseError {
     match error {
         runku_development::DevelopmentError::WorkspaceNotFound
@@ -1214,6 +1360,8 @@ mod tests {
         let arguments_bytes = encode_contract(&Contract::Null)?;
         let result_bytes = encode_contract(&Contract::Any)?;
         let string = Contract::String {
+            minimum_length: None,
+            maximum_length: None,
             minimum_bytes: Some(1),
             maximum_bytes: Some(100),
         };
@@ -1228,6 +1376,7 @@ mod tests {
         let schema = DocumentSchemaV1::new(vec![DocumentTableContract {
             id: runku_core::TableId::from_ulid(ulid::Ulid::from(777_u128)),
             name: "users".to_owned(),
+            mode: runku_contracts::TableMode::Queryable,
             document_contract: Contract::Object { fields, optional },
         }])?;
         let schema_bytes = encode_document_schema(&schema)?;
