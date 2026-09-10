@@ -9,7 +9,7 @@ use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_docume
 use runku_core::{FunctionName, TableId};
 use runku_releases::{
     ArtifactFormat, FunctionVisibility, ReleaseManifestV1, SafeEsmBundleV1, Sha256Digest,
-    decode_hybrid_oci_artifact, decode_safe_esm_bundle,
+    decode_hybrid_oci_artifact, decode_node_esm_bundle, decode_safe_esm_bundle,
 };
 use runku_schema::decode_schema_catalog;
 use thiserror::Error;
@@ -74,6 +74,18 @@ impl ReleasePackage {
                     return Err(CompatibilityError::InvalidArtifact);
                 }
                 bundle
+            }
+            ArtifactFormat::NodeEsmBundleV1 => {
+                manifest
+                    .ensure_local_full_node_supported()
+                    .map_err(|_| CompatibilityError::InvalidRelease)?;
+                let node_bundle = decode_node_esm_bundle(artifact_bytes)
+                    .map_err(|_| CompatibilityError::InvalidArtifact)?;
+                node_bundle
+                    .verify_manifest(&manifest, artifact_bytes)
+                    .map_err(|_| CompatibilityError::InvalidArtifact)?;
+                decode_safe_esm_bundle(artifact_bytes)
+                    .map_err(|_| CompatibilityError::InvalidArtifact)?
             }
             _ => return Err(CompatibilityError::InvalidRelease),
         };
@@ -694,10 +706,10 @@ mod tests {
     };
     use runku_core::{BuildId, FunctionId, ProjectId, ReleaseId, TableId};
     use runku_releases::{
-        AuthPolicy, FunctionManifest, FunctionType, FunctionVisibility, NodeEsmBundleV1,
-        NodeOciDescriptorV1, ReleaseManifestV1, RuntimeClass, SafeEsmBundleV1, Sha256Digest,
-        encode_hybrid_oci_artifact, encode_node_esm_bundle, encode_node_oci_descriptor,
-        encode_safe_esm_bundle, hybrid_oci_descriptor,
+        ArtifactFormat, AuthPolicy, FunctionManifest, FunctionType, FunctionVisibility,
+        NodeEsmBundleV1, NodeOciDescriptorV1, ReleaseManifestV1, RuntimeClass, SafeEsmBundleV1,
+        Sha256Digest, encode_hybrid_oci_artifact, encode_node_esm_bundle,
+        encode_node_oci_descriptor, encode_safe_esm_bundle, hybrid_oci_descriptor,
     };
     use runku_value::TimestampMicros;
 
@@ -876,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_hybrid_oci_resources_for_compatibility() -> TestResult {
+    fn loads_local_and_oci_hybrid_resources_for_compatibility() -> TestResult {
         let project_id = ProjectId::from_ulid(ulid::Ulid::from(600));
         let contract = Contract::Any;
         let contract_bytes = encode_contract(&contract)?;
@@ -937,6 +949,16 @@ mod tests {
             ],
             cron_definitions: Vec::new(),
         };
+        let local_manifest = ReleaseManifestV1 {
+            artifact: resources.descriptor()?,
+            ..manifest.clone()
+        };
+        let local_package = ReleasePackage::load(local_manifest, &resources_bytes)?;
+        assert_eq!(
+            local_package.manifest().artifact.format,
+            ArtifactFormat::NodeEsmBundleV1
+        );
+
         let package = ReleasePackage::load(manifest, &artifact)?;
         assert_eq!(package.manifest().runtime_version.as_str(), "runku-hybrid");
         assert!(
