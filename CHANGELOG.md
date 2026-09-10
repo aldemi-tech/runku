@@ -12,10 +12,17 @@ All notable changes are documented in this file.
   reruns only after committed changes to the selected table. Authorization is rechecked during the
   bounded stream; lag returns a fresh authoritative resync page.
 
+### Fixed
+
+- Compatibility preflight, Release freeze, and Management catalog inspection now read the embedded
+  resource bundle of a hybrid OCI artifact. A Release that combines Safe V8 and Full Node Functions
+  is no longer rejected merely because its outer artifact is hybrid.
+
 ### Compatibility and publication
 
-- Both routes are additive. Existing `/v1/query`, `/v1/realtime`, and Management `/data/query`
-  clients retain their current contracts and persisted data requires no migration.
+- The routes and hybrid reader are additive. Existing `/v1/query`, `/v1/realtime`, Management
+  `/data/query`, Safe V8 artifacts, and persisted Product data retain their current contracts and
+  require no migration.
 - This source state is an unpublished `0.5.4` candidate. No npm package, OCI image, Git tag, or
   GitHub Release exists until the fresh release-owner approval gate is satisfied.
 

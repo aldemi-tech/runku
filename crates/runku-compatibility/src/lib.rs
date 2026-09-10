@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use runku_contracts::{Contract, DocumentSchemaV1, decode_contract, decode_document_schema};
 use runku_core::{FunctionName, TableId};
 use runku_releases::{
-    FunctionVisibility, ReleaseManifestV1, SafeEsmBundleV1, Sha256Digest, decode_safe_esm_bundle,
+    ArtifactFormat, FunctionVisibility, ReleaseManifestV1, SafeEsmBundleV1, Sha256Digest,
+    decode_hybrid_oci_artifact, decode_safe_esm_bundle,
 };
 use runku_schema::decode_schema_catalog;
 use thiserror::Error;
@@ -36,19 +37,58 @@ impl ReleasePackage {
         manifest: ReleaseManifestV1,
         artifact_bytes: &[u8],
     ) -> Result<Self, CompatibilityError> {
-        manifest
-            .ensure_mvp_runtime_supported()
-            .map_err(|_| CompatibilityError::InvalidRelease)?;
-        let bundle = decode_safe_esm_bundle(artifact_bytes)
-            .map_err(|_| CompatibilityError::InvalidArtifact)?;
-        bundle
-            .verify_manifest(&manifest, artifact_bytes)
-            .map_err(|_| CompatibilityError::InvalidArtifact)?;
+        let bundle = match manifest.artifact.format {
+            ArtifactFormat::SafeEsmBundleV1 => {
+                manifest
+                    .ensure_mvp_runtime_supported()
+                    .map_err(|_| CompatibilityError::InvalidRelease)?;
+                let bundle = decode_safe_esm_bundle(artifact_bytes)
+                    .map_err(|_| CompatibilityError::InvalidArtifact)?;
+                bundle
+                    .verify_manifest(&manifest, artifact_bytes)
+                    .map_err(|_| CompatibilityError::InvalidArtifact)?;
+                bundle
+            }
+            ArtifactFormat::HybridOciArtifactV1 => {
+                manifest
+                    .ensure_full_node_supported()
+                    .map_err(|_| CompatibilityError::InvalidRelease)?;
+                if manifest.artifact.size_bytes
+                    != u64::try_from(artifact_bytes.len())
+                        .map_err(|_| CompatibilityError::InvalidArtifact)?
+                    || manifest.artifact.digest != Sha256Digest::of(artifact_bytes)
+                {
+                    return Err(CompatibilityError::InvalidArtifact);
+                }
+                let (resources, _) = decode_hybrid_oci_artifact(artifact_bytes)
+                    .map_err(|_| CompatibilityError::InvalidArtifact)?;
+                let bundle = decode_safe_esm_bundle(resources)
+                    .map_err(|_| CompatibilityError::InvalidArtifact)?;
+                if manifest.functions.iter().any(|function| {
+                    bundle.source(function.implementation_hash).is_none()
+                        || bundle.resource(function.arguments_contract_hash).is_none()
+                        || bundle.resource(function.result_contract_hash).is_none()
+                }) || bundle.resource(manifest.schema_contract_hash).is_none()
+                    || bundle.resource(manifest.index_contract_hash).is_none()
+                {
+                    return Err(CompatibilityError::InvalidArtifact);
+                }
+                bundle
+            }
+            _ => return Err(CompatibilityError::InvalidRelease),
+        };
 
         let mut contracts = BTreeMap::new();
         let schema = if matches!(
             manifest.runtime_version.as_str(),
-            "runku-js-1" | "runku-js-2" | "runku-js-3" | "runku-js"
+            "runku-js-1"
+                | "runku-js-2"
+                | "runku-js-3"
+                | "runku-js"
+                | "runku-hybrid-1"
+                | "runku-hybrid-2"
+                | "runku-hybrid-3"
+                | "runku-hybrid"
         ) {
             for function in &manifest.functions {
                 load_contract(&bundle, function.arguments_contract_hash, &mut contracts)?;
@@ -654,8 +694,10 @@ mod tests {
     };
     use runku_core::{BuildId, FunctionId, ProjectId, ReleaseId, TableId};
     use runku_releases::{
-        AuthPolicy, FunctionManifest, FunctionType, FunctionVisibility, ReleaseManifestV1,
-        RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_safe_esm_bundle,
+        AuthPolicy, FunctionManifest, FunctionType, FunctionVisibility, NodeEsmBundleV1,
+        NodeOciDescriptorV1, ReleaseManifestV1, RuntimeClass, SafeEsmBundleV1, Sha256Digest,
+        encode_hybrid_oci_artifact, encode_node_esm_bundle, encode_node_oci_descriptor,
+        encode_safe_esm_bundle, hybrid_oci_descriptor,
     };
     use runku_value::TimestampMicros;
 
@@ -831,6 +873,79 @@ mod tests {
             cron_definitions: Vec::new(),
         };
         Ok(ReleasePackage::load(manifest, &artifact)?)
+    }
+
+    #[test]
+    fn loads_hybrid_oci_resources_for_compatibility() -> TestResult {
+        let project_id = ProjectId::from_ulid(ulid::Ulid::from(600));
+        let contract = Contract::Any;
+        let contract_bytes = encode_contract(&contract)?;
+        let schema = DocumentSchemaV1::new(vec![])?;
+        let schema_bytes = encode_document_schema(&schema)?;
+        let index_bytes = runku_schema::encode_schema_catalog(&runku_schema::SchemaCatalog::new(
+            project_id,
+            Vec::new(),
+        )?)?;
+        let safe_source = "export default () => null;";
+        let node_source = "export default async () => null;";
+        let resources = NodeEsmBundleV1::from_sources([
+            safe_source.to_owned(),
+            node_source.to_owned(),
+            String::from_utf8(contract_bytes.clone())?,
+            String::from_utf8(schema_bytes.clone())?,
+            String::from_utf8(index_bytes.clone())?,
+        ])?;
+        let resources_bytes = encode_node_esm_bundle(&resources)?;
+        let descriptor = NodeOciDescriptorV1::new(format!("sha256:{}", "a".repeat(64)))?;
+        let descriptor_bytes = encode_node_oci_descriptor(&descriptor)?;
+        let artifact = encode_hybrid_oci_artifact(&resources_bytes, &descriptor_bytes)?;
+        let manifest = ReleaseManifestV1 {
+            release_id: ReleaseId::from_ulid(ulid::Ulid::from(901)),
+            project_id,
+            build_id: BuildId::from_ulid(ulid::Ulid::from(902)),
+            created_at: TimestampMicros::new(1),
+            runtime_version: "runku-hybrid".parse()?,
+            artifact: hybrid_oci_descriptor(&artifact)?,
+            function_contract_hash: Sha256Digest::of(b"hybrid-functions"),
+            schema_contract_hash: Sha256Digest::of(&schema_bytes),
+            index_contract_hash: Sha256Digest::of(&index_bytes),
+            functions: vec![
+                FunctionManifest {
+                    id: FunctionId::from_ulid(ulid::Ulid::from(903)),
+                    name: "actions.node".parse()?,
+                    function_type: FunctionType::Action,
+                    visibility: FunctionVisibility::Public,
+                    auth_policy: AuthPolicy::None,
+                    runtime_class: RuntimeClass::FullNode,
+                    implementation_hash: Sha256Digest::of(node_source.as_bytes()),
+                    arguments_contract_hash: Sha256Digest::of(&contract_bytes),
+                    result_contract_hash: Sha256Digest::of(&contract_bytes),
+                    capabilities: Vec::new(),
+                },
+                FunctionManifest {
+                    id: FunctionId::from_ulid(ulid::Ulid::from(904)),
+                    name: "queries.safe".parse()?,
+                    function_type: FunctionType::Query,
+                    visibility: FunctionVisibility::Public,
+                    auth_policy: AuthPolicy::None,
+                    runtime_class: RuntimeClass::SafeV8,
+                    implementation_hash: Sha256Digest::of(safe_source.as_bytes()),
+                    arguments_contract_hash: Sha256Digest::of(&contract_bytes),
+                    result_contract_hash: Sha256Digest::of(&contract_bytes),
+                    capabilities: Vec::new(),
+                },
+            ],
+            cron_definitions: Vec::new(),
+        };
+        let package = ReleasePackage::load(manifest, &artifact)?;
+        assert_eq!(package.manifest().runtime_version.as_str(), "runku-hybrid");
+        assert!(
+            package
+                .bundle()
+                .resource(Sha256Digest::of(&schema_bytes))
+                .is_some()
+        );
+        Ok(())
     }
 
     #[test]

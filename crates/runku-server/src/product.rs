@@ -110,8 +110,8 @@ use runku_observability::{
 use runku_protocol::{WireValueV1, decode_development_publish_request_v1};
 use runku_releases::{
     ArtifactFormat, AuthPolicy, Capability, FunctionType, FunctionVisibility, ReleaseError,
-    RuntimeClass, Sha256Digest, decode_node_esm_bundle, decode_safe_esm_bundle,
-    encode_release_manifest,
+    RuntimeClass, Sha256Digest, decode_hybrid_oci_artifact, decode_node_esm_bundle,
+    decode_safe_esm_bundle, encode_release_manifest,
 };
 use runku_runtime::{
     CancellationToken, ConfigurationRead, ConfigurationReadError, ConfigurationValueKind,
@@ -886,9 +886,33 @@ fn decode_effective_catalog(
                 .map_err(|_| ManagementProductError::Corruption)?;
             CatalogResources::Node(bundle)
         }
-        ArtifactFormat::NodeOciDescriptorV1 | ArtifactFormat::HybridOciArtifactV1 => {
-            return Err(ManagementProductError::Invalid);
+        ArtifactFormat::HybridOciArtifactV1 => {
+            manifest
+                .ensure_full_node_supported()
+                .map_err(|_| ManagementProductError::Corruption)?;
+            if manifest.artifact.size_bytes
+                != u64::try_from(artifact_bytes.len())
+                    .map_err(|_| ManagementProductError::Corruption)?
+                || manifest.artifact.digest != Sha256Digest::of(&artifact_bytes)
+            {
+                return Err(ManagementProductError::Corruption);
+            }
+            let (resource_bytes, _) = decode_hybrid_oci_artifact(&artifact_bytes)
+                .map_err(|_| ManagementProductError::Corruption)?;
+            let bundle = decode_node_esm_bundle(resource_bytes)
+                .map_err(|_| ManagementProductError::Corruption)?;
+            if manifest.functions.iter().any(|function| {
+                bundle.source(function.implementation_hash).is_none()
+                    || bundle.resource(function.arguments_contract_hash).is_none()
+                    || bundle.resource(function.result_contract_hash).is_none()
+            }) || bundle.resource(manifest.schema_contract_hash).is_none()
+                || bundle.resource(manifest.index_contract_hash).is_none()
+            {
+                return Err(ManagementProductError::Corruption);
+            }
+            CatalogResources::Node(bundle)
         }
+        ArtifactFormat::NodeOciDescriptorV1 => return Err(ManagementProductError::Invalid),
     };
     let schema = decode_document_schema(
         resources
