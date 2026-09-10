@@ -16,8 +16,8 @@ use runku_data::{CommitBatch, LogicalStore, PinnedCode, ScheduledInvocationInser
 use runku_releases::{Capability, FunctionType, FunctionVisibility, RuntimeClass};
 use runku_runtime::{
     CancellationToken, FileStorage, FunctionCallError, FunctionCallKind, FunctionCallRequest,
-    FunctionInvoke, HttpsEgress, InvocationRequest, RuntimeError, RuntimeSupervisor,
-    ScheduleCreate, ScheduleError, ScheduleRequest,
+    FunctionInvoke, HttpsEgress, InvocationLogSession, InvocationRequest, RuntimeError,
+    RuntimeSupervisor, ScheduleCreate, ScheduleError, ScheduleRequest,
 };
 use runku_value::{CanonicalValue, TimestampMicros, encode_stored_value};
 use sha2::{Digest, Sha256};
@@ -344,7 +344,12 @@ impl ActionExecutor {
                 None => self.runtime.invoke(request).await,
             },
             RuntimeClass::FullNode => match &self.node {
-                Some(node) => node.execute_node(request).await,
+                Some(node) => {
+                    let logs = InvocationLogSession::start(&request)?;
+                    let result = node.execute_node(request).await;
+                    logs.complete(&result);
+                    result
+                }
                 None => Err(RuntimeError::UnsupportedRuntime),
             },
         }

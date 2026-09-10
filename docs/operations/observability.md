@@ -47,6 +47,11 @@ Requests and nested cross-runtime calls carry request, invocation, Project, Envi
 Dev Revision, Function, and runtime identifiers. Payloads, bearer tokens, Application Keys, and
 secret values are excluded from logs and spans.
 
+Safe V8 and Full Node invocations emit the same best-effort platform start and terminal records,
+including nested parent invocation identity, sanitized outcome, and duration. Full Node worker
+stdout/stderr is not imported as a Function log stream; application messages require the bounded
+Product logging contract rather than raw process output.
+
 For canonical Query, Mutation, and Action HTTP calls, `x-runku-request-id` is always present. Once
 the gateway has allocated runtime work, success and sanitized failure responses also expose the
 additive `x-runku-invocation-id` header. Its absence means the request failed before invocation

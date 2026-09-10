@@ -48,6 +48,55 @@ pub(crate) struct InvocationLogContext {
     telemetry: Option<Arc<RuntimeTelemetry>>,
 }
 
+/// Best-effort operational-log lifecycle for a runtime invocation.
+///
+/// Runtime adapters outside the Safe V8 supervisor use this guard so root and nested invocations
+/// emit the same start/terminal events without learning how Product log records are constructed.
+/// Emission remains nonblocking and never changes the Function result.
+pub struct InvocationLogSession {
+    context: Option<Arc<InvocationLogContext>>,
+    started: Instant,
+}
+
+impl InvocationLogSession {
+    /// Starts the operational-log lifecycle for the Function selected by `request`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidInvocation`] when the immutable manifest does not contain
+    /// the selected Function.
+    pub fn start(request: &InvocationRequest) -> Result<Self, RuntimeError> {
+        let function = request
+            .manifest
+            .functions
+            .iter()
+            .find(|function| function.id == request.function_id)
+            .ok_or(RuntimeError::InvalidInvocation)?;
+        Ok(Self::start_for_function(request, function))
+    }
+
+    pub(crate) fn start_for_function(
+        request: &InvocationRequest,
+        function: &FunctionManifest,
+    ) -> Self {
+        let context = InvocationLogContext::new(request, function);
+        if let Some(context) = &context {
+            context.started();
+        }
+        Self {
+            context,
+            started: Instant::now(),
+        }
+    }
+
+    /// Emits the terminal event with the sanitized outcome and measured duration.
+    pub fn complete(self, result: &Result<CanonicalValue, RuntimeError>) {
+        if let Some(context) = &self.context {
+            context.completed(result, self.started);
+        }
+    }
+}
+
 impl InvocationLogContext {
     pub(crate) fn new(
         request: &InvocationRequest,

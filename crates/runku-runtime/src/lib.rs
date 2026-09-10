@@ -36,6 +36,7 @@ pub use invocation::{
     CancellationToken, InvocationRequest, RuntimeLimits, RuntimeLimitsBuilder,
     RuntimeTelemetrySnapshot,
 };
+pub use logging::InvocationLogSession;
 pub use scheduling::{ScheduleCreate, ScheduleError, ScheduleRequest, ScheduleTime};
 pub use storage::{
     FileBytes, FileDownloadGrant, FileDownloadGrantRequest, FileMetadata, FileStorage,

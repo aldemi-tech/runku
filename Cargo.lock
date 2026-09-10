@@ -3708,6 +3708,7 @@ dependencies = [
  "runku-data-postgres",
  "runku-data-sqlite",
  "runku-identity",
+ "runku-observability",
  "runku-releases",
  "runku-runtime",
  "runku-schema",

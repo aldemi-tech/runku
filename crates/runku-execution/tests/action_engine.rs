@@ -1,23 +1,162 @@
 //! Action coordinator scheduling behavior over durable `SQLite`.
 
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use async_trait::async_trait;
 use runku_core::{
     BuildId, DevRevisionId, DocumentId, EnvironmentId, EnvironmentScope, FunctionId, InvocationId,
     ProjectId, ReleaseId, RequestId, ScheduledInvocationId, TableId,
 };
 use runku_data::{LogicalStore, PinnedCode};
 use runku_data_sqlite::{SqliteRole, SqliteStore, SqliteStoreConfig};
-use runku_execution::{ActionExecutionError, ActionExecutor, MutationExecutor, QueryExecutor};
+use runku_execution::{
+    ActionExecutionError, ActionExecutor, MutationExecutor, NodeActionExecutor, QueryExecutor,
+};
+use runku_observability::{
+    LogEventKind, LogLevel, LogSinkError, OperationalEventV1, OperationalLogSink, OutcomeCode,
+};
 use runku_releases::{
-    AuthPolicy, Capability, FunctionManifest, FunctionType, FunctionVisibility, ReleaseManifestV1,
-    RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_safe_esm_bundle,
+    AuthPolicy, Capability, FunctionManifest, FunctionType, FunctionVisibility, NodeEsmBundleV1,
+    ReleaseManifestV1, RuntimeClass, SafeEsmBundleV1, Sha256Digest, encode_node_esm_bundle,
+    encode_safe_esm_bundle,
 };
 use runku_runtime::{
     CancellationToken, InvocationRequest, RuntimeError, RuntimeLimits, RuntimeSupervisor,
 };
 use runku_value::{CanonicalValue, TimestampMicros};
 use tempfile::TempDir;
+
+#[derive(Debug)]
+struct SuccessfulNode;
+
+#[derive(Debug)]
+struct FailingNode;
+
+#[async_trait]
+impl NodeActionExecutor for SuccessfulNode {
+    async fn execute_node(
+        &self,
+        _request: InvocationRequest,
+    ) -> Result<CanonicalValue, RuntimeError> {
+        Ok(CanonicalValue::String("node-result".to_owned()))
+    }
+}
+
+#[async_trait]
+impl NodeActionExecutor for FailingNode {
+    async fn execute_node(
+        &self,
+        _request: InvocationRequest,
+    ) -> Result<CanonicalValue, RuntimeError> {
+        Err(RuntimeError::JavaScript)
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingLogSink {
+    events: Mutex<Vec<OperationalEventV1>>,
+}
+
+impl OperationalLogSink for RecordingLogSink {
+    fn try_emit(&self, event: OperationalEventV1) -> Result<(), LogSinkError> {
+        self.events
+            .lock()
+            .map_err(|_| LogSinkError::Unavailable)?
+            .push(event);
+        Ok(())
+    }
+}
+
+impl RecordingLogSink {
+    fn snapshot(&self) -> Result<Vec<OperationalEventV1>, Box<dyn Error>> {
+        Ok(self.events.lock().map_err(|_| "log sink lock")?.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_node_action_emits_correlated_start_and_terminal_logs() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let store = Arc::new(
+        SqliteStore::open(
+            directory.path().join("full-node-logs.sqlite3"),
+            SqliteStoreConfig::TEST,
+        )
+        .await?,
+    );
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let sink = Arc::new(RecordingLogSink::default());
+    let request = full_node_action_request(scope)?.with_operational_logs(sink.clone());
+    let request_id = request.request_id();
+    let invocation_id = request.invocation_id();
+    let outcome = ActionExecutor::new(
+        RuntimeSupervisor::start(RuntimeLimits::builder(1, 2).build()?)?,
+        store,
+    )
+    .with_node_runtime(Arc::new(SuccessfulNode))
+    .execute(request)
+    .await?;
+
+    assert_eq!(
+        outcome.value,
+        CanonicalValue::String("node-result".to_owned())
+    );
+    let events = sink.snapshot()?;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, LogEventKind::InvocationStarted);
+    assert_eq!(events[1].kind, LogEventKind::InvocationCompleted);
+    assert_eq!(events[0].request_id, request_id);
+    assert_eq!(events[1].request_id, request_id);
+    assert_eq!(events[0].invocation_id, invocation_id);
+    assert_eq!(events[1].invocation_id, invocation_id);
+    assert_eq!(
+        events[1].outcome_code.as_ref().map(OutcomeCode::as_str),
+        Some("OK")
+    );
+    assert!(events[1].duration_micros.is_some());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_full_node_action_emits_one_sanitized_terminal_log() -> Result<(), Box<dyn Error>> {
+    let directory = TempDir::new()?;
+    let store = Arc::new(
+        SqliteStore::open(
+            directory.path().join("failed-full-node-logs.sqlite3"),
+            SqliteStoreConfig::TEST,
+        )
+        .await?,
+    );
+    let scope = EnvironmentScope::new(ProjectId::generate(), EnvironmentId::generate());
+    let sink = Arc::new(RecordingLogSink::default());
+    let request = full_node_action_request(scope)?.with_operational_logs(sink.clone());
+    let result = ActionExecutor::new(
+        RuntimeSupervisor::start(RuntimeLimits::builder(1, 2).build()?)?,
+        store,
+    )
+    .with_node_runtime(Arc::new(FailingNode))
+    .execute(request)
+    .await;
+
+    assert_eq!(
+        result,
+        Err(ActionExecutionError::Runtime(RuntimeError::JavaScript))
+    );
+    let events = sink.snapshot()?;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].kind, LogEventKind::InvocationCompleted);
+    assert_eq!(events[1].level, LogLevel::Error);
+    assert_eq!(
+        events[1].outcome_code.as_ref().map(OutcomeCode::as_str),
+        Some("RUNTIME_JAVASCRIPT_ERROR")
+    );
+    assert!(events[1].message.is_none());
+    assert!(events[1].fields.is_none());
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn action_run_after_is_durable_idempotent_and_release_pinned() -> Result<(), Box<dyn Error>> {
@@ -220,6 +359,50 @@ fn action_request(
         Arc::new(manifest),
         artifact,
         CanonicalValue::String("payload".to_owned()),
+        Duration::from_secs(2),
+        CancellationToken::new(),
+    )?)
+}
+
+fn full_node_action_request(scope: EnvironmentScope) -> Result<InvocationRequest, Box<dyn Error>> {
+    let source = "export default async () => 'node-result';\n";
+    let bundle = NodeEsmBundleV1::from_sources([source])?;
+    let artifact: Arc<[u8]> = encode_node_esm_bundle(&bundle)?.into();
+    let release_id = ReleaseId::generate();
+    let function_id = FunctionId::generate();
+    let manifest = ReleaseManifestV1 {
+        release_id,
+        project_id: scope.project_id(),
+        build_id: BuildId::generate(),
+        created_at: TimestampMicros::new(1_700_000_000_000_000),
+        runtime_version: "runku-hybrid".parse()?,
+        artifact: bundle.descriptor()?,
+        function_contract_hash: Sha256Digest::from_bytes([1; 32]),
+        schema_contract_hash: Sha256Digest::from_bytes([2; 32]),
+        index_contract_hash: Sha256Digest::from_bytes([3; 32]),
+        functions: vec![FunctionManifest {
+            id: function_id,
+            name: "tests.node".parse()?,
+            function_type: FunctionType::Action,
+            visibility: FunctionVisibility::Public,
+            auth_policy: AuthPolicy::None,
+            runtime_class: RuntimeClass::FullNode,
+            implementation_hash: Sha256Digest::of(source.as_bytes()),
+            arguments_contract_hash: Sha256Digest::from_bytes([4; 32]),
+            result_contract_hash: Sha256Digest::from_bytes([5; 32]),
+            capabilities: Vec::new(),
+        }],
+        cron_definitions: Vec::new(),
+    };
+    Ok(InvocationRequest::new(
+        scope,
+        release_id,
+        RequestId::generate(),
+        InvocationId::generate(),
+        function_id,
+        Arc::new(manifest),
+        artifact,
+        CanonicalValue::Null,
         Duration::from_secs(2),
         CancellationToken::new(),
     )?)
