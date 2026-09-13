@@ -1432,7 +1432,11 @@ pub struct ManagementReleaseStatus {
 pub struct ManagementReleaseDetail {
     /// Immutable Release identity.
     pub release_id: String,
-    /// Current lifecycle state.
+    /// Current Release lifecycle state, not a routing or traffic summary. In Management v1,
+    /// `servable` means the immutable Release is eligible for direct or policy-based execution,
+    /// while `active_reasons` and `weight_percent` describe its actual references and traffic.
+    /// Renaming or splitting this field requires a future versioned Management contract instead
+    /// of reinterpreting the existing value.
     pub status: String,
     /// Immutable build identity.
     pub build_id: String,
