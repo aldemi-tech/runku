@@ -29,7 +29,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@playwright/test": "1.62.1",
+    "@playwright/test": "1.63.0",
     "@types/better-sqlite3": "7.6.13",
     "@types/node": "24.10.1",
     "@types/react": "19.2.2",
