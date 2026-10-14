@@ -107,7 +107,7 @@ jobs:
             npm pack ./packages/server --pack-destination out/npm
             npm pack ./packages/cli --pack-destination out/npm
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-npm-independent
           path: out
@@ -142,7 +142,7 @@ jobs:
               -f out/archive/runku-selfhost-v${VERSION}/compose.s3-files.yaml \
               config --quiet
           rm out/archive/runku-selfhost-v${VERSION}/.env
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-selfhost
           path: out/release/*
@@ -264,7 +264,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force out/npm | Out-Null
           npm pack './${{ steps.prepare.outputs.package_directory }}' --pack-destination out/npm
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -320,7 +320,7 @@ jobs:
           install -m 0644 distribution/SERVER-README.md "out/archive/${archive_base}/README.md"
           install -m 0644 LICENSE "out/archive/${archive_base}/LICENSE"
           tar -czf "out/release/${archive_base}.tar.gz" -C out/archive "$archive_base"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-server-${{ matrix.target }}
           path: out
@@ -397,7 +397,7 @@ jobs:
           docker buildx imagetools inspect \
             "ghcr.io/aldemi-tech/runku-server:${IMAGE_TAG}" \
             >out/release/runku-server-image.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-server-image-metadata
           path: out
