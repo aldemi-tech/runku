@@ -19,7 +19,7 @@
     "@runku/client": "workspace:*",
     "@runku/react": "workspace:*",
     "@runku/server": "workspace:*",
-    "next": "16.3.3",
+    "next": "16.4.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
